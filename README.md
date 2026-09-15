@@ -1,5 +1,8 @@
 # soroban-lens
 
+[![CI](https://github.com/soroban-forge-labs/soroban-lens/actions/workflows/ci.yml/badge.svg)](https://github.com/soroban-forge-labs/soroban-lens/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+
 **See what your Soroban contracts are actually emitting.**
 
 An event indexer and explorer for [Stellar](https://developers.stellar.org)
@@ -26,7 +29,7 @@ two are independent and share no code.
 ### With Docker
 
 ```bash
-git clone https://github.com/<your-org>/soroban-lens
+git clone https://github.com/soroban-forge-labs/soroban-lens
 cd soroban-lens
 cp .env.example .env
 docker compose up

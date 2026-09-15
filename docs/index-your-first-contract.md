@@ -19,7 +19,7 @@ quieter.
 ## 1. Clone and configure (1 min)
 
 ```bash
-git clone https://github.com/<your-org>/soroban-lens
+git clone https://github.com/soroban-forge-labs/soroban-lens
 cd soroban-lens
 cp .env.example .env
 ```
