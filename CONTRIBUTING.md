@@ -139,9 +139,13 @@ decoding cases the file is there to cover.
 
 ## Filing issues
 
-[ISSUES.md](./ISSUES.md) has 15 scoped follow-ups, three per module, tagged
-**trivial** / **medium** / **high**. Good places to start are the ones tagged
-trivial.
+[ISSUES.md](./ISSUES.md) has 100 scoped follow-ups, twenty per module, tagged
+**trivial** / **medium** / **high**. It opens with a "Where to start" list of
+issues that need one file each, and a note on which two are the real ceilings on
+what soroban-lens can do.
+
+Comment on an issue before you start it — a number of them overlap, and the file
+says so where they do.
 
 For a new issue, say which module it belongs to and what the user-visible
 symptom is. "The UI hangs on a contract with 10 000 events" beats "pagination is

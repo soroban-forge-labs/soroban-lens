@@ -194,7 +194,7 @@ npm run build -w @soroban-lens/api
 - [docs/index-your-first-contract.md](./docs/index-your-first-contract.md) — the 5-minute walkthrough
 - [docs/architecture.md](./docs/architecture.md) — how data flows, and why
 - [docs/troubleshooting.md](./docs/troubleshooting.md) — when it does not work
-- [ISSUES.md](./ISSUES.md) — 15 scoped follow-up issues, 3 per module
+- [ISSUES.md](./ISSUES.md) — 100 scoped follow-up issues, 20 per module
 - [packages/api/openapi.json](./packages/api/openapi.json) — API contract
 
 ## Security

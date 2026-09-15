@@ -12,7 +12,7 @@ rules:
   # v0.1 is intentionally read-only and unauthenticated — see the Security
   # section of README.md. Declaring a fake security scheme to satisfy a linter
   # would misrepresent the API to anyone generating a client from this spec.
-  # Auth and rate limiting are tracked as ISSUES.md #9; when that lands, this
+  # Auth and rate limiting are tracked as ISSUES.md #43; when that lands, this
   # line comes out and `security` gets defined for real.
   security-defined: off
 

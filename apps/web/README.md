@@ -81,5 +81,5 @@ issue.
 
 `npm test -w @soroban-lens/web` runs the production build, which type-checks
 every component under `strict` with `noUnusedLocals`. There is no component test
-runner in v0.1 — adding one is a tracked issue, and it is the most valuable
-thing anyone could contribute to this module.
+runner in v0.1 — adding one is [ISSUES.md #62](../../ISSUES.md), and it is the
+most valuable thing anyone could contribute to this module.
