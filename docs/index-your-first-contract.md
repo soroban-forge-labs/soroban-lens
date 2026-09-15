@@ -5,7 +5,7 @@ Node-only path is at the bottom.
 
 ## What you need
 
-- Docker, or Node 22.12+
+- Docker, or Node 22.13+
 - A Soroban contract id on testnet (`C…`, 56 characters)
 
 No contract of your own yet? Use

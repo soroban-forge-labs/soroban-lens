@@ -79,7 +79,10 @@ most common mainnet mistake.
 
 ## `Cannot find module 'node:sqlite'`
 
-Node is too old. soroban-lens needs **22.12+**.
+Node is too old. soroban-lens needs **22.13+** — that is the version where
+`node:sqlite` became usable without the `--experimental-sqlite` flag. On 22.12
+and earlier the module does not exist at all and you get
+`ERR_UNKNOWN_BUILTIN_MODULE`.
 
 ```bash
 node --version

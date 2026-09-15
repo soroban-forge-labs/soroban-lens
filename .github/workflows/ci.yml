@@ -18,8 +18,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 22.12 is the floor (`node:sqlite` lands there); 24 is current LTS.
-        node: ['22.12', '24']
+        # 22.13 is the floor: `node:sqlite` loses its --experimental-sqlite
+        # flag there. Pinning the exact floor is the point — it is what caught
+        # this being documented as 22.12. 24 is the current LTS.
+        node: ['22.13', '24']
 
     steps:
       - uses: actions/checkout@v4
@@ -75,14 +77,15 @@ jobs:
           [ "$COUNT" -gt 0 ] || { echo "expected indexed events from the fixture"; exit 1; }
 
   openapi:
-    name: OpenAPI spec is valid
+    name: OpenAPI spec lints clean
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Validate packages/api/openapi.json
+      - name: Lint packages/api/openapi.json
+        # Ruleset and the two deliberate exceptions are in redocly.yaml.
         run: npx --yes @redocly/cli@latest lint packages/api/openapi.json --format stylish
 
   docker:

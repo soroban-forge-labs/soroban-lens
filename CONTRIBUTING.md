@@ -76,7 +76,7 @@ route without documenting it and CI fails.
 ## Getting set up
 
 ```bash
-npm install          # Node 22.12+
+npm install          # Node 22.13+
 npm run build
 npm test
 ```

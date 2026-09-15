@@ -43,7 +43,8 @@ or API if the RPC is unreachable or the volume is not writable.
 
 ### Without Docker
 
-Needs **Node 22.12+** (for the built-in `node:sqlite`; no native compilation).
+Needs **Node 22.13+** — the version where `node:sqlite` stopped requiring the
+`--experimental-sqlite` flag. No native compilation either way.
 
 ```bash
 npm install

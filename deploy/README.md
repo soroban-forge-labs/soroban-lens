@@ -69,6 +69,7 @@ over it.
 
 ## Node version
 
-Images use **Node 26**. The floor is **22.12**, where `node:sqlite` became
-available — using the built-in driver is what keeps these images free of a
-native build toolchain. CI tests against 22.12 and 24.
+Images use **Node 26**. The floor is **22.13**, the version where `node:sqlite`
+stopped requiring `--experimental-sqlite` (it was added behind that flag back in
+22.5). Using the built-in driver is what keeps these images free of a native
+build toolchain. CI tests against 22.13 and 24.

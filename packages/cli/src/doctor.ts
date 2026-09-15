@@ -14,9 +14,15 @@ export interface CheckResult {
   fix?: string;
 }
 
-/** Minimum Node version. `node:sqlite` is only available from 22.12. */
+/**
+ * Minimum Node version.
+ *
+ * `node:sqlite` was added in 22.5 behind `--experimental-sqlite`, and the flag
+ * was dropped in **22.13**. Anything earlier throws ERR_UNKNOWN_BUILTIN_MODULE
+ * on import, so 22.13 is the real floor rather than "22.x".
+ */
 const MIN_NODE_MAJOR = 22;
-const MIN_NODE_MINOR = 12;
+const MIN_NODE_MINOR = 13;
 
 /**
  * Preflight checks, run before anyone waits on a silent failure.

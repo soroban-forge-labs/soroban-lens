@@ -1,0 +1,27 @@
+# Redocly lint configuration for packages/api/openapi.json.
+#
+# The `recommended` ruleset is kept, including every structural check that
+# decides whether the document is a valid OpenAPI 3.1 spec. Only two opinionated
+# rules are disabled, both because they contradict a documented and deliberate
+# v0.1 decision rather than because they are inconvenient.
+
+extends:
+  - recommended
+
+rules:
+  # v0.1 is intentionally read-only and unauthenticated — see the Security
+  # section of README.md. Declaring a fake security scheme to satisfy a linter
+  # would misrepresent the API to anyone generating a client from this spec.
+  # Auth and rate limiting are tracked as ISSUES.md #9; when that lands, this
+  # line comes out and `security` gets defined for real.
+  security-defined: off
+
+  # The only server is http://localhost:8080, because soroban-lens is something
+  # you run yourself. There is no hosted instance to point at, and offering one
+  # is explicitly out of scope (see "Not planned" in ISSUES.md).
+  no-server-example.com: off
+
+  # Left ON, as a warning: several endpoints (/health, /stats, /contracts) do
+  # not document a 4xx. That is accurate today — they take no parameters that
+  # can be rejected — but it is worth re-checking whenever a parameter is added.
+  operation-4xx-response: warn
