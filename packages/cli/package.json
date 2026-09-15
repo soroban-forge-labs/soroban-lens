@@ -1,0 +1,22 @@
+{
+  "name": "@soroban-lens/cli",
+  "version": "0.1.0",
+  "description": "Module 5 — lens CLI: doctor preflight, indexer runner, fixture seeding.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": "./dist/index.js" },
+  "bin": { "lens": "./dist/bin.js" },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@soroban-lens/ingest": "*",
+    "@soroban-lens/store": "*"
+  },
+  "devDependencies": { "typescript": "^5.9.0", "@types/node": "^22.10.0" }
+}

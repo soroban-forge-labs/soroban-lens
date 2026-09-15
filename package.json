@@ -1,0 +1,30 @@
+{
+  "name": "soroban-lens",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Event indexer and explorer for Soroban smart contracts on Stellar.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "workspaces": [
+    "packages/ingest",
+    "packages/store",
+    "packages/api",
+    "packages/cli",
+    "apps/web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "clean": "rm -rf packages/*/dist apps/web/dist",
+    "lens": "node packages/cli/dist/bin.js",
+    "doctor": "node packages/cli/dist/bin.js doctor",
+    "seed": "node packages/cli/dist/bin.js seed",
+    "index": "node packages/cli/dist/bin.js index",
+    "api": "node packages/api/dist/bin.js",
+    "web": "npm run dev --workspace @soroban-lens/web"
+  }
+}

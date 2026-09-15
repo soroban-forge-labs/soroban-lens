@@ -1,0 +1,42 @@
+# Shared image for the indexer and the API.
+#
+# Node 26 rather than 22: `node:sqlite` is built in, so there is no native
+# compilation step and no build toolchain in the final image.
+FROM node:26-alpine
+
+WORKDIR /app
+
+# Copy manifests first so `npm ci` is cached until a dependency actually changes.
+COPY package.json package-lock.json ./
+COPY packages/ingest/package.json  packages/ingest/
+COPY packages/store/package.json   packages/store/
+COPY packages/api/package.json     packages/api/
+COPY packages/cli/package.json     packages/cli/
+COPY apps/web/package.json         apps/web/
+
+# The web app is a separate image; skip its (large) dev dependencies here.
+RUN npm ci --workspace @soroban-lens/ingest \
+           --workspace @soroban-lens/store \
+           --workspace @soroban-lens/api \
+           --workspace @soroban-lens/cli \
+           --include-workspace-root
+
+COPY tsconfig.base.json ./
+COPY packages/ packages/
+COPY fixtures/ fixtures/
+
+RUN npm run build --workspace @soroban-lens/store \
+                  --workspace @soroban-lens/ingest \
+                  --workspace @soroban-lens/api \
+                  --workspace @soroban-lens/cli
+
+# The data volume is owned by the unprivileged `node` user that ships with the
+# image; running as root here would leave root-owned files on a bind mount.
+RUN mkdir -p /app/data && chown -R node:node /app/data
+USER node
+
+ENV LENS_DB_PATH=/app/data/lens.db \
+    LENS_DATA_DIR=/app/data \
+    NODE_ENV=production
+
+CMD ["node", "packages/cli/dist/bin.js", "doctor"]

@@ -1,0 +1,87 @@
+# soroban-lens — the whole stack.
+#
+#   cp .env.example .env    # edit LENS_CONTRACT_IDS if you like
+#   docker compose up
+#
+# Then open http://localhost:5173.
+
+name: soroban-lens
+
+services:
+  # Fails fast and loudly if the RPC is unreachable or the volume is not
+  # writable, so the indexer and API never start into a broken environment.
+  doctor:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.node
+    environment:
+      LENS_NETWORK: ${LENS_NETWORK:-testnet}
+      LENS_RPC_URL: ${LENS_RPC_URL:-}
+      LENS_CONTRACT_IDS: ${LENS_CONTRACT_IDS:-CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC}
+    volumes:
+      - lens-data:/app/data
+    command: ["node", "packages/cli/dist/bin.js", "doctor"]
+
+  indexer:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.node
+    depends_on:
+      doctor:
+        condition: service_completed_successfully
+    environment:
+      LENS_NETWORK: ${LENS_NETWORK:-testnet}
+      LENS_RPC_URL: ${LENS_RPC_URL:-}
+      LENS_CONTRACT_IDS: ${LENS_CONTRACT_IDS:-CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC}
+      LENS_START_LEDGER: ${LENS_START_LEDGER:-}
+      LENS_PAGE_SIZE: ${LENS_PAGE_SIZE:-200}
+      LENS_POLL_INTERVAL_MS: ${LENS_POLL_INTERVAL_MS:-2000}
+    volumes:
+      - lens-data:/app/data
+    command: ["node", "packages/cli/dist/bin.js", "index"]
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.node
+    depends_on:
+      doctor:
+        condition: service_completed_successfully
+    environment:
+      LENS_API_PORT: 8080
+      LENS_NETWORK: ${LENS_NETWORK:-testnet}
+      LENS_CORS_ORIGIN: ${LENS_CORS_ORIGIN:-*}
+    ports:
+      - "${LENS_API_PORT:-8080}:8080"
+    volumes:
+      # The API only reads. SQLite in WAL mode still needs to write the -shm and
+      # -wal sidecars, so this cannot be a read-only mount.
+      - lens-data:/app/data
+    command: ["node", "packages/api/dist/bin.js"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+      args:
+        # Baked into the bundle at build time. It is the URL the *browser* uses,
+        # so it is localhost — the host's port mapping — not the compose service
+        # name, which only resolves inside the network.
+        VITE_LENS_NETWORKS: ${LENS_WEB_NETWORKS:-{"testnet":"http://localhost:8080"}}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${LENS_WEB_PORT:-5173}:8080"
+    restart: unless-stopped
+
+volumes:
+  lens-data:

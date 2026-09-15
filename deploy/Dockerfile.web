@@ -1,0 +1,33 @@
+# Web UI — build with Node, serve as static files.
+#
+# Vite inlines VITE_* variables at BUILD time, so the API URL must be known when
+# the bundle is produced, not when the container starts. Compose passes it as a
+# build arg; changing it means rebuilding this image, not restarting it.
+
+FROM node:26-alpine AS build
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY apps/web/package.json apps/web/
+RUN npm ci --workspace @soroban-lens/web --include-workspace-root
+
+COPY apps/web/ apps/web/
+
+ARG VITE_LENS_NETWORKS='{"testnet":"http://localhost:8080"}'
+ENV VITE_LENS_NETWORKS=$VITE_LENS_NETWORKS
+RUN npm run build --workspace @soroban-lens/web
+
+
+# The output is plain static files, so the runtime image needs a web server and
+# nothing else — no Node, no node_modules, no source. `vite preview` is a
+# development server and is deliberately not used here.
+#
+# nginx-unprivileged runs as a non-root user and listens on 8080, so nothing in
+# the stack needs root.
+FROM nginxinc/nginx-unprivileged:1.29-alpine
+
+COPY --from=build /app/apps/web/dist /usr/share/nginx/html
+COPY deploy/web-nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 8080

@@ -1,0 +1,19 @@
+{
+  "name": "@soroban-lens/ingest",
+  "version": "0.1.0",
+  "description": "Module 1 — Soroban RPC client, event polling, cursor tracking.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": "./dist/index.js" },
+  "bin": { "soroban-lens-ingest": "./dist/bin.js" },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.js"
+  },
+  "dependencies": { "@stellar/stellar-sdk": "^17.1.0" },
+  "devDependencies": { "typescript": "^5.9.0", "@types/node": "^22.10.0" }
+}

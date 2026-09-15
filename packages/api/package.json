@@ -1,0 +1,19 @@
+{
+  "name": "@soroban-lens/api",
+  "version": "0.1.0",
+  "description": "Module 3 — HTTP query API over indexed Soroban events.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": "./dist/index.js" },
+  "bin": { "soroban-lens-api": "./dist/bin.js" },
+  "files": ["dist", "openapi.json"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.js"
+  },
+  "dependencies": { "@soroban-lens/store": "*" },
+  "devDependencies": { "typescript": "^5.9.0", "@types/node": "^22.10.0" }
+}

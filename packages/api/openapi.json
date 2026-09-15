@@ -1,0 +1,859 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "soroban-lens Query API",
+    "version": "0.1.0",
+    "summary": "Read-only HTTP API over indexed Soroban contract events.",
+    "description": "Serves events indexed from a Soroban RPC node. Read-only and unauthenticated in v0.1.\n\nPagination is keyset-based: pass the `nextCursor` from a response back as `cursor`. Pages stay stable while the indexer writes new events behind them, which offset pagination cannot promise.\n\nDecoded integer values are JSON **strings**, not numbers. Soroban `i128`/`u128` amounts routinely exceed `Number.MAX_SAFE_INTEGER`, so treating them as numbers loses precision on large transfers. Decoded `bytes` are lower-case hex strings.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "Local development"
+    }
+  ],
+  "tags": [
+    {
+      "name": "events",
+      "description": "Indexed contract events"
+    },
+    {
+      "name": "contracts",
+      "description": "Contracts seen by the indexer"
+    },
+    {
+      "name": "system",
+      "description": "Health and indexer progress"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Liveness and storage health",
+        "description": "Performs a real write probe against the store, so a read-only volume or a full disk is reported here rather than surfacing later as an indexer failure. Returns 503 when the store is not writable or the schema is out of date.",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Degraded \u2014 store unwritable or schema out of date",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stats": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Row counts and indexed ledger range",
+        "operationId": "getStats",
+        "responses": {
+          "200": {
+            "description": "Statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Stats"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Indexer progress per stream",
+        "description": "Statistics plus the saved cursor of every ingest stream, so a client can show indexer lag without querying the RPC node itself.",
+        "operationId": "getStatus",
+        "responses": {
+          "200": {
+            "description": "Indexer status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/contracts": {
+      "get": {
+        "tags": [
+          "contracts"
+        ],
+        "summary": "List indexed contracts, most recently active first",
+        "operationId": "listContracts",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Contract summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "contracts"
+                  ],
+                  "properties": {
+                    "contracts": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ContractSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/contracts/{contractId}/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "List events emitted by one contract",
+        "operationId": "listContractEvents",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContractId"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Order"
+          },
+          {
+            "$ref": "#/components/parameters/Topic"
+          },
+          {
+            "$ref": "#/components/parameters/FromLedger"
+          },
+          {
+            "$ref": "#/components/parameters/ToLedger"
+          },
+          {
+            "$ref": "#/components/parameters/TxHash"
+          },
+          {
+            "$ref": "#/components/parameters/SuccessfulOnly"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/contracts/{contractId}/topics": {
+      "get": {
+        "tags": [
+          "contracts"
+        ],
+        "summary": "Distinct first-topic values for a contract",
+        "description": "Ranked by frequency. Intended for building a filter UI without scanning every event. Topics that are themselves maps or vecs are not indexed and do not appear.",
+        "operationId": "listContractTopics",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContractId"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Topic counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "contractId",
+                    "topics"
+                  ],
+                  "properties": {
+                    "contractId": {
+                      "$ref": "#/components/schemas/ContractIdString"
+                    },
+                    "topics": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "topic",
+                          "count"
+                        ],
+                        "properties": {
+                          "topic": {
+                            "type": "string",
+                            "examples": [
+                              "transfer"
+                            ]
+                          },
+                          "count": {
+                            "type": "integer",
+                            "examples": [
+                              139
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "List events across every indexed contract",
+        "operationId": "listEvents",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Order"
+          },
+          {
+            "$ref": "#/components/parameters/Topic"
+          },
+          {
+            "$ref": "#/components/parameters/FromLedger"
+          },
+          {
+            "$ref": "#/components/parameters/ToLedger"
+          },
+          {
+            "$ref": "#/components/parameters/TxHash"
+          },
+          {
+            "$ref": "#/components/parameters/SuccessfulOnly"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/events/{eventId}": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Fetch one event by its RPC event id",
+        "operationId": "getEvent",
+        "parameters": [
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "examples": [
+                "0020166232959352832-0000000000"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The event",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "This document",
+        "operationId": "getOpenApi",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document",
+            "content": {
+              "application/json": {}
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "ContractId": {
+        "name": "contractId",
+        "in": "path",
+        "required": true,
+        "description": "Contract StrKey.",
+        "schema": {
+          "$ref": "#/components/schemas/ContractIdString"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "description": "Maximum rows to return.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 50
+        }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "description": "Keyset cursor \u2014 the `nextCursor` of a previous response.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Order": {
+        "name": "order",
+        "in": "query",
+        "description": "Sort direction by ledger.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "desc"
+        }
+      },
+      "Topic": {
+        "name": "topic",
+        "in": "query",
+        "description": "Topic prefix filter, positional and repeatable. `?topic=transfer` matches events whose first topic is `transfer`; `?topic=*&topic=order` matches events whose second topic is `order`. At most 4, because only the first four topic positions are indexed \u2014 note that events themselves may carry more than four topics.",
+        "explode": true,
+        "schema": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "string"
+          }
+        },
+        "examples": {
+          "firstTopic": {
+            "summary": "Any transfer",
+            "value": [
+              "transfer"
+            ]
+          },
+          "withWildcard": {
+            "summary": "Second topic is 'order'",
+            "value": [
+              "*",
+              "order"
+            ]
+          }
+        }
+      },
+      "FromLedger": {
+        "name": "fromLedger",
+        "in": "query",
+        "description": "Inclusive lower bound on ledger sequence.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "ToLedger": {
+        "name": "toLedger",
+        "in": "query",
+        "description": "Inclusive upper bound on ledger sequence.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "TxHash": {
+        "name": "txHash",
+        "in": "query",
+        "description": "Only events emitted by this transaction.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        }
+      },
+      "SuccessfulOnly": {
+        "name": "successfulOnly",
+        "in": "query",
+        "description": "Exclude events from unsuccessful contract calls. Omitted returns both.",
+        "schema": {
+          "type": "boolean"
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "A query parameter was rejected",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such resource",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ContractIdString": {
+        "type": "string",
+        "pattern": "^C[A-Z2-7]{55}$",
+        "examples": [
+          "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+        ]
+      },
+      "DecodedValue": {
+        "type": "object",
+        "description": "A decoded XDR ScVal. Integers are decimal strings and bytes are hex strings, so the payload is lossless under JSON.",
+        "required": [
+          "type",
+          "value"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "ScVal arm, lower-cased. `undecodable` means the raw XDR could not be parsed; the `*Xdr` field still holds the original bytes.",
+            "examples": [
+              "symbol",
+              "i128",
+              "address",
+              "map",
+              "vec",
+              "bytes",
+              "u32",
+              "bool",
+              "undecodable"
+            ]
+          },
+          "value": {
+            "description": "JSON-safe rendering of the value."
+          }
+        },
+        "examples": [
+          {
+            "type": "symbol",
+            "value": "transfer"
+          },
+          {
+            "type": "i128",
+            "value": "100"
+          }
+        ]
+      },
+      "Event": {
+        "type": "object",
+        "required": [
+          "id",
+          "contractId",
+          "type",
+          "ledger",
+          "ledgerClosedAt",
+          "txHash",
+          "transactionIndex",
+          "operationIndex",
+          "inSuccessfulContractCall",
+          "topics",
+          "topicsXdr",
+          "value",
+          "valueXdr",
+          "indexedAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "RPC event id. Fixed width and sorts in ledger order.",
+            "examples": [
+              "0020166232959352832-0000000000"
+            ]
+          },
+          "contractId": {
+            "$ref": "#/components/schemas/ContractIdString"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "contract",
+              "system"
+            ]
+          },
+          "ledger": {
+            "type": "integer",
+            "examples": [
+              4695317
+            ]
+          },
+          "ledgerClosedAt": {
+            "type": "string",
+            "format": "date-time",
+            "examples": [
+              "2026-09-15T19:22:52Z"
+            ]
+          },
+          "txHash": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$"
+          },
+          "transactionIndex": {
+            "type": "integer"
+          },
+          "operationIndex": {
+            "type": "integer"
+          },
+          "inSuccessfulContractCall": {
+            "type": "boolean",
+            "description": "False for events emitted by a contract call that later failed. Such events are still indexed."
+          },
+          "topics": {
+            "type": "array",
+            "description": "Full decoded topic list. May contain more than four entries \u2014 the four-segment limit applies to RPC filters, not to emitted events.",
+            "items": {
+              "$ref": "#/components/schemas/DecodedValue"
+            }
+          },
+          "topicsXdr": {
+            "type": "array",
+            "description": "Original base64 XDR topics.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "value": {
+            "$ref": "#/components/schemas/DecodedValue"
+          },
+          "valueXdr": {
+            "type": "string",
+            "description": "Original base64 XDR value."
+          },
+          "decodeError": {
+            "type": "string",
+            "description": "Present only when decoding failed. The raw XDR fields remain valid."
+          },
+          "indexedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EventPage": {
+        "type": "object",
+        "required": [
+          "events",
+          "nextCursor",
+          "total"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass back as `cursor`. Null on the last page."
+          },
+          "total": {
+            "type": "integer",
+            "description": "Rows matching the filter, ignoring limit and cursor."
+          }
+        }
+      },
+      "ContractSummary": {
+        "type": "object",
+        "required": [
+          "contractId",
+          "eventCount",
+          "firstLedger",
+          "lastLedger",
+          "lastSeenAt"
+        ],
+        "properties": {
+          "contractId": {
+            "$ref": "#/components/schemas/ContractIdString"
+          },
+          "eventCount": {
+            "type": "integer"
+          },
+          "firstLedger": {
+            "type": "integer"
+          },
+          "lastLedger": {
+            "type": "integer"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Stats": {
+        "type": "object",
+        "required": [
+          "eventCount",
+          "contractCount",
+          "minLedger",
+          "maxLedger",
+          "schemaVersion"
+        ],
+        "properties": {
+          "eventCount": {
+            "type": "integer"
+          },
+          "contractCount": {
+            "type": "integer"
+          },
+          "minLedger": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxLedger": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "schemaVersion": {
+            "type": "integer"
+          }
+        }
+      },
+      "StreamState": {
+        "type": "object",
+        "required": [
+          "key",
+          "cursor",
+          "ledger",
+          "updatedAt"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Stream identifier, derived from RPC host and contract set."
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "ledger": {
+            "type": "integer"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Status": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Stats"
+          },
+          {
+            "type": "object",
+            "required": [
+              "streams"
+            ],
+            "properties": {
+              "streams": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/StreamState"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Health": {
+        "type": "object",
+        "required": [
+          "status",
+          "detail",
+          "version",
+          "network",
+          "uptimeSeconds",
+          "events",
+          "contracts",
+          "schemaVersion"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded"
+            ]
+          },
+          "detail": {
+            "type": "string",
+            "examples": [
+              "writable, schema v1, 60 event(s)"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string",
+            "description": "Network this database was indexed from. 'unknown' when the indexer did not report one.",
+            "examples": [
+              "testnet",
+              "mainnet"
+            ]
+          },
+          "uptimeSeconds": {
+            "type": "integer"
+          },
+          "events": {
+            "type": "integer"
+          },
+          "contracts": {
+            "type": "integer"
+          },
+          "schemaVersion": {
+            "type": "integer"
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_parameter",
+                  "not_found",
+                  "method_not_allowed",
+                  "internal_error"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "parameter": {
+                "type": "string",
+                "description": "The offending query parameter, when one is identifiable."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

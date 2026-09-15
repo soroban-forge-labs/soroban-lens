@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch cancels the previous run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.12 is the floor (`node:sqlite` lands there); 24 is current LTS.
+        node: ['22.12', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build all workspaces
+        run: npm run build
+
+      - name: Test all workspaces
+        # Every suite runs against fixtures/testnet-events.json, so CI needs no
+        # network access and cannot be broken by a testnet outage.
+        run: npm test
+
+      - name: lens doctor finds an unreachable RPC
+        # Proves the preflight actually fails rather than passing vacuously.
+        # Uses an unresolvable host so the result is identical with or without
+        # network egress.
+        run: |
+          set +e
+          node packages/cli/dist/bin.js doctor \
+            --rpc-url https://rpc.invalid.soroban-lens-ci \
+            --db "$RUNNER_TEMP/ci.db" --data-dir "$RUNNER_TEMP" \
+            -c CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+          code=$?
+          set -e
+          if [ "$code" -ne 1 ]; then
+            echo "expected lens doctor to exit 1 on an unreachable RPC, got $code"
+            exit 1
+          fi
+
+      - name: End to end against the fixture
+        run: |
+          set -euo pipefail
+          DB="$RUNNER_TEMP/e2e.db"
+          node packages/cli/dist/bin.js seed --db "$DB"
+          node packages/api/dist/bin.js --db "$DB" --port 8080 &
+          API_PID=$!
+          trap 'kill $API_PID 2>/dev/null || true' EXIT
+
+          curl -sf --retry 20 --retry-delay 1 --retry-connrefused \
+            http://127.0.0.1:8080/health > /dev/null
+
+          COUNT=$(curl -sf "http://127.0.0.1:8080/contracts/CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC/events?limit=50" \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).events.length))')
+
+          echo "API returned $COUNT events"
+          [ "$COUNT" -gt 0 ] || { echo "expected indexed events from the fixture"; exit 1; }
+
+  openapi:
+    name: OpenAPI spec is valid
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Validate packages/api/openapi.json
+        run: npx --yes @redocly/cli@latest lint packages/api/openapi.json --format stylish
+
+  docker:
+    name: docker compose builds and serves
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build images
+        run: docker compose build
+
+      - name: Start the API on fixture data
+        # The indexer needs live network access, which a CI runner should not
+        # depend on. Seeding the committed fixture exercises the same image,
+        # the same volume and the same API without reaching the network.
+        run: |
+          set -euo pipefail
+          docker compose run --rm --no-deps -T api node packages/cli/dist/bin.js seed
+          docker compose up -d --no-deps api
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/health && break
+            sleep 2
+          done
+          curl -sf http://localhost:8080/health | tee /dev/stderr | grep -q '"status": "ok"'
+          curl -sf "http://localhost:8080/contracts" | grep -q CDLZFC3S
+
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
