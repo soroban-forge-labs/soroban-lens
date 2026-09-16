@@ -2,6 +2,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { decodeEvent, topicKey } from './decode.js';
+import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
 import { normaliseLimit, type EventStore } from './store.js';
@@ -523,7 +524,7 @@ export class SqliteEventStore implements EventStore {
       .all() as {
       id: string;
       topics_json: string;
-      topics_xdr_json: string;
+      topics_xdr_json: string | Uint8Array;
       value_json: string;
       topic_count: number;
       topic0: string | null;
@@ -544,9 +545,9 @@ export class SqliteEventStore implements EventStore {
         problems.push('topics_json is not valid JSON');
       }
       try {
-        JSON.parse(row.topics_xdr_json);
+        JSON.parse(decompressXdrColumn(row.topics_xdr_json));
       } catch {
-        problems.push('topics_xdr_json is not valid JSON');
+        problems.push('topics_xdr_json is not valid JSON (or not validly compressed)');
       }
       try {
         JSON.parse(row.value_json);
@@ -612,8 +613,8 @@ export class SqliteEventStore implements EventStore {
       transactionIndex: row.transaction_index,
       operationIndex: row.operation_index,
       inSuccessfulContractCall: row.in_successful_call === 1,
-      topic: JSON.parse(row.topics_xdr_json) as string[],
-      value: row.value_xdr,
+      topic: JSON.parse(decompressXdrColumn(row.topics_xdr_json)) as string[],
+      value: decompressXdrColumn(row.value_xdr),
     };
     // Re-decode with the current decoder, from the raw XDR every row keeps for
     // exactly this — indexedAt is left untouched, since it records when the
@@ -621,7 +622,10 @@ export class SqliteEventStore implements EventStore {
     const redecoded = decodeEvent(raw, new Date(row.indexed_at));
     return [
       JSON.stringify(redecoded.topics),
-      JSON.stringify(redecoded.topicsXdr),
+      // A row rewritten by redecode()/repairRow() is written back compressed
+      // regardless of what format it was in before, so both quietly upgrade
+      // any pre-#35 row they happen to touch to the smaller format.
+      encodeXdrColumn(JSON.stringify(redecoded.topicsXdr)),
       redecoded.topics.length,
       topicKey(redecoded.topics[0]),
       topicKey(redecoded.topics[1]),
@@ -629,7 +633,7 @@ export class SqliteEventStore implements EventStore {
       topicKey(redecoded.topics[3]),
       redecoded.value.type,
       JSON.stringify(redecoded.value),
-      redecoded.valueXdr,
+      encodeXdrColumn(redecoded.valueXdr),
       redecoded.decodeError ?? null,
       row.id,
     ];
@@ -662,8 +666,8 @@ interface RawRow {
   transaction_index: number;
   operation_index: number;
   in_successful_call: number;
-  topics_xdr_json: string;
-  value_xdr: string;
+  topics_xdr_json: string | Uint8Array;
+  value_xdr: string | Uint8Array;
   indexed_at: string;
 }
 
@@ -679,7 +683,7 @@ interface EventRow {
   operation_index: number;
   in_successful_call: number;
   topics_json: string;
-  topics_xdr_json: string;
+  topics_xdr_json: string | Uint8Array;
   topic_count: number;
   topic0: string | null;
   topic1: string | null;
@@ -687,7 +691,7 @@ interface EventRow {
   topic3: string | null;
   value_type: string;
   value_json: string;
-  value_xdr: string;
+  value_xdr: string | Uint8Array;
   decode_error: string | null;
   indexed_at: string;
 }
@@ -713,7 +717,7 @@ function buildStatements(db: DatabaseSync): Statements {
   };
 }
 
-type SqlParam = string | number | null;
+type SqlParam = string | number | null | Buffer;
 
 function insertParams(e: LensEvent): SqlParam[] {
   const closedAtUnix = Math.floor(new Date(e.ledgerClosedAt).getTime() / 1000);
@@ -729,7 +733,7 @@ function insertParams(e: LensEvent): SqlParam[] {
     e.operationIndex,
     e.inSuccessfulContractCall ? 1 : 0,
     JSON.stringify(e.topics),
-    JSON.stringify(e.topicsXdr),
+    encodeXdrColumn(JSON.stringify(e.topicsXdr)),
     e.topics.length,
     topicKey(e.topics[0]),
     topicKey(e.topics[1]),
@@ -737,7 +741,7 @@ function insertParams(e: LensEvent): SqlParam[] {
     topicKey(e.topics[3]),
     e.value.type,
     JSON.stringify(e.value),
-    e.valueXdr,
+    encodeXdrColumn(e.valueXdr),
     e.decodeError ?? null,
     e.indexedAt,
   ];
@@ -755,9 +759,9 @@ function rowToEvent(row: EventRow): LensEvent {
     operationIndex: row.operation_index,
     inSuccessfulContractCall: row.in_successful_call === 1,
     topics: JSON.parse(row.topics_json) as DecodedValue[],
-    topicsXdr: JSON.parse(row.topics_xdr_json) as string[],
+    topicsXdr: JSON.parse(decompressXdrColumn(row.topics_xdr_json)) as string[],
     value: JSON.parse(row.value_json) as DecodedValue,
-    valueXdr: row.value_xdr,
+    valueXdr: decompressXdrColumn(row.value_xdr),
     decodeError: row.decode_error ?? undefined,
     indexedAt: row.indexed_at,
   };

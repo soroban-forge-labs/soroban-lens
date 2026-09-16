@@ -207,3 +207,38 @@ test('an arm the running SDK does not recognise degrades to a documented decodeE
   assert.equal(event.topics[0].type, 'undecodable');
   assert.equal(event.topics[0].value, bogus, 'the raw bytes survive intact for later re-decoding');
 });
+
+// ── #35 compress the raw XDR columns ──────────────────────────────────────────
+
+import { compressXdrColumn, decompressXdrColumn, encodeXdrColumn } from '../dist/index.js';
+
+test('compressXdrColumn / decompressXdrColumn round-trip text exactly', () => {
+  // Long enough that gzip's own overhead cannot dominate — a realistic
+  // multi-topic array, not a single short symbol.
+  const original = JSON.stringify(Array.from({ length: 20 }, () => 'AAAADwAAAAh0cmFuc2Zlcg=='));
+  const compressed = compressXdrColumn(original);
+  assert.ok(compressed instanceof Uint8Array);
+  assert.ok(compressed.length < Buffer.byteLength(original, 'utf8'), 'expected the compressed form to be smaller');
+  assert.equal(decompressXdrColumn(compressed), original);
+});
+
+test('decompressXdrColumn passes plain text through unchanged — legacy, pre-#35 rows', () => {
+  const legacy = 'AAAACgAAAAAAAAAAAAAAAAAAAGQ=';
+  assert.equal(decompressXdrColumn(legacy), legacy);
+});
+
+test('encodeXdrColumn keeps a short value as plain text — gzip overhead would grow it', () => {
+  const short = 'AAAACgAAAAAAAAAAAAAAAAAAAGQ='; // 28 bytes, well under gzip's ~18-20 byte overhead margin
+  const encoded = encodeXdrColumn(short);
+  assert.equal(typeof encoded, 'string', 'a short value must not be compressed into something bigger');
+  assert.equal(encoded, short);
+  assert.equal(decompressXdrColumn(encoded), short);
+});
+
+test('encodeXdrColumn compresses a long value, and it still decodes correctly', () => {
+  const long = JSON.stringify(Array.from({ length: 50 }, () => 'AAAADwAAAAh0cmFuc2Zlcg=='));
+  const encoded = encodeXdrColumn(long);
+  assert.notEqual(typeof encoded, 'string', 'expected the long value to be compressed');
+  assert.ok(encoded.length < Buffer.byteLength(long, 'utf8'));
+  assert.equal(decompressXdrColumn(encoded), long);
+});

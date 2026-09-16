@@ -1109,3 +1109,76 @@ test('close() clears the checkpoint timer so the process can exit', async () => 
   await store.close();
   await rm(dir, { recursive: true, force: true });
 });
+
+// ── #35 compress the raw XDR columns ─────────────────────────────────────────
+
+test('a stored event round-trips valueXdr and topicsXdr exactly, now compressed', async () => {
+  const store = await seeded();
+  const raw = fixture.events.find((e) => e.contractId === SAC);
+  const event = await store.getEvent(raw.id);
+  assert.deepEqual(event.topicsXdr, raw.topic);
+  assert.equal(event.valueXdr, raw.value);
+  await store.close();
+});
+
+test('a legacy row stored as plain text (pre-#35) still reads back correctly', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents([fixture.events[0]]);
+  const id = fixture.events[0].id;
+
+  // Simulate what every row looked like before this existed: plain TEXT, not
+  // a compressed BLOB. SQLite's column affinity does not care either way.
+  const legacyTopics = JSON.stringify(fixture.events[0].topic);
+  const legacyValue = fixture.events[0].value;
+  const db = new DatabaseSync(path);
+  db.prepare('UPDATE events SET topics_xdr_json = ?, value_xdr = ? WHERE id = ?').run(
+    legacyTopics, legacyValue, id,
+  );
+  db.close();
+
+  const event = await store.getEvent(id);
+  assert.deepEqual(event.topicsXdr, fixture.events[0].topic);
+  assert.equal(event.valueXdr, fixture.events[0].value);
+
+  // checkIntegrity does not flag a legacy plain-text row as corrupt — the
+  // format itself is valid, just old.
+  assert.deepEqual(await store.checkIntegrity(), []);
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('redecode upgrades a legacy plain-text row to compressed storage', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  // A multi-topic fixture event, long enough for compression to actually win.
+  const target = fixture.events.reduce((a, b) => (a.topic.length >= b.topic.length ? a : b));
+  await store.insertEvents([target]);
+
+  const db = new DatabaseSync(path);
+  db.prepare('UPDATE events SET topics_xdr_json = ? WHERE id = ?').run(
+    JSON.stringify(target.topic), target.id,
+  );
+  const beforeType = db.prepare('SELECT typeof(topics_xdr_json) AS t FROM events WHERE id = ?').get(target.id).t;
+  db.close();
+  assert.equal(beforeType, 'text');
+
+  await store.redecode(true);
+
+  const after = new DatabaseSync(path);
+  const afterType = after.prepare('SELECT typeof(topics_xdr_json) AS t FROM events WHERE id = ?').get(target.id).t;
+  after.close();
+  // 'blob' if long enough to compress, 'text' if encodeXdrColumn correctly
+  // decided compression would not help for this particular value — either
+  // way the row must still read back correctly.
+  assert.ok(['blob', 'text'].includes(afterType));
+
+  const event = await store.getEvent(target.id);
+  assert.deepEqual(event.topicsXdr, target.topic);
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});

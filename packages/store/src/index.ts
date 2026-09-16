@@ -29,6 +29,7 @@ export { SqliteEventStore, INDEXED_TOPIC_DEPTH } from './sqlite-store.js';
 export type { SqliteStoreOptions } from './sqlite-store.js';
 
 export { decodeEvent, decodeScVal, toJsonSafe, scValTypeName, topicKey } from './decode.js';
+export { compressXdrColumn, decompressXdrColumn, encodeXdrColumn } from './xdr-compression.js';
 
 export { MIGRATIONS, LATEST_SCHEMA_VERSION } from './schema.js';
 export { createLogger, formatRecord, resolveLogFormat } from './logger.js';
