@@ -30,6 +30,17 @@ export interface SqliteStoreOptions {
    */
   log?: Logger;
   /**
+   * How often to run PRAGMA wal_checkpoint(TRUNCATE) automatically while the
+   * store is open, in milliseconds. A continuously-writing indexer with a
+   * long-lived reader can otherwise grow `-wal` without bound between
+   * SQLite's own natural checkpoints. 0 disables the timer — for :memory:,
+   * for a short-lived CLI command that opens and closes quickly, or for a
+   * caller that wants to call checkpoint() itself on its own schedule.
+   * Defaults to 60000 (one minute) for a file-backed database, 0 for
+   * :memory:, where there is no WAL to grow.
+   */
+  checkpointIntervalMs?: number;
+  /**
    * How long a filtered COUNT(*) result is reused before being recomputed, in
    * milliseconds. `total` on a page served from cache carries
    * `totalIsEstimate: true`. COUNT(*) with a WHERE clause is a full scan of
@@ -60,6 +71,7 @@ export class SqliteEventStore implements EventStore {
   readonly #now: () => number;
   readonly #countCache = new Map<string, { total: number; expiresAt: number }>();
   #statements: Statements | null = null;
+  #checkpointTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(options: SqliteStoreOptions) {
     this.#path = options.path;
@@ -80,6 +92,20 @@ export class SqliteEventStore implements EventStore {
     this.#db.exec('PRAGMA busy_timeout = 5000');
 
     if (options.migrateOnOpen !== false) this.#migrateSync();
+
+    const defaultInterval = options.path === ':memory:' ? 0 : 60_000;
+    const checkpointIntervalMs = options.checkpointIntervalMs ?? defaultInterval;
+    if (checkpointIntervalMs > 0) {
+      // unref(): a scheduled checkpoint must never be the reason a process
+      // like `lens doctor` or a short CLI command hangs waiting to exit.
+      this.#checkpointTimer = setInterval(() => {
+        this.checkpoint('TRUNCATE').catch((error: unknown) => {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.#log.warn('checkpoint_failed', `periodic WAL checkpoint failed: ${reason}`);
+        });
+      }, checkpointIntervalMs);
+      this.#checkpointTimer.unref();
+    }
   }
 
   get path(): string {
@@ -609,7 +635,15 @@ export class SqliteEventStore implements EventStore {
     ];
   }
 
+  async checkpoint(mode: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE' = 'TRUNCATE'): Promise<void> {
+    if (this.#path === ':memory:') return; // no WAL file to checkpoint
+    // The mode is typed and only ever one of four literal SQL keywords, never
+    // interpolated from anything a caller could inject.
+    this.#db.exec(`PRAGMA wal_checkpoint(${mode})`);
+  }
+
   async close(): Promise<void> {
+    if (this.#checkpointTimer) clearInterval(this.#checkpointTimer);
     this.#db.close();
   }
 }

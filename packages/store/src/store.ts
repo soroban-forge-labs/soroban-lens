@@ -37,6 +37,15 @@ export interface EventStore {
   migrateDown(toVersion: number): Promise<number[]>;
 
   /**
+   * Force a WAL checkpoint. A continuously-writing indexer with a long-lived
+   * reader (the API, kept open by an in-flight request) can grow `-wal`
+   * without bound between natural checkpoints, which looks like a disk leak.
+   * `'TRUNCATE'` — the default — is the only mode that actually shrinks the
+   * file on disk; the others merely flush into the main database.
+   */
+  checkpoint(mode?: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE'): Promise<void>;
+
+  /**
    * Decode and persist raw RPC events.
    * @returns how many rows were newly inserted (duplicates are not counted).
    */

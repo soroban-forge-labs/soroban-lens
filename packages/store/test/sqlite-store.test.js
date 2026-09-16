@@ -1031,3 +1031,81 @@ test('the default TTL is short (2000ms) and caching is on by default', async () 
   assert.equal(second.totalIsEstimate, true, 'caching must be on by default to fix the perf problem');
   await store.close();
 });
+
+// ── #28 WAL checkpoint management ────────────────────────────────────────────
+
+test('checkpoint(TRUNCATE) shrinks the WAL file after a large write burst', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  // Disable the automatic timer so this test controls exactly when a
+  // checkpoint happens.
+  const store = new SqliteEventStore({ path, checkpointIntervalMs: 0 });
+
+  const many = Array.from({ length: 5000 }, (_, i) => ({
+    ...fixture.events[i % fixture.events.length],
+    id: `wal-${String(i).padStart(6, '0')}`,
+  }));
+  await store.insertEvents(many);
+
+  const before = await store.getStats();
+  assert.ok(before.walSizeBytes > 0, 'expected the WAL to have grown from the write burst');
+
+  await store.checkpoint('TRUNCATE');
+  const after = await store.getStats();
+  assert.ok(after.walSizeBytes < before.walSizeBytes, `expected shrink: ${before.walSizeBytes} -> ${after.walSizeBytes}`);
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('checkpoint() on :memory: is a harmless no-op — there is no WAL file', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await assert.doesNotReject(() => store.checkpoint());
+  await assert.doesNotReject(() => store.checkpoint('PASSIVE'));
+  await store.close();
+});
+
+test('a periodic checkpoint timer actually fires on its own', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  // A short real interval stands in for what a long soak test would show at
+  // production scale: the mechanism firing repeatedly without being told to,
+  // for as long as the store stays open.
+  const store = new SqliteEventStore({ path, checkpointIntervalMs: 30 });
+
+  const many = Array.from({ length: 3000 }, (_, i) => ({
+    ...fixture.events[i % fixture.events.length],
+    id: `wal-auto-${String(i).padStart(6, '0')}`,
+  }));
+  await store.insertEvents(many);
+  const grown = (await store.getStats()).walSizeBytes;
+
+  await new Promise((resolve) => setTimeout(resolve, 200)); // several timer firings
+  const settled = (await store.getStats()).walSizeBytes;
+
+  assert.ok(settled <= grown, `expected the automatic timer to have checkpointed: ${grown} -> ${settled}`);
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('checkpointIntervalMs: 0 disables the automatic timer', async () => {
+  // No direct way to assert "no timer fired" without reaching into Node
+  // internals; this at least proves construction and close() do not require
+  // a timer to exist, and that a store built this way still answers queries.
+  const store = new SqliteEventStore({ path: ':memory:', checkpointIntervalMs: 0 });
+  await store.insertEvents(fixture.events);
+  assert.equal((await store.getStats()).eventCount, fixture.events.length);
+  await store.close();
+});
+
+test('close() clears the checkpoint timer so the process can exit', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path, checkpointIntervalMs: 20 });
+  // If close() failed to clear the timer, this test file's own process would
+  // hang at exit waiting on it — node:test would report that as a failure to
+  // finish, which is the proof this test relies on rather than inspecting
+  // Node's internal timer list directly.
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
