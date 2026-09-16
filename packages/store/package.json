@@ -12,7 +12,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.js"
+    "test": "npm run build && node --test test/*.test.js",
+    "bench:count-cache": "npm run build && node bench/count-cache.bench.js"
   },
   "dependencies": { "@stellar/stellar-sdk": "^17.1.0" },
   "devDependencies": { "typescript": "^5.9.0", "@types/node": "^22.10.0" }

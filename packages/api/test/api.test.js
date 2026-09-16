@@ -371,6 +371,12 @@ test('HEAD works on every GET route and returns no body', async () => {
 test('HEAD returns the headers GET would have sent', async () => {
   await withServer(async ({ base }) => {
     for (const path of ['/health', '/events?limit=5']) {
+      // Warm the #26 count cache first: /events?limit=5's `total` carries
+      // totalIsEstimate once cached, which changes the body's byte length.
+      // Comparing HEAD against GET only makes sense once both are looking at
+      // the same (warm) cache state, which is also the realistic steady state
+      // for a path fetched more than once.
+      await fetch(base + path);
       const head = await fetch(base + path, { method: 'HEAD' });
       const get = await fetch(base + path);
       const body = await get.text();

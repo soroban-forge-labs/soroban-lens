@@ -741,7 +741,12 @@ test('redecode without --all only touches rows with a stored decode_error', asyn
   const rewritten = await store.redecode();
   assert.equal(rewritten, 0, 'the fixture has no failed rows to begin with');
   const after = await store.queryEvents({ limit: MAX_QUERY_LIMIT });
-  assert.deepEqual(after, before);
+  // total may now be served from the #26 count cache (totalIsEstimate: true)
+  // on the second call — a cosmetic difference unrelated to what this test
+  // checks, so compare events/nextCursor/total, not the whole object shape.
+  assert.deepEqual(after.events, before.events);
+  assert.equal(after.nextCursor, before.nextCursor);
+  assert.equal(after.total, before.total);
   await store.close();
 });
 
@@ -937,5 +942,92 @@ test('rolling back to the current version is a no-op', async () => {
   const store = new SqliteEventStore({ path: ':memory:' });
   const rolledBack = await store.migrateDown(LATEST_SCHEMA_VERSION);
   assert.deepEqual(rolledBack, []);
+  await store.close();
+});
+
+// ── #26 cache the total count ────────────────────────────────────────────────
+
+test('the first query for a filter returns an exact count, not marked as an estimate', async () => {
+  const store = new SqliteEventStore({ path: ':memory:', countCacheTtlMs: 5000 });
+  await store.insertEvents(fixture.events);
+  const page = await store.queryEvents({ limit: 5 });
+  assert.equal(page.total, fixture.events.length);
+  assert.equal(page.totalIsEstimate, undefined);
+  await store.close();
+});
+
+test('a second query for the same filter within the TTL is served from cache', async () => {
+  let now = 1_000_000;
+  const store = new SqliteEventStore({ path: ':memory:', countCacheTtlMs: 2000, now: () => now });
+  await store.insertEvents(fixture.events);
+
+  const first = await store.queryEvents({ limit: 5 });
+  assert.equal(first.totalIsEstimate, undefined);
+
+  now += 500; // well within the 2000ms TTL
+  const second = await store.queryEvents({ limit: 5, contractId: undefined });
+  assert.equal(second.total, first.total);
+  assert.equal(second.totalIsEstimate, true);
+  await store.close();
+});
+
+test('the cache expires: a query after the TTL recomputes and reflects new rows', async () => {
+  let now = 0;
+  const store = new SqliteEventStore({ path: ':memory:', countCacheTtlMs: 1000, now: () => now });
+  await store.insertEvents(fixture.events);
+
+  const before = await store.queryEvents({ limit: 5 });
+  assert.equal(before.total, fixture.events.length);
+
+  // Within the TTL, a fresh insert is not yet reflected — that staleness is
+  // the deliberate trade for not scanning on every request.
+  now += 500;
+  await store.insertEvents([{ ...fixture.events[0], id: 'extra-one' }]);
+  const stale = await store.queryEvents({ limit: 5 });
+  assert.equal(stale.total, fixture.events.length, 'still serving the cached count');
+  assert.equal(stale.totalIsEstimate, true);
+
+  now += 600; // past the 1000ms TTL from the first query
+  const fresh = await store.queryEvents({ limit: 5 });
+  assert.equal(fresh.total, fixture.events.length + 1);
+  assert.equal(fresh.totalIsEstimate, undefined);
+
+  await store.close();
+});
+
+test('countCacheTtlMs: 0 disables caching — every query is exact and fresh', async () => {
+  const store = new SqliteEventStore({ path: ':memory:', countCacheTtlMs: 0 });
+  await store.insertEvents(fixture.events);
+
+  await store.queryEvents({ limit: 5 });
+  await store.insertEvents([{ ...fixture.events[0], id: 'extra-two' }]);
+  const page = await store.queryEvents({ limit: 5 });
+
+  assert.equal(page.total, fixture.events.length + 1, 'never stale with caching disabled');
+  assert.equal(page.totalIsEstimate, undefined);
+  await store.close();
+});
+
+test('different filters get independent cache entries', async () => {
+  let now = 0;
+  const store = new SqliteEventStore({ path: ':memory:', countCacheTtlMs: 5000, now: () => now });
+  await store.insertEvents(fixture.events);
+
+  const all = await store.queryEvents({ limit: 1 });
+  const scoped = await store.queryEvents({ limit: 1, contractId: SAC });
+  assert.equal(all.totalIsEstimate, undefined, 'a different filter is a cache miss, not reused');
+  assert.equal(scoped.totalIsEstimate, undefined);
+  assert.notEqual(all.total, scoped.total);
+  await store.close();
+});
+
+test('the default TTL is short (2000ms) and caching is on by default', async () => {
+  let now = 0;
+  const store = new SqliteEventStore({ path: ':memory:', now: () => now });
+  await store.insertEvents(fixture.events);
+  await store.queryEvents({ limit: 1 });
+  now += 100;
+  const second = await store.queryEvents({ limit: 1 });
+  assert.equal(second.totalIsEstimate, true, 'caching must be on by default to fix the perf problem');
   await store.close();
 });

@@ -107,6 +107,16 @@ export interface EventPage {
   nextCursor: string | null;
   /** Total rows matching the filter, ignoring limit/cursor. */
   total: number;
+  /**
+   * True when `total` came from a short-lived cache rather than a fresh
+   * COUNT(*) — accurate as of up to `countCacheTtlMs` ago, not this instant.
+   * COUNT(*) with a filter is a full scan of the matching rows; caching it is
+   * what keeps a busy filter's response time from being dominated by a number
+   * most callers show as "about N", not read to the row. Omitted (not false)
+   * on an exact, freshly-computed count, so `total` on every page from before
+   * this existed is unchanged.
+   */
+  totalIsEstimate?: true;
 }
 
 /** Aggregate view of one indexed contract. */

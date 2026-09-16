@@ -29,6 +29,18 @@ export interface SqliteStoreOptions {
    * existed.
    */
   log?: Logger;
+  /**
+   * How long a filtered COUNT(*) result is reused before being recomputed, in
+   * milliseconds. `total` on a page served from cache carries
+   * `totalIsEstimate: true`. COUNT(*) with a WHERE clause is a full scan of
+   * the matching rows — on a busy filter under repeated polling it dominates
+   * response time for a number most UIs render as "about N", not read to the
+   * row. 0 disables caching, for anything that genuinely needs an exact,
+   * instant count on every call. Defaults to 2000ms.
+   */
+  countCacheTtlMs?: number;
+  /** Clock for the count cache's TTL, swappable in tests. Defaults to Date.now. */
+  now?: () => number;
 }
 
 const noopLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -44,11 +56,16 @@ export class SqliteEventStore implements EventStore {
   readonly #db: DatabaseSync;
   readonly #path: string;
   readonly #log: Logger;
+  readonly #countCacheTtlMs: number;
+  readonly #now: () => number;
+  readonly #countCache = new Map<string, { total: number; expiresAt: number }>();
   #statements: Statements | null = null;
 
   constructor(options: SqliteStoreOptions) {
     this.#path = options.path;
     this.#log = options.log ?? noopLogger;
+    this.#countCacheTtlMs = options.countCacheTtlMs ?? 2000;
+    this.#now = options.now ?? Date.now;
     if (options.path !== ':memory:') mkdirSync(dirname(options.path), { recursive: true });
     this.#db = new DatabaseSync(options.path);
 
@@ -194,10 +211,7 @@ export class SqliteEventStore implements EventStore {
     const limit = normaliseLimit(query.limit);
     const order = query.order === 'asc' ? 'ASC' : 'DESC';
     const where = buildWhere(query);
-
-    const totalRow = this.#db
-      .prepare(`SELECT COUNT(*) AS n FROM events ${where.clause}`)
-      .get(...where.values) as { n: number };
+    const { total, isEstimate } = this.#countCached(where);
 
     // Keyset pagination. The cursor is an event id; because ids are fixed-width
     // and sort chronologically, a plain string comparison is the whole
@@ -217,8 +231,33 @@ export class SqliteEventStore implements EventStore {
     return {
       events: page.map(rowToEvent),
       nextCursor: hasMore ? (page.at(-1)?.id ?? null) : null,
-      total: totalRow.n,
+      total,
+      ...(isEstimate ? { totalIsEstimate: true as const } : {}),
     };
+  }
+
+  /**
+   * Cache key is the WHERE clause text plus its bound values — order, limit
+   * and cursor never affect a count, so they are deliberately excluded and
+   * two pages of the same filter share one cache entry.
+   */
+  #countCached(where: { clause: string; values: SqlParam[] }): { total: number; isEstimate: boolean } {
+    const key = `${where.clause}\u0000${JSON.stringify(where.values)}`;
+    if (this.#countCacheTtlMs > 0) {
+      const cached = this.#countCache.get(key);
+      if (cached && cached.expiresAt > this.#now()) {
+        return { total: cached.total, isEstimate: true };
+      }
+    }
+
+    const row = this.#db
+      .prepare(`SELECT COUNT(*) AS n FROM events ${where.clause}`)
+      .get(...where.values) as { n: number };
+
+    if (this.#countCacheTtlMs > 0) {
+      this.#countCache.set(key, { total: row.n, expiresAt: this.#now() + this.#countCacheTtlMs });
+    }
+    return { total: row.n, isEstimate: false };
   }
 
   async listContracts(limit = 100): Promise<ContractSummary[]> {

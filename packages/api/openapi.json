@@ -828,6 +828,10 @@
           "total": {
             "type": "integer",
             "description": "Rows matching the filter, ignoring limit and cursor."
+          },
+          "totalIsEstimate": {
+            "type": "boolean",
+            "description": "True when `total` came from a short-lived cache rather than a fresh COUNT(*) \u2014 accurate as of a couple of seconds ago, not necessarily this instant. Omitted entirely on an exact, freshly-computed count."
           }
         }
       },
