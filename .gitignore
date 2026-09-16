@@ -18,3 +18,5 @@ data/
 
 # Emitted by tsconfig.test.json so node --test has real .js to import.
 apps/web/.test-build/
+# Local data directory
+data/
