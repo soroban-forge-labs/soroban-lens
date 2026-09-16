@@ -191,6 +191,7 @@ npm run build -w @soroban-lens/api
 ## Project docs
 
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — module ownership, interface rules, PR process
+- [CONTRIBUTORS.md](./CONTRIBUTORS.md) — everyone who has contributed code
 - [docs/index-your-first-contract.md](./docs/index-your-first-contract.md) — the 5-minute walkthrough
 - [docs/architecture.md](./docs/architecture.md) — how data flows, and why
 - [docs/troubleshooting.md](./docs/troubleshooting.md) — when it does not work
