@@ -39,6 +39,12 @@ services:
     volumes:
       - lens-data:/app/data
     command: ["node", "packages/cli/dist/bin.js", "index"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "const fs=require('fs'), os=require('os'), path=require('path'); const p=path.join(os.tmpdir(),'lens-indexer-heartbeat'); if(!fs.existsSync(p)) process.exit(0); const t=Number(fs.readFileSync(p,'utf8')); if(Date.now()-t>60000) process.exit(1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
 
   api:
