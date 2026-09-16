@@ -6,6 +6,11 @@ export interface ApiErrorBody {
     message: string;
     /** Present when one specific query parameter is at fault. */
     parameter?: string;
+    /**
+     * Matches X-Request-Id and every structured log record for this request
+     * (#46) — quote it in a bug report and it finds the whole story server-side.
+     */
+    requestId?: string;
   };
 }
 
@@ -43,12 +48,13 @@ export class ApiError extends Error {
     return error;
   }
 
-  toBody(): ApiErrorBody {
+  toBody(requestId?: string): ApiErrorBody {
     return {
       error: {
         code: this.code,
         message: this.message,
         ...(this.parameter ? { parameter: this.parameter } : {}),
+        ...(requestId ? { requestId } : {}),
       },
     };
   }

@@ -1044,7 +1044,8 @@
                   "invalid_parameter",
                   "not_found",
                   "method_not_allowed",
-                  "internal_error"
+                  "internal_error",
+                  "unavailable"
                 ]
               },
               "message": {
@@ -1053,6 +1054,10 @@
               "parameter": {
                 "type": "string",
                 "description": "The offending query parameter, when one is identifiable."
+              },
+              "requestId": {
+                "type": "string",
+                "description": "Matches the X-Request-Id response header and every structured log record for this request (#46) \u2014 quote it in a bug report to find the whole story server-side."
               }
             }
           }

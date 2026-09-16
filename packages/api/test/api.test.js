@@ -899,3 +899,84 @@ test('HEAD /docs works, matching every other GET route', async () => {
     assert.equal(await res.text(), '');
   });
 });
+
+// ── #46 structured request logging with request ids ─────────────────────────
+
+test('every response carries an X-Request-Id header', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/health`);
+    const id = res.headers.get('x-request-id');
+    assert.ok(id && id.length > 0);
+  });
+});
+
+test('an inbound X-Request-Id is honoured rather than replaced', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/health`, { headers: { 'X-Request-Id': 'upstream-abc-123' } });
+    assert.equal(res.headers.get('x-request-id'), 'upstream-abc-123');
+  });
+});
+
+test('an error response body carries the same request id as the header', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/events?limit=not-a-number`);
+    const body = await res.json();
+    assert.equal(res.status, 400);
+    assert.equal(body.error.requestId, res.headers.get('x-request-id'));
+    assert.ok(body.error.requestId.length > 0);
+  });
+});
+
+test('a request_handled log record carries the same id as the response header', async () => {
+  const records = [];
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await store.insertEvents(fixture.events);
+  const log = { debug() {}, info: (e, m, f) => records.push({ event: e, fields: f }), warn() {}, error() {} };
+  const server = createApiServer({ store, log });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const res = await fetch(`${base}/health`);
+    const headerId = res.headers.get('x-request-id');
+    const record = records.find((r) => r.event === 'request_handled');
+    assert.equal(record.fields.requestId, headerId);
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+  }
+});
+
+test('a request_failed (5xx) log record carries the same id as the error body', async () => {
+  const records = [];
+  const dir = await mkdtemp(join(tmpdir(), 'lens-stale-'));
+  const path = join(dir, 'lens.db');
+  const seed = new SqliteEventStore({ path });
+  await seed.insertEvents(fixture.events);
+  await seed.migrateDown(1);
+  await seed.close();
+
+  const store = new SqliteEventStore({ path, migrateOnOpen: false });
+  const log = { debug() {}, info() {}, warn() {}, error: (e, m, f) => records.push({ event: e, fields: f }) };
+  const server = createApiServer({ store, log });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    // #57's stale-schema 503 is not itself a 5xx the error-log path fires on
+    // (only status >= 500 triggers log.error) — 503 IS >= 500, so this is
+    // exactly the request_failed path.
+    const res = await fetch(`${base}/events`);
+    const body = await res.json();
+    assert.equal(res.status, 503);
+    const record = records.find((r) => r.event === 'request_failed');
+    assert.ok(record, 'expected a request_failed log record for a 503');
+    assert.equal(record.fields.requestId, body.error.requestId);
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

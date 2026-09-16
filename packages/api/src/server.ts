@@ -1,6 +1,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { gzipSync, deflateSync } from 'node:zlib';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -288,6 +289,15 @@ export function createApiServer(options: ApiServerOptions): Server {
     // The base is a placeholder; only pathname and search are ever read.
     const url = new URL(req.url ?? '/', 'http://localhost');
 
+    // Honour an id a trusted upstream (a gateway, a load balancer) already
+    // assigned, so the same request keeps one id end to end rather than a
+    // new one appearing at each hop; generate one otherwise. v0.1 already
+    // assumes a trusted network for exactly this kind of header.
+    const inbound = req.headers['x-request-id'];
+    const requestId =
+      (Array.isArray(inbound) ? inbound[0] : inbound)?.trim().slice(0, 200) || randomUUID();
+    res.setHeader('X-Request-Id', requestId);
+
     res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -340,7 +350,7 @@ export function createApiServer(options: ApiServerOptions): Server {
       log.info(
         'request_handled',
         `${req.method} ${url.pathname}${url.search} -> ${status} (${durationMs}ms)`,
-        { method: req.method, path: url.pathname, status, durationMs },
+        { method: req.method, path: url.pathname, status, durationMs, requestId },
       );
     } catch (error) {
       const apiError =
@@ -355,10 +365,10 @@ export function createApiServer(options: ApiServerOptions): Server {
         log.error(
           'request_failed',
           `${req.method} ${url.pathname} -> ${apiError.status}: ${error instanceof Error ? error.stack : error}`,
-          { method: req.method, path: url.pathname, status: apiError.status },
+          { method: req.method, path: url.pathname, status: apiError.status, requestId },
         );
       }
-      send(res, apiError.status, apiError.toBody(), undefined, isHead, req.headers['accept-encoding']);
+      send(res, apiError.status, apiError.toBody(requestId), undefined, isHead, req.headers['accept-encoding']);
     }
   }
 }
