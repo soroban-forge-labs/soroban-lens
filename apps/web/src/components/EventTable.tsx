@@ -1,6 +1,7 @@
 import type { LensEvent } from '../types.js';
 import { EventRow } from './EventRow.js';
 
+// Props for the EventTable component
 interface Props {
   events: LensEvent[];
   showContract: boolean;
