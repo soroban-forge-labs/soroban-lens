@@ -1,5 +1,5 @@
 import { rpc } from '@stellar/stellar-sdk';
-import type { EventBatch, EventFilter, RawEvent, RetentionState } from './types.js';
+import type { EventBatch, EventFilter, EventType, RawEvent, RetentionState } from './types.js';
 import { withRetry, type RetryOptions } from './retry.js';
 
 export interface RpcClientOptions {
@@ -130,14 +130,15 @@ function toRawEvent(e: rpc.Api.RawEventResponse): RawEvent {
 export function buildFilters(
   contractIds: string[],
   topics?: string[][],
+  eventType: EventType = 'contract',
 ): EventFilter[] {
   if (contractIds.length === 0) {
-    return [{ type: 'contract', ...(topics?.length ? { topics } : {}) }];
+    return [{ type: eventType, ...(topics?.length ? { topics } : {}) }];
   }
   const filters: EventFilter[] = [];
   for (let i = 0; i < contractIds.length; i += MAX_CONTRACT_IDS_PER_FILTER) {
     filters.push({
-      type: 'contract',
+      type: eventType,
       contractIds: contractIds.slice(i, i + MAX_CONTRACT_IDS_PER_FILTER),
       ...(topics?.length ? { topics } : {}),
     });

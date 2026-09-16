@@ -401,3 +401,34 @@ test('caughtUp still reflects what the RPC returned, not what survived dedup', a
   const [batch] = await take(poller.stream(), 1);
   assert.equal(batch.progress.caughtUp, false);
 });
+
+// ── #4 expose system events ──────────────────────────────────────────────────
+
+test('buildFilters defaults to contract events, unchanged', () => {
+  assert.deepEqual(buildFilters([]), [{ type: 'contract' }]);
+  assert.deepEqual(buildFilters(['CA']), [{ type: 'contract', contractIds: ['CA'] }]);
+});
+
+test('buildFilters can ask for system and diagnostic events', () => {
+  assert.deepEqual(buildFilters([], undefined, 'system'), [{ type: 'system' }]);
+  assert.deepEqual(buildFilters(['CA'], undefined, 'diagnostic'), [
+    { type: 'diagnostic', contractIds: ['CA'] },
+  ]);
+});
+
+test('the event type reaches the RPC filter, and defaults to contract', async () => {
+  const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
+  const poller = new EventPoller(
+    { contractIds: [SAC], startLedger: 4695000, eventType: 'system' },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  );
+  await take(poller.stream(), 1);
+  assert.equal(client.requests[0].filters[0].type, 'system');
+
+  const plain = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
+  const defaulted = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
+    client: plain, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+  await take(defaulted.stream(), 1);
+  assert.equal(plain.requests[0].filters[0].type, 'contract');
+});

@@ -10,6 +10,14 @@ import { LensRpcClient } from './rpc-client.js';
 import { EventPoller } from './poller.js';
 import { FileCursorStore, MemoryCursorStore } from './cursor.js';
 import { resolveNetwork, NETWORKS } from './networks.js';
+import type { EventType } from './types.js';
+
+const EVENT_TYPES: EventType[] = ['contract', 'system', 'diagnostic'];
+
+function isEventType(value: string): value is EventType {
+  return (EVENT_TYPES as string[]).includes(value);
+}
+
 
 const USAGE = `
 soroban-lens-ingest — stream Soroban contract events as NDJSON
@@ -24,6 +32,7 @@ Options:
       --start-ledger <n>   First ledger to read when no cursor is stored.
       --page-size <n>      Events per RPC page, 1-10000 (default: 200).
       --poll-interval <ms> Wait after catching up to the tip (default: 2000).
+      --type <kind>        contract | system | diagnostic (default: contract).
       --cursor-dir <path>  Where to persist resume state (default: ./data).
       --no-resume          Ignore and do not write any stored cursor.
       --once               Exit once caught up to the current tip.
@@ -49,6 +58,7 @@ async function main(argv: string[]): Promise<number> {
       'start-ledger': { type: 'string' },
       'page-size': { type: 'string' },
       'poll-interval': { type: 'string' },
+      type: { type: 'string' },
       'cursor-dir': { type: 'string' },
       'no-resume': { type: 'boolean' },
       once: { type: 'boolean' },
@@ -81,6 +91,17 @@ async function main(argv: string[]): Promise<number> {
     values['rpc-url'] ?? process.env.LENS_RPC_URL,
   );
 
+  let eventType: EventType = 'contract';
+  if (values.type !== undefined) {
+    if (!isEventType(values.type)) {
+      process.stderr.write(
+        `error: --type must be contract, system or diagnostic, got "${values.type}"\n`,
+      );
+      return 2;
+    }
+    eventType = values.type;
+  }
+
   const client = new LensRpcClient({
     rpcUrl: network.rpcUrl,
     retry: {
@@ -97,6 +118,7 @@ async function main(argv: string[]): Promise<number> {
   const poller = new EventPoller(
     {
       contractIds,
+      eventType,
       ...(values['start-ledger'] ? { startLedger: Number(values['start-ledger']) } : {}),
       ...(values['page-size'] ? { pageSize: Number(values['page-size']) } : {}),
       ...(values['poll-interval'] ? { pollIntervalMs: Number(values['poll-interval']) } : {}),
@@ -112,7 +134,9 @@ async function main(argv: string[]): Promise<number> {
   let emitted = 0;
 
   process.stderr.write(
-    `[ingest] ${network.name} ${network.rpcUrl} watching ${contractIds.length} contract(s)\n`,
+    `[ingest] ${network.name} ${network.rpcUrl} watching ${contractIds.length} contract(s)` +
+      ` type=${eventType}` +
+      '\n',
   );
 
   for await (const batch of poller.stream()) {

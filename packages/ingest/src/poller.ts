@@ -115,7 +115,11 @@ export class EventPoller {
   async *stream(): AsyncGenerator<EventBatch & { progress: PollerProgress }> {
     const pageSize = this.#options.pageSize ?? 200;
     const idleMs = this.#options.pollIntervalMs ?? 2000;
-    const filters = buildFilters(this.#options.contractIds, this.#options.topics);
+    const filters = buildFilters(
+      this.#options.contractIds,
+      this.#options.topics,
+      this.#options.eventType,
+    );
     // At-least-once delivery means a crash mid-write replays the last batch.
     // Module 2 absorbs that with INSERT OR IGNORE, but every other consumer —
     // the NDJSON stdout path, for one — would emit the repeat. Drop repeats
