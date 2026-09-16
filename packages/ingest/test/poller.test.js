@@ -337,3 +337,67 @@ test('a full page below the ceiling is not a ceiling warning', async () => {
   assert.equal(batch.progress.caughtUp, false);
   assert.equal(logs.find((l) => l.includes('RPC ceiling')), undefined);
 });
+
+// ── #11 dedupe within a batch before yielding ────────────────────────────────
+
+test('a replayed batch emits each event exactly once', async () => {
+  const first = [rawEvent(4695317, 0), rawEvent(4695318, 1)];
+  // The same page served twice, which is what at-least-once delivery does
+  // after a crash mid-write.
+  const client = fakeClient([
+    { events: first, cursor: 'cur-1' },
+    { events: [...first, rawEvent(4695319, 2)], cursor: 'cur-2' },
+  ]);
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000, pageSize: 200 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+
+  const batches = await take(poller.stream(), 2);
+  const ids = batches.flatMap((b) => b.events.map((e) => e.id));
+  assert.equal(new Set(ids).size, ids.length, `duplicate ids emitted: ${ids.join(', ')}`);
+  assert.equal(ids.length, 3);
+  assert.equal(batches[1].events.length, 1, 'only the genuinely new event survives');
+});
+
+test('duplicates within a single page are dropped too', async () => {
+  const dupe = rawEvent(4695317, 0);
+  const client = fakeClient([{ events: [dupe, dupe, rawEvent(4695318, 1)], cursor: 'cur-1' }]);
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+
+  const [batch] = await take(poller.stream(), 1);
+  assert.equal(batch.events.length, 2);
+});
+
+test('a page that is entirely duplicates is not yielded but still advances', async () => {
+  const first = [rawEvent(4695317, 0)];
+  const client = fakeClient([
+    { events: first, cursor: 'cur-1' },
+    { events: first, cursor: 'cur-2' },
+    { events: [rawEvent(4695320, 3)], cursor: 'cur-3' },
+  ]);
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+
+  const batches = await take(poller.stream(), 2);
+  assert.deepEqual(batches.map((b) => b.events.length), [1, 1]);
+  assert.equal(batches[1].events[0].ledger, 4695320, 'the all-duplicate page was skipped');
+});
+
+test('caughtUp still reflects what the RPC returned, not what survived dedup', async () => {
+  // A full page of repeats means there IS more history to walk, even though
+  // nothing new came out of it.
+  const events = Array.from({ length: 2 }, (_, i) => rawEvent(4695317 + i, i));
+  const client = fakeClient([
+    { events, cursor: 'cur-1' },
+    { events, cursor: 'cur-2' },
+  ]);
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000, pageSize: 2 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+
+  const [batch] = await take(poller.stream(), 1);
+  assert.equal(batch.progress.caughtUp, false);
+});

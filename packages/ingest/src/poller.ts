@@ -116,6 +116,11 @@ export class EventPoller {
     const pageSize = this.#options.pageSize ?? 200;
     const idleMs = this.#options.pollIntervalMs ?? 2000;
     const filters = buildFilters(this.#options.contractIds, this.#options.topics);
+    // At-least-once delivery means a crash mid-write replays the last batch.
+    // Module 2 absorbs that with INSERT OR IGNORE, but every other consumer —
+    // the NDJSON stdout path, for one — would emit the repeat. Drop repeats
+    // here so "at least once" is not every consumer's problem to solve.
+    const seen = new RecentIds(pageSize * RECENT_ID_WINDOW_PAGES);
 
     let { cursor, startLedger } = await this.#resolveStart();
 
@@ -145,8 +150,11 @@ export class EventPoller {
         throw error;
       }
 
-      const lastLedger = batch.events.at(-1)?.ledger ?? 0;
+      // caughtUp reflects what the RPC returned, not what survived dedup: a
+      // full page of repeats still means there is more history to walk.
       const caughtUp = batch.events.length < pageSize;
+      const fresh = batch.events.filter((event) => seen.add(event.id));
+      const lastLedger = batch.events.at(-1)?.ledger ?? 0;
 
       // A page that came back exactly at the RPC's own ceiling is different
       // from one that merely filled the configured page size: it means a single
@@ -160,9 +168,10 @@ export class EventPoller {
         );
       }
 
-      if (batch.events.length > 0) {
+      if (fresh.length > 0) {
         yield {
           ...batch,
+          events: fresh,
           progress: {
             cursor: batch.cursor,
             ledger: lastLedger,
@@ -253,4 +262,44 @@ function isCursorOutOfRange(error: unknown): boolean {
     /\bno longer (?:available|retained|in the retention window)\b/i.test(message);
 
   return aboutPosition && outOfRange;
+}
+
+/**
+ * How many pages of event ids to remember, as a multiple of the page size.
+ *
+ * A replay re-serves at most the page that was in flight, so one page would
+ * technically do. Three gives room for an overlapping cursor window without
+ * making the set unbounded — at the 10 000 ceiling that is 30 000 ids, a few
+ * megabytes, which is the price of not making every consumer dedupe.
+ */
+const RECENT_ID_WINDOW_PAGES = 3;
+
+/**
+ * Fixed-capacity set of recently seen event ids, in insertion order.
+ *
+ * A plain Set would grow without bound over a long-running index. Map preserves
+ * insertion order, so evicting the oldest key is O(1) and the window slides.
+ */
+class RecentIds {
+  readonly #capacity: number;
+  readonly #ids = new Map<string, true>();
+
+  constructor(capacity: number) {
+    this.#capacity = Math.max(1, capacity);
+  }
+
+  /** Records an id. Returns false when it had already been seen. */
+  add(id: string): boolean {
+    if (this.#ids.has(id)) return false;
+    this.#ids.set(id, true);
+    if (this.#ids.size > this.#capacity) {
+      const oldest = this.#ids.keys().next();
+      if (!oldest.done) this.#ids.delete(oldest.value);
+    }
+    return true;
+  }
+
+  get size(): number {
+    return this.#ids.size;
+  }
 }
