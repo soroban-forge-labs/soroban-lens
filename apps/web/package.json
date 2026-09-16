@@ -1,7 +1,7 @@
 {
   "name": "@soroban-lens/web",
   "version": "0.1.0",
-  "description": "Module 4 — single page Soroban event explorer.",
+  "description": "Module 4 — single-page Soroban event explorer.",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
