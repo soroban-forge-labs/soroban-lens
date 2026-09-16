@@ -4,7 +4,7 @@
     "title": "soroban-lens Query API",
     "version": "0.1.0",
     "summary": "Read-only HTTP API over indexed Soroban contract events.",
-    "description": "Serves events indexed from a Soroban RPC node. Read-only and unauthenticated in v0.1.\n\nPagination is keyset-based: pass the `nextCursor` from a response back as `cursor`. Pages stay stable while the indexer writes new events behind them, which offset pagination cannot promise.\n\nDecoded integer values are JSON **strings**, not numbers. Soroban `i128`/`u128` amounts routinely exceed `Number.MAX_SAFE_INTEGER`, so treating them as numbers loses precision on large transfers. Decoded `bytes` are lower-case hex strings.\n\nEvery route below also accepts `HEAD`, which returns the same status and headers as `GET` with an empty body \u2014 including the `Content-Length` the body would have had. The `head` operations are not listed separately.",
+    "description": "Serves events indexed from a Soroban RPC node. Read-only and unauthenticated in v0.1.\n\nPagination is keyset-based: pass the `nextCursor` from a response back as `cursor`. Pages stay stable while the indexer writes new events behind them, which offset pagination cannot promise.\n\nDecoded integer values are JSON **strings**, not numbers. Soroban `i128`/`u128` amounts routinely exceed `Number.MAX_SAFE_INTEGER`, so treating them as numbers loses precision on large transfers. Decoded `bytes` are lower-case hex strings.\n\nEvery route below also accepts `HEAD`, which returns the same status and headers as `GET` with an empty body \u2014 including the `Content-Length` the body would have had. The `head` operations are not listed separately.\n\nResponses of 1KB or more are gzip- or deflate-compressed when the request's `Accept-Encoding` header allows it, with `Vary: Accept-Encoding` set so a cache in front of this API knows the body varies by that header. A request sending no `Accept-Encoding` \u2014 or `identity` \u2014 always gets uncompressed JSON.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
@@ -191,6 +191,12 @@
             "$ref": "#/components/parameters/TxHash"
           },
           {
+            "$ref": "#/components/parameters/Address"
+          },
+          {
+            "$ref": "#/components/parameters/Search"
+          },
+          {
             "$ref": "#/components/parameters/TransactionIndex"
           },
           {
@@ -369,6 +375,12 @@
           },
           {
             "$ref": "#/components/parameters/TxHash"
+          },
+          {
+            "$ref": "#/components/parameters/Address"
+          },
+          {
+            "$ref": "#/components/parameters/Search"
           },
           {
             "$ref": "#/components/parameters/TransactionIndex"
@@ -622,6 +634,26 @@
           "type": "string"
         },
         "example": "0020166263024140288-0000000002,0020166263024140288-0000000000"
+      },
+      "Address": {
+        "name": "address",
+        "in": "query",
+        "description": "Match any event mentioning this address anywhere \u2014 a topic segment (indexed or beyond the 4-segment ceiling) or nested inside the decoded value. A StrKey: 'G' (account) or 'C' (contract) followed by 55 characters.",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "GBIBH5UV4Q5L7VVJIHWYBTCSUDHJQXQC2V6Y5LOW4D26XNU5NREMIKE4"
+      },
+      "Search": {
+        "name": "search",
+        "in": "query",
+        "description": "Substring match against a decoded event's topics and value, via a trigram full-text index. At least 3 characters \u2014 shorter terms match nothing, since trigram indexing works on 3-character runs.",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "exposure"
       }
     },
     "responses": {
@@ -828,6 +860,10 @@
           "total": {
             "type": "integer",
             "description": "Rows matching the filter, ignoring limit and cursor."
+          },
+          "totalIsEstimate": {
+            "type": "boolean",
+            "description": "True when `total` came from a short-lived cache rather than a fresh COUNT(*) \u2014 accurate as of a couple of seconds ago, not necessarily this instant. Omitted entirely on an exact, freshly-computed count."
           }
         }
       },
@@ -1008,7 +1044,8 @@
                   "invalid_parameter",
                   "not_found",
                   "method_not_allowed",
-                  "internal_error"
+                  "internal_error",
+                  "unavailable"
                 ]
               },
               "message": {
@@ -1017,6 +1054,10 @@
               "parameter": {
                 "type": "string",
                 "description": "The offending query parameter, when one is identifiable."
+              },
+              "requestId": {
+                "type": "string",
+                "description": "Matches the X-Request-Id response header and every structured log record for this request (#46) \u2014 quote it in a bug report to find the whole story server-side."
               }
             }
           }

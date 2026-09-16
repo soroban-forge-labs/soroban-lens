@@ -1,5 +1,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { gzipSync, deflateSync } from 'node:zlib';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -7,6 +9,7 @@ import {
   DEFAULT_MAX_QUERY_LIMIT,
   LATEST_SCHEMA_VERSION,
   type EventStore,
+  type Logger,
 } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
 import { assertContractId, parseEventQuery, parseIds } from './params.js';
@@ -23,7 +26,8 @@ export interface ApiServerOptions {
    * confirm it is pointed where the user thinks it is.
    */
   network?: string;
-  log?: (message: string) => void;
+  /** Structured logger, shared with the store's own logging (#16). Defaults to silent. */
+  log?: Logger;
 }
 
 type Handler = (ctx: {
@@ -201,7 +205,42 @@ const routes: Route[] = [
       contentType: 'application/json; charset=utf-8',
     }),
   },
+  {
+    // A browsable page over the same spec /openapi.json serves, for a
+    // newcomer who would rather click through routes than read raw JSON.
+    // Redoc reads /openapi.json client-side, same-origin, so this route
+    // itself never needs to know the spec's content and stays exempt from
+    // the schema-currency check the same way the JSON route already is.
+    method: 'GET',
+    pattern: /^\/docs$/,
+    exemptFromSchemaCheck: true,
+    handler: async () => ({
+      body: DOCS_HTML,
+      contentType: 'text/html; charset=utf-8',
+    }),
+  },
 ];
+
+/**
+ * Redoc, pinned to an exact version from a CDN — not `@latest`, so an
+ * unrelated Redoc release can never change what this route serves. Reads
+ * /openapi.json itself, so this page carries no spec content of its own and
+ * cannot drift from the committed spec the way a static copy could.
+ */
+const DOCS_HTML = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>soroban-lens API</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>body { margin: 0; padding: 0; }</style>
+</head>
+<body>
+  <redoc spec-url="/openapi.json"></redoc>
+  <script src="https://cdn.jsdelivr.net/npm/redoc@2.5.4/bundles/redoc.standalone.js"></script>
+</body>
+</html>
+`;
 
 /**
  * The committed spec with the live query ceiling patched in.
@@ -238,7 +277,7 @@ function packageRoot(): string {
  */
 export function createApiServer(options: ApiServerOptions): Server {
   const { store } = options;
-  const log = options.log ?? (() => {});
+  const log = options.log ?? { debug() {}, info() {}, warn() {}, error() {} };
   const corsOrigin = options.corsOrigin ?? '*';
 
   return createHttpServer((req: IncomingMessage, res: ServerResponse) => {
@@ -249,6 +288,15 @@ export function createApiServer(options: ApiServerOptions): Server {
     const started = Date.now();
     // The base is a placeholder; only pathname and search are ever read.
     const url = new URL(req.url ?? '/', 'http://localhost');
+
+    // Honour an id a trusted upstream (a gateway, a load balancer) already
+    // assigned, so the same request keeps one id end to end rather than a
+    // new one appearing at each hop; generate one otherwise. v0.1 already
+    // assumes a trusted network for exactly this kind of header.
+    const inbound = req.headers['x-request-id'];
+    const requestId =
+      (Array.isArray(inbound) ? inbound[0] : inbound)?.trim().slice(0, 200) || randomUUID();
+    res.setHeader('X-Request-Id', requestId);
 
     res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
@@ -296,8 +344,14 @@ export function createApiServer(options: ApiServerOptions): Server {
         options,
       });
 
-      send(res, result.status ?? 200, result.body, result.contentType, isHead);
-      log(`${req.method} ${url.pathname}${url.search} -> ${result.status ?? 200} (${Date.now() - started}ms)`);
+      send(res, result.status ?? 200, result.body, result.contentType, isHead, req.headers['accept-encoding']);
+      const status = result.status ?? 200;
+      const durationMs = Date.now() - started;
+      log.info(
+        'request_handled',
+        `${req.method} ${url.pathname}${url.search} -> ${status} (${durationMs}ms)`,
+        { method: req.method, path: url.pathname, status, durationMs, requestId },
+      );
     } catch (error) {
       const apiError =
         error instanceof ApiError
@@ -308,11 +362,30 @@ export function createApiServer(options: ApiServerOptions): Server {
         res.setHeader('Retry-After', String(apiError.retryAfterSeconds));
       }
       if (apiError.status >= 500) {
-        log(`${req.method} ${url.pathname} -> ${apiError.status}: ${error instanceof Error ? error.stack : error}`);
+        log.error(
+          'request_failed',
+          `${req.method} ${url.pathname} -> ${apiError.status}: ${error instanceof Error ? error.stack : error}`,
+          { method: req.method, path: url.pathname, status: apiError.status, requestId },
+        );
       }
-      send(res, apiError.status, apiError.toBody(), undefined, isHead);
+      send(res, apiError.status, apiError.toBody(requestId), undefined, isHead, req.headers['accept-encoding']);
     }
   }
+}
+
+// Below this, gzip/deflate's own framing overhead can cost more than it
+// saves — matches the same "measure before compressing unconditionally"
+// finding #35 made for the raw-XDR columns, applied here rather than assumed.
+const COMPRESSION_THRESHOLD_BYTES = 1024;
+
+function pickEncoding(acceptEncoding: string | string[] | undefined): 'gzip' | 'deflate' | undefined {
+  const header = Array.isArray(acceptEncoding) ? acceptEncoding.join(',') : (acceptEncoding ?? '');
+  // Order of preference, not the client's — gzip is at least as well
+  // supported as deflate and typically compresses slightly better, so it
+  // wins when a client (correctly) advertises both with no explicit q-values.
+  if (/(?:^|,)\s*gzip\s*(?:;|,|$)/i.test(header)) return 'gzip';
+  if (/(?:^|,)\s*deflate\s*(?:;|,|$)/i.test(header)) return 'deflate';
+  return undefined;
 }
 
 function send(
@@ -321,17 +394,28 @@ function send(
   body: unknown,
   contentType?: string,
   headOnly = false,
+  acceptEncoding?: string | string[],
 ): void {
   // A handler that already produced a JSON string (the OpenAPI document) passes
   // it through untouched rather than being re-serialised.
   const payload = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+  const rawBytes = Buffer.byteLength(payload);
+
+  const encoding = rawBytes >= COMPRESSION_THRESHOLD_BYTES ? pickEncoding(acceptEncoding) : undefined;
+  const compressed = encoding === 'gzip' ? gzipSync(payload) : encoding === 'deflate' ? deflateSync(payload) : undefined;
+
   res.writeHead(status, {
     'Content-Type': contentType ?? 'application/json; charset=utf-8',
     // Deliberately the length the body *would* have had. RFC 9110 says a HEAD
     // response carries the same Content-Length as the GET, and a client that
     // sizes a request from it would otherwise read zero.
-    'Content-Length': Buffer.byteLength(payload),
+    'Content-Length': compressed ? compressed.length : rawBytes,
+    ...(encoding ? { 'Content-Encoding': encoding } : {}),
+    // A cache or proxy in front of this must know the body varies by this
+    // header, or it can serve a gzipped response to a client that never asked
+    // for one (or vice versa).
+    Vary: 'Accept-Encoding',
     'Cache-Control': 'no-store',
   });
-  res.end(headOnly ? undefined : payload);
+  res.end(headOnly ? undefined : (compressed ?? payload));
 }

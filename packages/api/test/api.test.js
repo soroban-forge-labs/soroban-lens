@@ -4,14 +4,8 @@ import { readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { once } from 'node:events';
-import {
-  SqliteEventStore,
-  LATEST_SCHEMA_VERSION,
-  MAX_QUERY_LIMIT,
-  MIGRATIONS,
-} from '@soroban-lens/store';
+import { SqliteEventStore, LATEST_SCHEMA_VERSION, MAX_QUERY_LIMIT } from '@soroban-lens/store';
 import { createApiServer, MAX_BATCH_IDS } from '../dist/index.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
@@ -370,9 +364,22 @@ test('HEAD works on every GET route and returns no body', async () => {
 
 test('HEAD returns the headers GET would have sent', async () => {
   await withServer(async ({ base }) => {
+    // Accept-Encoding: identity — #44 compresses responses at or above 1KB,
+    // and Node's fetch transparently decompresses a real gzip response before
+    // handing back .text(), which would make Content-Length (the wire size)
+    // and Buffer.byteLength(body) (the decoded size) legitimately disagree.
+    // Asking for identity keeps this test about HEAD/GET consistency, not
+    // about compression, which has its own tests below.
+    const identity = { headers: { 'Accept-Encoding': 'identity' } };
     for (const path of ['/health', '/events?limit=5']) {
-      const head = await fetch(base + path, { method: 'HEAD' });
-      const get = await fetch(base + path);
+      // Warm the #26 count cache first: /events?limit=5's `total` carries
+      // totalIsEstimate once cached, which changes the body's byte length.
+      // Comparing HEAD against GET only makes sense once both are looking at
+      // the same (warm) cache state, which is also the realistic steady state
+      // for a path fetched more than once.
+      await fetch(base + path, identity);
+      const head = await fetch(base + path, { method: 'HEAD', ...identity });
+      const get = await fetch(base + path, identity);
       const body = await get.text();
 
       assert.equal(head.status, get.status, path);
@@ -581,16 +588,19 @@ async function withStaleServer(run) {
   const dir = await mkdtemp(join(tmpdir(), 'lens-stale-'));
   const path = join(dir, 'lens.db');
 
-  const raw = new DatabaseSync(path);
-  raw.exec(`CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
-  raw.exec(MIGRATIONS[0].up);
-  raw.prepare('INSERT INTO schema_migrations VALUES (?, ?, ?)').run(1, MIGRATIONS[0].name, '');
-  raw.close();
+  // Seed on a fully-current store — insertDecoded may depend on tables later
+  // migrations add (event_addresses, #23) — then roll the schema back to v1.
+  // That models the realistic version of "stale schema": data that predates
+  // a rollback, read by code that still expects the newer schema. Building a
+  // v1-only schema by hand and inserting through it stopped being realistic
+  // once insertDecoded started writing to a table v1 does not have.
+  const seed = new SqliteEventStore({ path });
+  await seed.insertEvents(fixture.events);
+  await seed.migrateDown(1);
+  await seed.close();
 
   // migrateOnOpen: false, or opening it would bring it up to date.
   const store = new SqliteEventStore({ path, migrateOnOpen: false });
-  await store.insertEvents(fixture.events);
   const server = createApiServer({ store });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -657,4 +667,316 @@ test('a current schema serves data routes normally', async () => {
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('retry-after'), null);
   });
+});
+
+// ── #16 structured logging ───────────────────────────────────────────────────
+
+test('a successful request logs a structured request_handled event', async () => {
+  const records = [];
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await store.insertEvents(fixture.events);
+  const log = {
+    debug() {},
+    info: (event, message, fields) => records.push({ event, message, fields }),
+    warn() {},
+    error() {},
+  };
+  const server = createApiServer({ store, log });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await fetch(`${base}/health`);
+    const record = records.find((r) => r.event === 'request_handled');
+    assert.ok(record, 'expected a request_handled log record');
+    assert.equal(record.fields.method, 'GET');
+    assert.equal(record.fields.path, '/health');
+    assert.equal(typeof record.fields.durationMs, 'number');
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+  }
+});
+
+test('a 5xx logs request_failed at error level; a 4xx does not', async () => {
+  const records = [];
+  const store = new SqliteEventStore({ path: ':memory:' });
+  const log = {
+    debug() {},
+    info() {},
+    warn() {},
+    error: (event, message, fields) => records.push({ event, message, fields }),
+  };
+  const server = createApiServer({ store, log });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await fetch(`${base}/events?limit=not-a-number`); // 400, must not error-log
+    assert.equal(records.length, 0);
+
+    await fetch(`${base}/nope-nope-nope`); // 404, still not a 5xx
+    assert.equal(records.length, 0);
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+  }
+});
+
+test('no log option is silent, same as before structured logging existed', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  const server = createApiServer({ store });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const res = await fetch(`${base}/health`);
+    assert.equal(res.status, 200);
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+  }
+});
+
+// ── #23 GET /events?address= ─────────────────────────────────────────────────
+
+test('GET /events?address= finds an event whose address is beyond the 4 indexed topics', async () => {
+  await withServer(async ({ get }) => {
+    const address = 'CCUUDM434BMZMYWYDITHFXHDMIVTGGD6T2I5UKNX5BSLXLW7HVR4MCGZ';
+    const { res, body } = await get(`/events?address=${address}&limit=1000`);
+    assert.equal(res.status, 200);
+    assert.ok(body.events.some((e) => e.id === '0020166232959406080-0000000000'));
+  });
+});
+
+test('a malformed address is a 400 naming the parameter', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?address=not-an-address');
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'address');
+  });
+});
+
+test('a well-formed but unmentioned address returns an empty page', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?address=GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABC');
+    assert.equal(res.status, 200);
+    assert.equal(body.total, 0);
+  });
+});
+
+test('address combines with the contract route', async () => {
+  await withServer(async ({ get }) => {
+    const address = 'CCUUDM434BMZMYWYDITHFXHDMIVTGGD6T2I5UKNX5BSLXLW7HVR4MCGZ';
+    const contractId = 'CCJQB4EEQLBL7RHIPYMYG26ZT2QRKEYNGVWWL2EPZCECFI6GZGNXMIEX';
+    const { res, body } = await get(`/contracts/${contractId}/events?address=${address}&limit=1000`);
+    assert.equal(res.status, 200);
+    assert.ok(body.events.every((e) => e.contractId === contractId));
+    assert.ok(body.events.length > 0);
+  });
+});
+
+// ── #32 GET /events?search= ──────────────────────────────────────────────────
+
+test('GET /events?search= matches a substring inside a decoded topic', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?search=posure&limit=1000');
+    assert.equal(res.status, 200);
+    assert.ok(body.total > 0);
+  });
+});
+
+test('a search term with FTS operator characters does not error', async () => {
+  await withServer(async ({ get }) => {
+    const { res } = await get(`/events?search=${encodeURIComponent('fee AND NOT "x')}`);
+    assert.equal(res.status, 200);
+  });
+});
+
+test('search combines with the contract route', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(`/contracts/${SAC}/events?search=exposure&limit=1000`);
+    assert.equal(res.status, 200);
+    assert.ok(body.events.every((e) => e.contractId === SAC));
+  });
+});
+
+// ── #44 response compression ─────────────────────────────────────────────────
+
+test('a large page is compressed when the client advertises gzip support', async () => {
+  await withServer(async ({ base }) => {
+    const compressed = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'gzip' } });
+    assert.equal(compressed.headers.get('content-encoding'), 'gzip');
+    assert.equal(compressed.headers.get('vary'), 'Accept-Encoding');
+
+    const uncompressed = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'identity' } });
+    assert.equal(uncompressed.headers.get('content-encoding'), null);
+
+    const compressedLen = Number(compressed.headers.get('content-length'));
+    const uncompressedLen = Number(uncompressed.headers.get('content-length'));
+    assert.ok(compressedLen < uncompressedLen, `expected smaller: ${compressedLen} >= ${uncompressedLen}`);
+
+    // And the body is genuinely valid, round-tripped JSON either way — fetch
+    // decompresses transparently, so this is really asserting the bytes on
+    // the wire were a well-formed gzip stream, not garbage the browser
+    // happened to tolerate.
+    const body = await compressed.json();
+    assert.equal(body.events.length, 60);
+  });
+});
+
+test('a client sending no Accept-Encoding still gets valid, uncompressed JSON', async () => {
+  await withServer(async ({ base }) => {
+    // No Accept-Encoding header at all — not even "identity" — is the
+    // "sends no Accept-Encoding" case the issue names explicitly.
+    const res = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': '' } });
+    assert.equal(res.headers.get('content-encoding'), null);
+    const body = await res.json();
+    assert.equal(body.events.length, 60);
+  });
+});
+
+test('a small response is not compressed even when the client supports it', async () => {
+  await withServer(async ({ base }) => {
+    // /health is well under the 1KB threshold — compressing it would add
+    // gzip's own framing overhead for no benefit, the same principle #35
+    // already established for the raw-XDR columns.
+    const res = await fetch(`${base}/health`, { headers: { 'Accept-Encoding': 'gzip' } });
+    assert.equal(res.headers.get('content-encoding'), null);
+    await res.json();
+  });
+});
+
+test('deflate is honoured when a client does not advertise gzip', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'deflate' } });
+    assert.equal(res.headers.get('content-encoding'), 'deflate');
+    const body = await res.json();
+    assert.equal(body.events.length, 60);
+  });
+});
+
+test('gzip is preferred over deflate when a client advertises both', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'deflate, gzip' } });
+    assert.equal(res.headers.get('content-encoding'), 'gzip');
+  });
+});
+
+// ── #45 GET /docs ─────────────────────────────────────────────────────────────
+
+test('GET /docs renders an HTML page pointing Redoc at the live spec', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/docs`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /text\/html/);
+    const html = await res.text();
+    assert.match(html, /<redoc spec-url="\/openapi\.json">/);
+    assert.match(html, /redoc\.standalone\.js/);
+    // Pinned, not @latest — an unrelated Redoc release must not change this route.
+    assert.ok(!html.includes('redoc@latest'));
+  });
+});
+
+test('/docs reads the same spec /openapi.json serves — no duplicated content', async () => {
+  await withServer(async ({ base }) => {
+    const docs = await fetch(`${base}/docs`);
+    const html = await docs.text();
+    // The page references the live route rather than embedding a copy of the
+    // spec, so it can never drift from what /openapi.json actually serves.
+    assert.match(html, /spec-url="\/openapi\.json"/);
+    assert.ok(!html.includes('"openapi"'), 'the spec must not be embedded inline');
+  });
+});
+
+test('HEAD /docs works, matching every other GET route', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/docs`, { method: 'HEAD' });
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), '');
+  });
+});
+
+// ── #46 structured request logging with request ids ─────────────────────────
+
+test('every response carries an X-Request-Id header', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/health`);
+    const id = res.headers.get('x-request-id');
+    assert.ok(id && id.length > 0);
+  });
+});
+
+test('an inbound X-Request-Id is honoured rather than replaced', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/health`, { headers: { 'X-Request-Id': 'upstream-abc-123' } });
+    assert.equal(res.headers.get('x-request-id'), 'upstream-abc-123');
+  });
+});
+
+test('an error response body carries the same request id as the header', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/events?limit=not-a-number`);
+    const body = await res.json();
+    assert.equal(res.status, 400);
+    assert.equal(body.error.requestId, res.headers.get('x-request-id'));
+    assert.ok(body.error.requestId.length > 0);
+  });
+});
+
+test('a request_handled log record carries the same id as the response header', async () => {
+  const records = [];
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await store.insertEvents(fixture.events);
+  const log = { debug() {}, info: (e, m, f) => records.push({ event: e, fields: f }), warn() {}, error() {} };
+  const server = createApiServer({ store, log });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const res = await fetch(`${base}/health`);
+    const headerId = res.headers.get('x-request-id');
+    const record = records.find((r) => r.event === 'request_handled');
+    assert.equal(record.fields.requestId, headerId);
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+  }
+});
+
+test('a request_failed (5xx) log record carries the same id as the error body', async () => {
+  const records = [];
+  const dir = await mkdtemp(join(tmpdir(), 'lens-stale-'));
+  const path = join(dir, 'lens.db');
+  const seed = new SqliteEventStore({ path });
+  await seed.insertEvents(fixture.events);
+  await seed.migrateDown(1);
+  await seed.close();
+
+  const store = new SqliteEventStore({ path, migrateOnOpen: false });
+  const log = { debug() {}, info() {}, warn() {}, error: (e, m, f) => records.push({ event: e, fields: f }) };
+  const server = createApiServer({ store, log });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    // #57's stale-schema 503 is not itself a 5xx the error-log path fires on
+    // (only status >= 500 triggers log.error) — 503 IS >= 500, so this is
+    // exactly the request_failed path.
+    const res = await fetch(`${base}/events`);
+    const body = await res.json();
+    assert.equal(res.status, 503);
+    const record = records.find((r) => r.event === 'request_failed');
+    assert.ok(record, 'expected a request_failed log record for a 503');
+    assert.equal(record.fields.requestId, body.error.requestId);
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

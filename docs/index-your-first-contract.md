@@ -100,7 +100,7 @@ curl "http://localhost:8080/events?topic=transfer&limit=10" | jq '.events[].valu
 curl http://localhost:8080/status | jq
 ```
 
-Full API: `http://localhost:8080/openapi.json`.
+Full API: `http://localhost:8080/openapi.json` (raw spec) or `http://localhost:8080/docs` (browsable, click-through reference).
 
 ---
 

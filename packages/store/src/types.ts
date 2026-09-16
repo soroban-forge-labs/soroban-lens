@@ -84,6 +84,19 @@ export interface EventQuery {
   toTime?: number | undefined;
   txHash?: string | undefined;
   /**
+   * Match any event mentioning this address — anywhere: a topic segment
+   * (indexed or beyond the 4-segment ceiling) or nested inside the decoded
+   * value. Backed by the event_addresses side table (#23), not the topic0..3
+   * columns, so this finds addresses a topic filter structurally cannot.
+   */
+  address?: string | undefined;
+  /**
+   * Substring match against a decoded event's topics and value, via the
+   * trigram full-text index (#32). At least 3 characters — trigram indexes
+   * 3-character runs, so anything shorter matches nothing by construction.
+   */
+  search?: string | undefined;
+  /**
    * Position of the transaction within its ledger. Paired with `txHash` or a
    * ledger bound it pins down one transaction's events exactly.
    */
@@ -107,6 +120,16 @@ export interface EventPage {
   nextCursor: string | null;
   /** Total rows matching the filter, ignoring limit/cursor. */
   total: number;
+  /**
+   * True when `total` came from a short-lived cache rather than a fresh
+   * COUNT(*) — accurate as of up to `countCacheTtlMs` ago, not this instant.
+   * COUNT(*) with a filter is a full scan of the matching rows; caching it is
+   * what keeps a busy filter's response time from being dominated by a number
+   * most callers show as "about N", not read to the row. Omitted (not false)
+   * on an exact, freshly-computed count, so `total` on every page from before
+   * this existed is unchanged.
+   */
+  totalIsEstimate?: true;
 }
 
 /** Aggregate view of one indexed contract. */

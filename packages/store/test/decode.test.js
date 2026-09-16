@@ -113,3 +113,132 @@ test('topicKey projects only scalars, leaving structured topics unindexed', () =
   assert.equal(topicKey({ type: 'vec', value: [1, 2] }), null);
   assert.equal(topicKey(undefined), null);
 });
+
+// ── #34 every ScVal arm the current protocol defines ─────────────────────────
+//
+// decodeScVal derives its type tag from the constructor name and hands the
+// value to scValToNative. A protocol upgrade adds arms; this enumerates every
+// one xdr.ScValType currently defines and asserts each decodes to a clean,
+// documented shape rather than something found out from a user report.
+
+import { xdr, Address, nativeToScVal } from '@stellar/stellar-sdk';
+
+/** One representative ScVal per arm, built the way real contract code would. */
+function sampleScVals() {
+  const address = new Address('GBIBH5UV4Q5L7VVJIHWYBTCSUDHJQXQC2V6Y5LOW4D26XNU5NREMIKE4').toScVal();
+  return {
+    scvBool: xdr.ScVal.scvBool(true),
+    scvVoid: xdr.ScVal.scvVoid(),
+    scvError: xdr.ScVal.scvError(xdr.ScError.sceContract(1)),
+    scvU32: xdr.ScVal.scvU32(42),
+    scvI32: xdr.ScVal.scvI32(-42),
+    scvU64: xdr.ScVal.scvU64(xdr.Uint64.fromString('42')),
+    scvI64: xdr.ScVal.scvI64(xdr.Int64.fromString('-42')),
+    scvTimepoint: xdr.ScVal.scvTimepoint(xdr.Uint64.fromString('1000')),
+    scvDuration: xdr.ScVal.scvDuration(xdr.Uint64.fromString('1000')),
+    scvU128: nativeToScVal(42n, { type: 'u128' }),
+    scvI128: nativeToScVal(-42n, { type: 'i128' }),
+    scvU256: nativeToScVal(42n, { type: 'u256' }),
+    scvI256: nativeToScVal(-42n, { type: 'i256' }),
+    scvBytes: xdr.ScVal.scvBytes(Buffer.from([1, 2, 3])),
+    scvString: xdr.ScVal.scvString('hello'),
+    scvSymbol: xdr.ScVal.scvSymbol('transfer'),
+    scvVec: xdr.ScVal.scvVec([xdr.ScVal.scvU32(1), xdr.ScVal.scvU32(2)]),
+    scvMap: xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol('amount'), val: xdr.ScVal.scvU32(100) }),
+    ]),
+    scvAddress: address,
+    scvContractInstance: xdr.ScVal.scvContractInstance(
+      new xdr.ScContractInstance({
+        executable: xdr.ContractExecutable.contractExecutableStellarAsset(),
+        storage: null,
+      }),
+    ),
+    scvLedgerKeyContractInstance: xdr.ScVal.scvLedgerKeyContractInstance(),
+    scvLedgerKeyNonce: xdr.ScVal.scvLedgerKeyNonce(new xdr.ScNonceKey({ nonce: xdr.Int64.fromString('1') })),
+    scvExecutableTag: xdr.ScVal.scvExecutableTag('StellarAsset'),
+  };
+}
+
+test('every ScVal arm in the current protocol has a decode test', () => {
+  // xdr.ScValType exposes each arm as a self-named static, e.g.
+  // xdr.ScValType.scvBool.name === 'scvBool'. There is no .values() in this
+  // SDK version, and Object.values() alone would also pick up the ScValType
+  // constructor's own .name ('ScValType'), hence the k === v.name filter.
+  const armNames = Object.entries(xdr.ScValType)
+    .filter(([k, v]) => v && typeof v === 'object' && v.name === k)
+    .map(([k]) => k);
+  const covered = Object.keys(sampleScVals());
+  assert.deepEqual(
+    [...covered].sort(),
+    [...armNames].sort(),
+    'a protocol upgrade added or removed an arm — update sampleScVals() to match',
+  );
+});
+
+for (const [ctorName, scv] of Object.entries(sampleScVals())) {
+  test(`decodes ${ctorName} without a decodeError`, () => {
+    const base64 = scv.toXDR('base64');
+    const decoded = decodeScVal(base64);
+    assert.equal(typeof decoded.type, 'string');
+    assert.notEqual(decoded.type, 'unknown', `${ctorName} decoded to the unknown fallback`);
+    // toJsonSafe must have actually run: no bigint or Buffer/Uint8Array leaking
+    // into what gets JSON.stringify'd downstream.
+    assert.doesNotThrow(() => JSON.stringify(decoded));
+  });
+}
+
+test('an arm the running SDK does not recognise degrades to a documented decodeError, not a crash', () => {
+  // Type tag 999 does not exist in any protocol version — xdr.ScVal.fromXDR
+  // throws XdrError rather than parsing garbage, and decodeEvent's try/catch
+  // is what turns that into a stored, re-decodable row instead of a crash.
+  const buf = Buffer.alloc(8);
+  buf.writeUInt32BE(999, 0);
+  const bogus = buf.toString('base64');
+
+  const event = decodeEvent({
+    id: 'bogus-1', type: 'contract', ledger: 1, ledgerClosedAt: '2026-01-01T00:00:00Z',
+    contractId: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+    topic: [bogus], value: bogus, txHash: 'x'.repeat(64),
+    transactionIndex: 0, operationIndex: 0, inSuccessfulContractCall: true,
+  });
+
+  assert.ok(event.decodeError, 'expected a decodeError rather than a thrown exception reaching the caller');
+  assert.equal(event.topics[0].type, 'undecodable');
+  assert.equal(event.topics[0].value, bogus, 'the raw bytes survive intact for later re-decoding');
+});
+
+// ── #35 compress the raw XDR columns ──────────────────────────────────────────
+
+import { compressXdrColumn, decompressXdrColumn, encodeXdrColumn } from '../dist/index.js';
+
+test('compressXdrColumn / decompressXdrColumn round-trip text exactly', () => {
+  // Long enough that gzip's own overhead cannot dominate — a realistic
+  // multi-topic array, not a single short symbol.
+  const original = JSON.stringify(Array.from({ length: 20 }, () => 'AAAADwAAAAh0cmFuc2Zlcg=='));
+  const compressed = compressXdrColumn(original);
+  assert.ok(compressed instanceof Uint8Array);
+  assert.ok(compressed.length < Buffer.byteLength(original, 'utf8'), 'expected the compressed form to be smaller');
+  assert.equal(decompressXdrColumn(compressed), original);
+});
+
+test('decompressXdrColumn passes plain text through unchanged — legacy, pre-#35 rows', () => {
+  const legacy = 'AAAACgAAAAAAAAAAAAAAAAAAAGQ=';
+  assert.equal(decompressXdrColumn(legacy), legacy);
+});
+
+test('encodeXdrColumn keeps a short value as plain text — gzip overhead would grow it', () => {
+  const short = 'AAAACgAAAAAAAAAAAAAAAAAAAGQ='; // 28 bytes, well under gzip's ~18-20 byte overhead margin
+  const encoded = encodeXdrColumn(short);
+  assert.equal(typeof encoded, 'string', 'a short value must not be compressed into something bigger');
+  assert.equal(encoded, short);
+  assert.equal(decompressXdrColumn(encoded), short);
+});
+
+test('encodeXdrColumn compresses a long value, and it still decodes correctly', () => {
+  const long = JSON.stringify(Array.from({ length: 50 }, () => 'AAAADwAAAAh0cmFuc2Zlcg=='));
+  const encoded = encodeXdrColumn(long);
+  assert.notEqual(typeof encoded, 'string', 'expected the long value to be compressed');
+  assert.ok(encoded.length < Buffer.byteLength(long, 'utf8'));
+  assert.equal(decompressXdrColumn(encoded), long);
+});

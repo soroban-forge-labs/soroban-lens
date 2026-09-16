@@ -23,6 +23,12 @@ Usage:
   lens index  [options]              Run the indexer (ingest -> decode -> store).
   lens seed   [--fixture <path>]     Load a captured getEvents response into the database.
   lens stats  [options]              Print database statistics.
+  lens prune --before-ledger <n>     Delete events below a ledger and reclaim disk space.
+  lens redecode [--all]              Re-run the decoder over previously-failed rows.
+  lens verify [--repair]             Check stored-row invariants; optionally fix them.
+  lens migrate --down --to <n>       Roll back migrations above version <n>.
+  lens export <path>                 Write every event as NDJSON, backend-portable.
+  lens import <path>                 Load an NDJSON snapshot written by 'lens export'.
   lens completion [bash|zsh|fish]    Generate shell auto-completion script.
 
 
@@ -43,6 +49,11 @@ Options:
       --once              index: stop once caught up to the network tip.
       --max-events <n>    index: stop after this many events.
       --fixture <path>    seed: file to load (default fixtures/testnet-events.json).
+      --before-ledger <n> prune: delete events with ledger below this.
+      --all               redecode: re-run over every row, not only failures.
+      --repair            verify: recompute derived columns for any bad row found.
+      --down              migrate: roll back rather than apply forward.
+      --to <n>            migrate --down: target schema version.
   -h, --help              Show this help.
 
 Examples:
@@ -55,7 +66,7 @@ async function main(argv: string[]): Promise<number> {
   const command = argv[0];
   const rest = command && !command.startsWith('-') ? argv.slice(1) : argv;
 
-  const { values } = parseArgs({
+  const { values, positionals } = parseArgs({
     args: rest,
     options: {
       contract: { type: 'string', short: 'c', multiple: true },
@@ -71,11 +82,16 @@ async function main(argv: string[]): Promise<number> {
       'retry-base-delay': { type: 'string' },
       'retry-max-delay': { type: 'string' },
       once: { type: 'boolean' },
+      all: { type: 'boolean' },
+      repair: { type: 'boolean' },
+      down: { type: 'boolean' },
+      to: { type: 'string' },
       'max-events': { type: 'string' },
       fixture: { type: 'string' },
+      'before-ledger': { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
-    allowPositionals: false,
+    allowPositionals: true, // 'export <path>', 'import <path>', 'completion <shell>'
   });
 
   if (values.help || !command || command.startsWith('-')) {
@@ -164,8 +180,135 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'prune': {
+      const raw = values['before-ledger'];
+      if (raw === undefined) {
+        process.stderr.write('error: prune requires --before-ledger <n>\n');
+        return 2;
+      }
+      const beforeLedger = Number(raw);
+      if (!Number.isFinite(beforeLedger) || beforeLedger < 0) {
+        process.stderr.write(`error: --before-ledger must be a non-negative number, got "${raw}"\n`);
+        return 2;
+      }
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        const before = await store.getStats();
+        const removed = await store.pruneBefore(beforeLedger);
+        const after = await store.getStats();
+        process.stderr.write(
+          `[lens] pruned ${removed} event(s) below ledger ${beforeLedger} ` +
+            `(${before.sizeBytes ?? '?'} -> ${after.sizeBytes ?? '?'} bytes)\n`,
+        );
+      } finally {
+        await store.close();
+      }
+      return 0;
+    }
+
+    case 'redecode': {
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        const rewritten = await store.redecode(values.all ?? false);
+        process.stderr.write(
+          `[lens] redecoded ${rewritten} row(s)${values.all ? ' (--all)' : ' with a stored decode error'}\n`,
+        );
+      } finally {
+        await store.close();
+      }
+      return 0;
+    }
+
+    case 'verify': {
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        const problems = await store.checkIntegrity();
+        if (problems.length === 0) {
+          process.stderr.write('[lens] verify: all rows are internally consistent\n');
+          return 0;
+        }
+        for (const { id, problems: rowProblems } of problems) {
+          process.stderr.write(`[lens] ${id}: ${rowProblems.join('; ')}\n`);
+        }
+        if (values.repair) {
+          for (const { id } of problems) await store.repairRow(id);
+          process.stderr.write(`[lens] repaired ${problems.length} row(s)\n`);
+          return 0;
+        }
+        process.stderr.write(`[lens] verify: ${problems.length} row(s) with problems. Re-run with --repair to fix.\n`);
+        return 1;
+      } finally {
+        await store.close();
+      }
+    }
+
+    case 'migrate': {
+      if (!values.down) {
+        process.stderr.write('error: lens migrate currently only supports --down (forward migration runs automatically on open)\n');
+        return 2;
+      }
+      if (values.to === undefined) {
+        process.stderr.write('error: --down requires --to <version>\n');
+        return 2;
+      }
+      const toVersion = Number(values.to);
+      if (!Number.isFinite(toVersion) || toVersion < 0) {
+        process.stderr.write(`error: --to must be a non-negative number, got "${values.to}"\n`);
+        return 2;
+      }
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        const rolledBack = await store.migrateDown(toVersion);
+        if (rolledBack.length === 0) {
+          process.stderr.write(`[lens] already at or below schema v${toVersion}; nothing to roll back\n`);
+        } else {
+          process.stderr.write(
+            `[lens] rolled back migration(s) ${rolledBack.join(', ')}; now at schema v${toVersion}\n`,
+          );
+        }
+      } catch (error) {
+        process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
+        return 1;
+      } finally {
+        await store.close();
+      }
+      return 0;
+    }
+
+    case 'export': {
+      const path = positionals[0];
+      if (!path) {
+        process.stderr.write('error: lens export requires a destination path\n');
+        return 2;
+      }
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        const count = await store.exportSnapshot(path);
+        process.stderr.write(`[lens] exported ${count} event(s) to ${path}\n`);
+      } finally {
+        await store.close();
+      }
+      return 0;
+    }
+
+    case 'import': {
+      const path = positionals[0];
+      if (!path) {
+        process.stderr.write('error: lens import requires a source path\n');
+        return 2;
+      }
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        const count = await store.importSnapshot(path);
+        process.stderr.write(`[lens] imported ${count} new event(s) from ${path}\n`);
+      } finally {
+        await store.close();
+      }
+      return 0;
+    }
+
     case 'completion': {
-      const shell = rest[0] || 'bash';
+      const shell = positionals[0] || 'bash';
       process.stdout.write(`${generateCompletion(shell)}\n`);
       return 0;
     }
@@ -183,8 +326,8 @@ function generateCompletion(shell: string): string {
   local cur prev commands options
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="doctor index seed stats completion"
-  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --poll-interval --once --max-events --fixture -h --help"
+  commands="doctor index seed stats prune redecode verify migrate export import completion"
+  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --poll-interval --once --max-events --fixture --before-ledger -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -217,6 +360,12 @@ _lens() {
     'index:Run the indexer pipeline'
     'seed:Load testnet events fixture'
     'stats:Print database statistics'
+    'prune:Delete events below a ledger'
+    'redecode:Re-run the decoder over failed rows'
+    'verify:Check stored-row invariants'
+    'migrate:Roll migrations forward or back'
+    'export:Write an NDJSON snapshot'
+    'import:Load an NDJSON snapshot'
     'completion:Generate shell autocompletions'
   )
   _arguments '1: :->command' '*: :->args'
@@ -232,6 +381,12 @@ complete -c lens -n "__fish_use_subcommand" -a doctor -d "Preflight checks"
 complete -c lens -n "__fish_use_subcommand" -a index -d "Run the indexer pipeline"
 complete -c lens -n "__fish_use_subcommand" -a seed -d "Load testnet events fixture"
 complete -c lens -n "__fish_use_subcommand" -a stats -d "Print database statistics"
+complete -c lens -n "__fish_use_subcommand" -a prune -d "Delete events below a ledger"
+complete -c lens -n "__fish_use_subcommand" -a redecode -d "Re-run the decoder over failed rows"
+complete -c lens -n "__fish_use_subcommand" -a verify -d "Check stored-row invariants"
+complete -c lens -n "__fish_use_subcommand" -a migrate -d "Roll migrations forward or back"
+complete -c lens -n "__fish_use_subcommand" -a export -d "Write an NDJSON snapshot"
+complete -c lens -n "__fish_use_subcommand" -a import -d "Load an NDJSON snapshot"
 complete -c lens -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c lens -l network -s n -x -a "testnet mainnet futurenet"
 complete -c lens -l help -s h -d "Show help"`;

@@ -28,6 +28,51 @@ export interface EventStore {
   migrate(): Promise<void>;
 
   /**
+   * Roll back every applied migration above `toVersion`, most recent first.
+   * @returns the versions actually rolled back, in the order they were undone.
+   * @throws if any migration in that range has no `down` — nothing is rolled
+   *   back, not even the ones that could be, so a database never ends up
+   *   between two supposedly-atomic states.
+   */
+  migrateDown(toVersion: number): Promise<number[]>;
+
+  /**
+   * Fully repopulate the full-text search index from `events`, from scratch.
+   *
+   * Triggers keep events_fts in sync automatically on every write, so this is
+   * for recovery — the tokenizer changed, the index is suspected corrupt — not
+   * something a normal write path needs to call.
+   */
+  rebuildSearchIndex(): Promise<void>;
+
+  /**
+   * Write every event as NDJSON (one decoded LensEvent per line) to
+   * `destPath` — a format that outlives this backend, unlike a raw copy of
+   * the database file. Consistent even while the indexer is writing:
+   * internally takes a point-in-time snapshot before reading from it.
+   * @returns how many events were written.
+   */
+  exportSnapshot(destPath: string): Promise<number>;
+
+  /**
+   * Read an NDJSON snapshot written by exportSnapshot() (or `lens seed`'s
+   * fixture format is not this — see the CLI) and insert every event.
+   * Idempotent the same way insertEvents() is: importing the same snapshot
+   * twice does not duplicate rows.
+   * @returns how many rows were newly inserted.
+   */
+  importSnapshot(srcPath: string): Promise<number>;
+
+  /**
+   * Force a WAL checkpoint. A continuously-writing indexer with a long-lived
+   * reader (the API, kept open by an in-flight request) can grow `-wal`
+   * without bound between natural checkpoints, which looks like a disk leak.
+   * `'TRUNCATE'` — the default — is the only mode that actually shrinks the
+   * file on disk; the others merely flush into the main database.
+   */
+  checkpoint(mode?: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE'): Promise<void>;
+
+  /**
    * Decode and persist raw RPC events.
    * @returns how many rows were newly inserted (duplicates are not counted).
    */
@@ -75,6 +120,43 @@ export interface EventStore {
    * takes the write lock, so nothing on a hot path should call it.
    */
   writeProbe(): Promise<{ ok: boolean; detail: string }>;
+
+  /**
+   * Delete every event with `ledger < before`, returning the row count removed.
+   *
+   * Does not touch `stream_state`: pruning is about disk, not about where the
+   * indexer resumes from, and the two must stay independent — a pruned
+   * database is still a valid place to keep polling forward from.
+   */
+  pruneBefore(ledger: number): Promise<number>;
+
+  /**
+   * Re-run the decoder over stored rows and rewrite their decoded columns in
+   * place, from the raw XDR that was always kept for exactly this.
+   *
+   * `decodeEvent` never throws — a bad event is stored with `decodeError` set
+   * rather than dropped — so this is how a decoder fix actually reaches
+   * already-indexed rows, without re-indexing from the network.
+   *
+   * @param all Re-decode every row, not only ones with `decodeError` set.
+   *   For a decoder change that fixes the *shape* of previously-successful
+   *   output rather than an outright failure.
+   * @returns how many rows were rewritten.
+   */
+  redecode(all?: boolean): Promise<number>;
+
+  /**
+   * Check stored invariants: `topics_json` parses and its length matches
+   * `topic_count`; `topic0..3` match a fresh projection of the parsed
+   * topics; `value_json` and `topics_xdr_json` parse at all. Nothing writes
+   * these bugs today, but nothing has ever checked for them either — a disk
+   * fault, a hand edit, or a future migration bug could leave one behind.
+   * @returns one entry per row with a problem, empty when the database is clean.
+   */
+  checkIntegrity(): Promise<{ id: string; problems: string[] }[]>;
+
+  /** Recompute one row's derived columns from its stored raw XDR. */
+  repairRow(id: string): Promise<void>;
 
   close(): Promise<void>;
 }

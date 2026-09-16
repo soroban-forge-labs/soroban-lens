@@ -112,11 +112,87 @@ API reads while the indexer writes.
 
 1. Implement `EventStore`.
 2. Reuse `decodeEvent()` — decoding is backend-independent.
-3. Run the same suite against it; the tests in `test/sqlite-store.test.js` are
-   written against the trait, not against SQLite.
+3. Call `runEventStoreSuite()` against it (#38) — one exported function that
+   validates any `EventStore`, unchanged:
+
+   ```js
+   import { runEventStoreSuite } from '@soroban-lens/store';
+   import { readFileSync } from 'node:fs';
+
+   const fixture = JSON.parse(readFileSync('fixtures/testnet-events.json', 'utf8'));
+
+   runEventStoreSuite({
+     name: 'PostgresEventStore',
+     fixtureEvents: fixture.events,
+     createStore: async () => new PostgresEventStore({ connectionString: '...' }),
+   });
+   ```
+
+   See `test/conformance.test.js` for SQLite's own copy of exactly this. The
+   suite covers the interface contract only — pagination, filtering, prune,
+   stream state, snapshots. Backend-specific behaviour (does a query use a
+   particular index, does a file shrink after VACUUM) stays in that backend's
+   own test file, because asserting it in the shared suite would fail it
+   against every backend that isn't SQLite.
 
 Migrations are append-only. Never edit a shipped migration; add the next
 version to `MIGRATIONS` in [`src/schema.ts`](./src/schema.ts).
+
+Each migration may carry an optional `down`. `lens migrate --down --to <n>`
+rolls back every applied migration above `<n>`, most recent first, refusing
+the whole batch up front if any step in the range has no `down` — nothing is
+rolled back partway. **Migration 1's `down` drops the tables outright: rolling
+back to version 0 is a genuine, irreversible data loss, no matter what SQL
+runs, because there is no earlier schema for the data to live in.** Every
+later migration's `down` is structural only (dropping an index it added) and
+loses nothing.
+
+## Performance
+
+Two benchmarks live in `bench/`, not `test/` — they insert hundreds of
+thousands to a million synthetic rows, which is slow and irrelevant to
+correctness, so they never run in `npm test` or CI:
+
+```bash
+npm run bench:count-cache -w @soroban-lens/store       # #26
+npm run bench:insert -w @soroban-lens/store            # #27
+npm run bench:xdr-compression -w @soroban-lens/store   # #35
+npm run bench:address-index -w @soroban-lens/store     # #23
+npm run bench:fts-search -w @soroban-lens/store         # #32
+```
+
+`insert-strategies.bench.js` (#27) measured `insertDecoded`'s one-prepared-
+statement-per-row approach against multi-row `VALUES` batching and PRAGMA
+tuning. Neither alternative reliably beat it — the spread between candidates
+was consistently smaller than one candidate's own run-to-run variance across
+repeated trials. `insertDecoded` is unchanged as a result: this was a
+measurement, not an assumption, and the measurement said the current code is
+already fine.
+
+`xdr-compression.bench.js` (#35) measured `value_xdr`/`topics_xdr_json`
+compression at 200,000 rows of real fixture data, cycled: a 10.4% reduction on
+those two columns specifically (`encodeXdrColumn` only keeps the compressed
+form when it is actually smaller, so short values — a bare symbol topic, a
+small integer — are stored as plain text rather than paying gzip's ~18-20
+byte fixed overhead to grow). Decompression costs about 1.7µs per call, which
+is irrelevant next to the UI's "Raw XDR" panel being a one-event, one-click
+fetch rather than a hot path.
+
+`address-index.bench.js` (#23) inserted 1,000,000 synthetic rows and queried
+`?address=` for two shapes: an address mentioned in ~0.1% of rows (a specific
+account) and one mentioned in every single row (a token contract's own
+address inside every transfer it emits). The rare address resolves in under a
+millisecond regardless of table size — `idx_event_addresses_address` drives
+straight to the matching rows. The common address takes several seconds: it
+is the honest worst case for any b-tree index, where a small page over a
+filter matching nearly everything has nowhere to push the pagination `LIMIT`
+down to. The extraction itself is not free either — inserting the same
+1,000,000 rows costs roughly 8x what it does without address extraction,
+since every topic and value gets parsed a second time (decodeEvent's own
+parse, plus extractAddresses' walk of the raw ScVal tree) to find what it
+mentions. Both numbers are reported as measured, not smoothed over — the
+address filter is for the selective case, and the benchmark shows both where
+it wins and where it does not.
 
 ## Tests
 

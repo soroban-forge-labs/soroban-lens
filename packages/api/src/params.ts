@@ -6,6 +6,9 @@ import { ApiError } from './errors.js';
 const CONTRACT_ID = /^C[A-Z2-7]{55}$/;
 /** Transaction hashes are 32 bytes, hex encoded. */
 const TX_HASH = /^[0-9a-fA-F]{64}$/;
+// StrKey: 'G' (account) or 'C' (contract) followed by 55 base32 characters.
+// Both are valid ScVal addresses, and #23's index does not distinguish them.
+const ADDRESS = /^[GC][A-Z2-7]{55}$/;
 
 export function assertContractId(value: string): string {
   if (!CONTRACT_ID.test(value)) {
@@ -102,6 +105,19 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     throw ApiError.badRequest('"txHash" must be a 64-character hex string.', 'txHash');
   }
 
+  const address = params.get('address') ?? undefined;
+  if (address !== undefined && !ADDRESS.test(address)) {
+    throw ApiError.badRequest(
+      "\"address\" must be a StrKey: 'G' or 'C' followed by 55 characters (A-Z, 2-7).",
+      'address',
+    );
+  }
+
+  // No minimum-length rejection: a 1-2 character search is a valid request
+  // that the trigram index simply cannot match anything with, which is
+  // honest behaviour (an empty page), not an error.
+  const search = params.get('search') ?? undefined;
+
   // Both are ledger-relative positions, so negatives are meaningless rather
   // than merely unusual — reject instead of returning a guaranteed empty page.
   const transactionIndex = intParam(params, 'transactionIndex');
@@ -131,6 +147,8 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     ...(fromTime !== undefined ? { fromTime } : {}),
     ...(toTime !== undefined ? { toTime } : {}),
     ...(txHash !== undefined ? { txHash } : {}),
+    ...(address !== undefined ? { address } : {}),
+    ...(search !== undefined && search !== '' ? { search } : {}),
     ...(transactionIndex !== undefined ? { transactionIndex } : {}),
     ...(operationIndex !== undefined ? { operationIndex } : {}),
     ...(cursor ? { cursor } : {}),

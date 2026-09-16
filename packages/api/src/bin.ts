@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** `soroban-lens-api` — serve the query API over an indexed database. */
 import { parseArgs } from 'node:util';
-import { SqliteEventStore } from '@soroban-lens/store';
+import { SqliteEventStore, createLogger } from '@soroban-lens/store';
 import { createApiServer } from './server.js';
 
 const USAGE = `
@@ -34,28 +34,30 @@ if (values.help) {
   process.exit(0);
 }
 
+const log = createLogger({ prefix: '[api]' });
+
 const dbPath = values.db ?? process.env.LENS_DB_PATH ?? './data/lens.db';
 const port = Number(values.port ?? process.env.LENS_API_PORT ?? 8080);
 const host = values.host ?? process.env.LENS_API_HOST ?? '0.0.0.0';
 
-const store = new SqliteEventStore({ path: dbPath });
+const store = new SqliteEventStore({ path: dbPath, log });
 const server = createApiServer({
   store,
   network: process.env.LENS_NETWORK ?? 'testnet',
   ...(values.cors ?? process.env.LENS_CORS_ORIGIN
     ? { corsOrigin: values.cors ?? (process.env.LENS_CORS_ORIGIN as string) }
     : {}),
-  log: (m) => process.stderr.write(`[api] ${m}\n`),
+  log,
 });
 
 server.listen(port, host, () => {
-  process.stderr.write(`[api] listening on http://${host}:${port} (db: ${dbPath})\n`);
-  process.stderr.write(`[api] openapi: http://${host}:${port}/openapi.json\n`);
+  log.info('listening', `listening on http://${host}:${port} (db: ${dbPath})`, { host, port, dbPath });
+  log.info('listening', `openapi: http://${host}:${port}/openapi.json`);
 });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
-    process.stderr.write(`[api] ${signal}, shutting down\n`);
+    log.info('shutdown', `${signal}, shutting down`, { signal });
     server.close(() => {
       void store.close().then(() => process.exit(0));
     });
