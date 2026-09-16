@@ -24,7 +24,7 @@ jobs:
         node: ['22.13', '24']
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
@@ -80,7 +80,7 @@ jobs:
     name: OpenAPI spec lints clean
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -94,7 +94,7 @@ jobs:
     name: docker compose builds and serves
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build images
         run: docker compose build
