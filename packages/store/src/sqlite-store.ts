@@ -1,5 +1,5 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { decodeEvent, topicKey } from './decode.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
@@ -204,6 +204,18 @@ export class SqliteEventStore implements EventStore {
     return rows.map((r) => ({ topic: r.topic, count: r.count }));
   }
 
+  /**
+   * Bytes on disk for the database and its write-ahead log.
+   *
+   * Read from the filesystem rather than `page_count * page_size`, because the
+   * issue's bar is "matches du", and SQLite's own page maths excludes the WAL
+   * and any free pages the file still occupies.
+   */
+  #sizes(): { sizeBytes: number | null; walSizeBytes: number | null } {
+    if (this.#path === ':memory:') return { sizeBytes: null, walSizeBytes: null };
+    return { sizeBytes: fileSize(this.#path), walSizeBytes: fileSize(`${this.#path}-wal`) };
+  }
+
   async getStats(): Promise<StoreStats> {
     const row = this.#db
       .prepare(
@@ -229,6 +241,7 @@ export class SqliteEventStore implements EventStore {
       minLedger: row.min_ledger,
       maxLedger: row.max_ledger,
       schemaVersion: version.v,
+      ...this.#sizes(),
     };
   }
 
@@ -447,3 +460,17 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
 
 /** Number of topic positions that can be filtered on. */
 export const INDEXED_TOPIC_DEPTH = 4;
+
+/**
+ * Size of one file, or null when it does not exist.
+ *
+ * A missing `-wal` is the normal state for a database that has checkpointed or
+ * was never opened in WAL mode, so it is absence rather than an error.
+ */
+function fileSize(path: string): number | null {
+  try {
+    return statSync(path).size;
+  } catch {
+    return null;
+  }
+}

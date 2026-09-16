@@ -119,4 +119,16 @@ export interface StoreStats {
   maxLedger: number | null;
   /** Schema version the database is currently migrated to. */
   schemaVersion: number;
+  /**
+   * Size of the database file on disk, in bytes. `null` for a backend with no
+   * file (`:memory:`), which is different from a file that is genuinely 0 bytes.
+   */
+  sizeBytes: number | null;
+  /**
+   * Size of the write-ahead log, in bytes, or `null` when there is no WAL.
+   * Reported separately because a WAL that never checkpoints (#28) is exactly
+   * the case where the total on disk surprises someone whose volume filled up.
+   */
+  walSizeBytes: number | null;
 }
+

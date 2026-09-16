@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
@@ -305,4 +305,44 @@ test('data persists across reopening a file-backed database', async () => {
   const second = new SqliteEventStore({ path });
   assert.equal((await second.getStats()).eventCount, fixture.events.length);
   await second.close();
+});
+
+// ── #29 report database size in getStats ─────────────────────────────────────
+
+test('getStats reports a database size that matches the file on disk', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+
+  const stats = await store.getStats();
+  // The bar the issue sets is "matches du", so compare against stat(), which
+  // is what du reads.
+  assert.equal(stats.sizeBytes, statSync(path).size);
+  assert.ok(stats.sizeBytes > 0);
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('getStats reports the WAL separately, since it is what fills a volume', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+
+  const stats = await store.getStats();
+  assert.equal(stats.walSizeBytes, statSync(`${path}-wal`).size);
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('an in-memory database reports null size rather than a misleading zero', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  const stats = await store.getStats();
+  // null means "no file", which is a different fact from "a 0-byte file".
+  assert.equal(stats.sizeBytes, null);
+  assert.equal(stats.walSizeBytes, null);
+  await store.close();
 });
