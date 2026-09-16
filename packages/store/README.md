@@ -118,6 +118,15 @@ API reads while the indexer writes.
 Migrations are append-only. Never edit a shipped migration; add the next
 version to `MIGRATIONS` in [`src/schema.ts`](./src/schema.ts).
 
+Each migration may carry an optional `down`. `lens migrate --down --to <n>`
+rolls back every applied migration above `<n>`, most recent first, refusing
+the whole batch up front if any step in the range has no `down` — nothing is
+rolled back partway. **Migration 1's `down` drops the tables outright: rolling
+back to version 0 is a genuine, irreversible data loss, no matter what SQL
+runs, because there is no earlier schema for the data to live in.** Every
+later migration's `down` is structural only (dropping an index it added) and
+loses nothing.
+
 ## Tests
 
 ```bash

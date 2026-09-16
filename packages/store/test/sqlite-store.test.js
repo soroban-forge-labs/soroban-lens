@@ -849,3 +849,93 @@ test('repairRow on an unknown id does nothing', async () => {
   await assert.doesNotReject(() => store.repairRow('does-not-exist'));
   await store.close();
 });
+
+// ── #40 migration rollback ────────────────────────────────────────────────────
+
+test('a migration can be applied and rolled back', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
+
+  const rolledBack = await store.migrateDown(LATEST_SCHEMA_VERSION - 1);
+  assert.deepEqual(rolledBack, [LATEST_SCHEMA_VERSION]);
+  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION - 1);
+
+  // And forward again, via the ordinary migrate() path.
+  await store.migrate();
+  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
+  await store.close();
+});
+
+test('rolling back an index migration actually drops the index', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+
+  const indexNames = () => {
+    const db = new DatabaseSync(path);
+    const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'").all().map((r) => r.name);
+    db.close();
+    return names;
+  };
+  assert.ok(indexNames().includes('idx_events_indexed_at'));
+
+  await store.migrateDown(1);
+  assert.ok(!indexNames().includes('idx_events_indexed_at'));
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('rolling back to version 0 drops the tables entirely — the one truly irreversible step', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+
+  await store.migrateDown(0);
+
+  const db = new DatabaseSync(path);
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name);
+  db.close();
+  assert.ok(!tables.includes('events'));
+  assert.ok(!tables.includes('stream_state'));
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('rolling back past a migration with no down SQL fails cleanly and changes nothing', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  const versionBefore = (await store.getStats()).schemaVersion;
+
+  // Every real migration today has a down. Simulate one that does not by
+  // temporarily stripping it from the shared MIGRATIONS array, then restoring
+  // it — this is the one legitimate way to exercise "missing down" without a
+  // second, parallel migration table just for the test.
+  const target = MIGRATIONS[MIGRATIONS.length - 1];
+  const savedDown = target.down;
+  delete target.down;
+  try {
+    await assert.rejects(
+      () => store.migrateDown(versionBefore - 1),
+      new RegExp(`migration ${target.version}.*has no down SQL`),
+    );
+  } finally {
+    target.down = savedDown;
+  }
+
+  // Nothing was rolled back — the all-or-nothing guarantee.
+  assert.equal((await store.getStats()).schemaVersion, versionBefore);
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('rolling back to the current version is a no-op', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  const rolledBack = await store.migrateDown(LATEST_SCHEMA_VERSION);
+  assert.deepEqual(rolledBack, []);
+  await store.close();
+});

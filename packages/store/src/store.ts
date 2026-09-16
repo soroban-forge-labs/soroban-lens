@@ -28,6 +28,15 @@ export interface EventStore {
   migrate(): Promise<void>;
 
   /**
+   * Roll back every applied migration above `toVersion`, most recent first.
+   * @returns the versions actually rolled back, in the order they were undone.
+   * @throws if any migration in that range has no `down` — nothing is rolled
+   *   back, not even the ones that could be, so a database never ends up
+   *   between two supposedly-atomic states.
+   */
+  migrateDown(toVersion: number): Promise<number[]>;
+
+  /**
    * Decode and persist raw RPC events.
    * @returns how many rows were newly inserted (duplicates are not counted).
    */

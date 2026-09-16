@@ -4,11 +4,20 @@
  * Append-only: never edit a migration that has shipped, add a new one. The
  * runner records each applied version in `schema_migrations` and applies only
  * what is missing, inside a transaction.
+ *
+ * `down` is optional and, when present, is the exact inverse of `up` for
+ * schema structure — it is not a promise to recover data `up` never captured.
+ * Migration 1's down drops the tables outright: rolling back the initial
+ * schema is irreversible in the data sense no matter what SQL runs, because
+ * there is no earlier schema for the data to live in. A migration with no
+ * `down` at all cannot be rolled back through `lens migrate --down`; the
+ * runner reports exactly that rather than guessing at one.
  */
 export interface Migration {
   version: number;
   name: string;
   up: string;
+  down?: string;
 }
 
 export const MIGRATIONS: Migration[] = [
@@ -68,6 +77,13 @@ export const MIGRATIONS: Migration[] = [
         updated_at TEXT NOT NULL
       );
     `,
+    // Drops everything this migration created. There is no earlier schema to
+    // preserve the data in, so this is a full, deliberate data loss — the one
+    // genuinely irreversible step, structural SQL notwithstanding.
+    down: `
+      DROP TABLE IF EXISTS stream_state;
+      DROP TABLE IF EXISTS events;
+    `,
   },
   {
     version: 2,
@@ -80,6 +96,7 @@ export const MIGRATIONS: Migration[] = [
       -- DESC because every use of this column is recent-first.
       CREATE INDEX idx_events_indexed_at ON events (indexed_at DESC);
     `,
+    down: `DROP INDEX IF EXISTS idx_events_indexed_at;`,
   },
   {
     version: 3,
@@ -91,6 +108,7 @@ export const MIGRATIONS: Migration[] = [
       -- ledger_closed_at.
       CREATE INDEX idx_events_closed_at_unix ON events (closed_at_unix, id DESC);
     `,
+    down: `DROP INDEX IF EXISTS idx_events_closed_at_unix;`,
   },
 ];
 

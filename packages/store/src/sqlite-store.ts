@@ -73,6 +73,49 @@ export class SqliteEventStore implements EventStore {
     this.#migrateSync();
   }
 
+  async migrateDown(toVersion: number): Promise<number[]> {
+    const applied = (
+      this.#db.prepare('SELECT version, name FROM schema_migrations ORDER BY version DESC').all() as {
+        version: number;
+        name: string;
+      }[]
+    ).filter((m) => m.version > toVersion);
+
+    if (applied.length === 0) return [];
+
+    // Refuse the whole batch up front if any step lacks a `down` — an
+    // all-or-nothing check, so a database never ends up part-way through a
+    // rollback it cannot finish, wondering which half of its schema it has.
+    const byVersion = new Map(MIGRATIONS.map((m) => [m.version, m]));
+    const missing = applied.filter((m) => !byVersion.get(m.version)?.down);
+    if (missing.length > 0) {
+      throw new Error(
+        `cannot roll back: migration ${missing[0]!.version} (${missing[0]!.name}) has no down SQL. ` +
+          `Nothing was rolled back.`,
+      );
+    }
+
+    this.#db.exec('BEGIN');
+    try {
+      for (const { version } of applied) {
+        const migration = byVersion.get(version)!;
+        this.#db.exec(migration.down!);
+        this.#db.prepare('DELETE FROM schema_migrations WHERE version = ?').run(version);
+        this.#log.info('migration_rolled_back', `rolled back migration ${version}: ${migration.name}`, {
+          version,
+          name: migration.name,
+        });
+      }
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+
+    this.#statements = null;
+    return applied.map((m) => m.version);
+  }
+
   #migrateSync(): void {
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations (

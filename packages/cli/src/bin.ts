@@ -26,6 +26,7 @@ Usage:
   lens prune --before-ledger <n>     Delete events below a ledger and reclaim disk space.
   lens redecode [--all]              Re-run the decoder over previously-failed rows.
   lens verify [--repair]             Check stored-row invariants; optionally fix them.
+  lens migrate --down --to <n>       Roll back migrations above version <n>.
   lens completion [bash|zsh|fish]    Generate shell auto-completion script.
 
 
@@ -49,6 +50,8 @@ Options:
       --before-ledger <n> prune: delete events with ledger below this.
       --all               redecode: re-run over every row, not only failures.
       --repair            verify: recompute derived columns for any bad row found.
+      --down              migrate: roll back rather than apply forward.
+      --to <n>            migrate --down: target schema version.
   -h, --help              Show this help.
 
 Examples:
@@ -79,6 +82,8 @@ async function main(argv: string[]): Promise<number> {
       once: { type: 'boolean' },
       all: { type: 'boolean' },
       repair: { type: 'boolean' },
+      down: { type: 'boolean' },
+      to: { type: 'string' },
       'max-events': { type: 'string' },
       fixture: { type: 'string' },
       'before-ledger': { type: 'string' },
@@ -235,6 +240,39 @@ async function main(argv: string[]): Promise<number> {
       }
     }
 
+    case 'migrate': {
+      if (!values.down) {
+        process.stderr.write('error: lens migrate currently only supports --down (forward migration runs automatically on open)\n');
+        return 2;
+      }
+      if (values.to === undefined) {
+        process.stderr.write('error: --down requires --to <version>\n');
+        return 2;
+      }
+      const toVersion = Number(values.to);
+      if (!Number.isFinite(toVersion) || toVersion < 0) {
+        process.stderr.write(`error: --to must be a non-negative number, got "${values.to}"\n`);
+        return 2;
+      }
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        const rolledBack = await store.migrateDown(toVersion);
+        if (rolledBack.length === 0) {
+          process.stderr.write(`[lens] already at or below schema v${toVersion}; nothing to roll back\n`);
+        } else {
+          process.stderr.write(
+            `[lens] rolled back migration(s) ${rolledBack.join(', ')}; now at schema v${toVersion}\n`,
+          );
+        }
+      } catch (error) {
+        process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
+        return 1;
+      } finally {
+        await store.close();
+      }
+      return 0;
+    }
+
     case 'completion': {
       const shell = rest[0] || 'bash';
       process.stdout.write(`${generateCompletion(shell)}\n`);
@@ -254,7 +292,7 @@ function generateCompletion(shell: string): string {
   local cur prev commands options
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="doctor index seed stats prune redecode verify completion"
+  commands="doctor index seed stats prune redecode verify migrate completion"
   options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --poll-interval --once --max-events --fixture --before-ledger -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
@@ -291,6 +329,7 @@ _lens() {
     'prune:Delete events below a ledger'
     'redecode:Re-run the decoder over failed rows'
     'verify:Check stored-row invariants'
+    'migrate:Roll migrations forward or back'
     'completion:Generate shell autocompletions'
   )
   _arguments '1: :->command' '*: :->args'
@@ -309,6 +348,7 @@ complete -c lens -n "__fish_use_subcommand" -a stats -d "Print database statisti
 complete -c lens -n "__fish_use_subcommand" -a prune -d "Delete events below a ledger"
 complete -c lens -n "__fish_use_subcommand" -a redecode -d "Re-run the decoder over failed rows"
 complete -c lens -n "__fish_use_subcommand" -a verify -d "Check stored-row invariants"
+complete -c lens -n "__fish_use_subcommand" -a migrate -d "Roll migrations forward or back"
 complete -c lens -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c lens -l network -s n -x -a "testnet mainnet futurenet"
 complete -c lens -l help -s h -d "Show help"`;
