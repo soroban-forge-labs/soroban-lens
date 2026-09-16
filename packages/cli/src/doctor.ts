@@ -1,4 +1,4 @@
-import { access, constants, mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, constants, mkdir, rm, writeFile, statfs } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { LensRpcClient, isContractId, CONTRACT_ID_HINT } from '@soroban-lens/ingest';
 import { SqliteEventStore, LATEST_SCHEMA_VERSION } from '@soroban-lens/store';
@@ -35,6 +35,7 @@ export async function runDoctor(config: LensConfig): Promise<CheckResult[]> {
   const checks = await Promise.all([
     checkNodeVersion(),
     checkDataDirWritable(config.dataDir),
+    checkDiskSpace(config.dataDir),
     checkDatabase(config.dbPath),
     checkRpc(config),
   ]);
@@ -72,6 +73,47 @@ async function checkDataDirWritable(dataDir: string): Promise<CheckResult> {
     };
   }
 }
+
+async function checkDiskSpace(dataDir: string): Promise<CheckResult> {
+  try {
+    await mkdir(dataDir, { recursive: true });
+    if (typeof statfs === 'function') {
+      const stat = await statfs(dataDir);
+      const freeBytes = Number(BigInt(stat.bfree) * BigInt(stat.bsize));
+      const freeGb = (freeBytes / (1024 * 1024 * 1024)).toFixed(1);
+
+      if (freeBytes < 100 * 1024 * 1024) {
+        return {
+          name: 'Disk space',
+          status: 'fail',
+          detail: `${freeGb} GB available in ${dataDir}`,
+          fix: 'Critically low disk space (<100MB). Free up storage before running the indexer to prevent database corruption.',
+        };
+      }
+      if (freeBytes < 1024 * 1024 * 1024) {
+        return {
+          name: 'Disk space',
+          status: 'warn',
+          detail: `${freeGb} GB available in ${dataDir}`,
+          fix: 'Low disk space (<1GB). Ensure enough capacity for the SQLite ledger database to grow.',
+        };
+      }
+      return {
+        name: 'Disk space',
+        status: 'pass',
+        detail: `${freeGb} GB available in ${dataDir}`,
+      };
+    }
+    return { name: 'Disk space', status: 'pass', detail: 'statfs unavailable' };
+  } catch (error) {
+    return {
+      name: 'Disk space',
+      status: 'warn',
+      detail: `Unable to inspect disk space: ${message(error)}`,
+    };
+  }
+}
+
 
 async function checkDatabase(dbPath: string): Promise<CheckResult> {
   try {
