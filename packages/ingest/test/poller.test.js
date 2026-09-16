@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EventPoller, MemoryCursorStore, buildFilters } from '../dist/index.js';
+import {
+  EventPoller,
+  MemoryCursorStore,
+  buildFilters,
+  ingestionLag,
+  APPROX_LEDGER_SECONDS,
+} from '../dist/index.js';
 
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
 const OTHER = 'CA6F5E42TCRGPMDXU33WGMXAADPNEKOIZETAWSKYKAWNHESQQ2MTLSCC';
@@ -275,4 +281,27 @@ test('a well-formed contract id and an empty list are both accepted', () => {
   assert.doesNotThrow(() => new EventPoller({ contractIds: [SAC] }, { client }));
   // Empty means "every contract on the network", which is documented behaviour.
   assert.doesNotThrow(() => new EventPoller({ contractIds: [] }, { client }));
+});
+
+// ── #10 report ingestion lag in PollerProgress ───────────────────────────────
+
+test('progress reports lag in ledgers and an estimated wall-clock lag', async () => {
+  const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+  const [batch] = await take(poller.stream(), 1);
+
+  assert.equal(batch.progress.lagLedgers, 4697317 - 4695317);
+  assert.equal(batch.progress.lagSeconds, (4697317 - 4695317) * APPROX_LEDGER_SECONDS);
+});
+
+test('ingestionLag is the single definition every consumer shares', () => {
+  assert.deepEqual(ingestionLag(100, 160), { lagLedgers: 60, lagSeconds: 300 });
+  assert.deepEqual(ingestionLag(160, 160), { lagLedgers: 0, lagSeconds: 0 });
+});
+
+test('lag never goes negative when the node reports a stale latestLedger', () => {
+  // The page we were just served can be ahead of the node's own latestLedger.
+  assert.deepEqual(ingestionLag(200, 160), { lagLedgers: 0, lagSeconds: 0 });
 });

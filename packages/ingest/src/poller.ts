@@ -15,12 +15,41 @@ export interface PollerDeps {
   log?: (message: string) => void;
 }
 
+/**
+ * Mean Stellar ledger close time, used to turn a ledger lag into a rough
+ * wall-clock lag. Protocol target is ~5s and mainnet sits close to it, but it
+ * is an average, not a guarantee — hence `lagSeconds` being documented as an
+ * estimate everywhere it is surfaced.
+ */
+export const APPROX_LEDGER_SECONDS = 5;
+
 /** Emitted alongside batches so callers can show progress without extra RPC calls. */
 export interface PollerProgress {
   cursor: string;
   ledger: number;
   latestLedger: number;
   caughtUp: boolean;
+  /** Ledgers between the last event yielded and the node's latest ledger. */
+  lagLedgers: number;
+  /**
+   * `lagLedgers` x ~5s. An **estimate**: ledger close time varies, so this is
+   * for a human-readable "about a minute behind", never for correctness.
+   */
+  lagSeconds: number;
+}
+
+/**
+ * One definition of lag, so the CLI, the metrics endpoint (#1) and the API
+ * cannot each compute a slightly different number.
+ */
+export function ingestionLag(ledger: number, latestLedger: number): {
+  lagLedgers: number;
+  lagSeconds: number;
+} {
+  // Clamped at zero: a node can report a latestLedger behind the page it just
+  // served us, and negative lag would be nonsense in a gauge.
+  const lagLedgers = Math.max(0, latestLedger - ledger);
+  return { lagLedgers, lagSeconds: lagLedgers * APPROX_LEDGER_SECONDS };
 }
 
 /**
@@ -127,6 +156,7 @@ export class EventPoller {
             ledger: lastLedger,
             latestLedger: batch.latestLedger,
             caughtUp,
+            ...ingestionLag(lastLedger, batch.latestLedger),
           },
         };
       }
