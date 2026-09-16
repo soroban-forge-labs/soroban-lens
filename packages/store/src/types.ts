@@ -84,6 +84,13 @@ export interface EventQuery {
   toTime?: number | undefined;
   txHash?: string | undefined;
   /**
+   * Match any event mentioning this address — anywhere: a topic segment
+   * (indexed or beyond the 4-segment ceiling) or nested inside the decoded
+   * value. Backed by the event_addresses side table (#23), not the topic0..3
+   * columns, so this finds addresses a topic filter structurally cannot.
+   */
+  address?: string | undefined;
+  /**
    * Position of the transaction within its ledger. Paired with `txHash` or a
    * ledger bound it pins down one transaction's events exactly.
    */

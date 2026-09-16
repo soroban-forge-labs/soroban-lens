@@ -1,7 +1,7 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { decodeEvent, topicKey } from './decode.js';
+import { decodeEvent, topicKey, extractAddresses } from './decode.js';
 import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
@@ -227,7 +227,13 @@ export class SqliteEventStore implements EventStore {
       let inserted = 0;
       for (const e of events) {
         const result = stmt.run(...insertParams(e));
-        inserted += Number(result.changes ?? 0);
+        const changed = Number(result.changes ?? 0);
+        inserted += changed;
+        // Only for a row that was actually new: a replayed duplicate is
+        // already fully indexed, and re-running extraction on it would be
+        // wasted work, not a correctness issue — INSERT OR IGNORE on the
+        // composite key absorbs a genuine repeat either way.
+        if (changed > 0) this.#insertAddresses(e.id, e);
       }
       this.#db.exec('COMMIT');
       return inserted;
@@ -235,6 +241,23 @@ export class SqliteEventStore implements EventStore {
       this.#db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  /**
+   * Extract every address from an event's topics and value, and record where
+   * each one appeared. Topics beyond the indexed four still get a position —
+   * 'topicN' — because #23 is specifically about finding an address anywhere
+   * an event mentions it, and a >4-topic event (real ones exist; see the
+   * fixture) is exactly the case a naive "only the indexed topics" version
+   * would silently miss.
+   */
+  #insertAddresses(eventId: string, e: LensEvent): void {
+    const stmt = this.#prepared().insertAddress;
+    e.topicsXdr.forEach((topicXdr, i) => {
+      const position = `topic${i}`; // topic0..topic3 are indexed; topic4+ still get a position
+      for (const address of extractAddresses(topicXdr)) stmt.run(eventId, address, position);
+    });
+    for (const address of extractAddresses(e.valueXdr)) stmt.run(eventId, address, 'value');
   }
 
   async getEvent(id: string): Promise<LensEvent | null> {
@@ -504,7 +527,11 @@ export class SqliteEventStore implements EventStore {
     const update = this.#recomputeStatement();
     this.#db.exec('BEGIN');
     try {
-      for (const row of rows) update.run(...this.#recomputeParams(row));
+      for (const row of rows) {
+        const { params, event } = this.#recompute(row);
+        update.run(...params);
+        this.#refreshAddresses(row.id, event);
+      }
       this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.exec('ROLLBACK');
@@ -576,7 +603,22 @@ export class SqliteEventStore implements EventStore {
   async repairRow(id: string): Promise<void> {
     const rows = this.#rawRows('WHERE id = ?', [id]);
     if (rows.length === 0) return;
-    this.#recomputeStatement().run(...this.#recomputeParams(rows[0]!));
+    const { params, event } = this.#recompute(rows[0]!);
+    this.#db.exec('BEGIN');
+    try {
+      this.#recomputeStatement().run(...params);
+      this.#refreshAddresses(id, event);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /** Replace one event's address-index rows with a fresh extraction. */
+  #refreshAddresses(eventId: string, event: LensEvent): void {
+    this.#db.prepare('DELETE FROM event_addresses WHERE event_id = ?').run(eventId);
+    this.#insertAddresses(eventId, event);
   }
 
   /** Shared shape read by both redecode() and repairRow() to recompute derived columns. */
@@ -602,7 +644,7 @@ export class SqliteEventStore implements EventStore {
     `);
   }
 
-  #recomputeParams(row: RawRow): SqlParam[] {
+  #recompute(row: RawRow): { params: SqlParam[]; event: LensEvent } {
     const raw: RawEventInput = {
       id: row.id,
       contractId: row.contract_id,
@@ -620,7 +662,7 @@ export class SqliteEventStore implements EventStore {
     // exactly this — indexedAt is left untouched, since it records when the
     // event was first ingested, not when it was decoded or repaired.
     const redecoded = decodeEvent(raw, new Date(row.indexed_at));
-    return [
+    const params: SqlParam[] = [
       JSON.stringify(redecoded.topics),
       // A row rewritten by redecode()/repairRow() is written back compressed
       // regardless of what format it was in before, so both quietly upgrade
@@ -637,6 +679,7 @@ export class SqliteEventStore implements EventStore {
       redecoded.decodeError ?? null,
       row.id,
     ];
+    return { params, event: redecoded };
   }
 
   async checkpoint(mode: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE' = 'TRUNCATE'): Promise<void> {
@@ -699,6 +742,7 @@ interface EventRow {
 interface Statements {
   insert: StatementSync;
   byId: StatementSync;
+  insertAddress: StatementSync;
 }
 
 function buildStatements(db: DatabaseSync): Statements {
@@ -714,6 +758,9 @@ function buildStatements(db: DatabaseSync): Statements {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     byId: db.prepare('SELECT * FROM events WHERE id = ?'),
+    insertAddress: db.prepare(
+      'INSERT OR IGNORE INTO event_addresses (event_id, address, position) VALUES (?, ?, ?)',
+    ),
   };
 }
 
@@ -779,6 +826,18 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
   if (query.txHash) {
     conditions.push('tx_hash = ?');
     values.push(query.txHash);
+  }
+  if (query.address) {
+    // IN (subquery), not a JOIN or a correlated EXISTS: a JOIN would multiply
+    // the row when an address appears at several positions in one event,
+    // before the pagination LIMIT ever sees it. A correlated EXISTS measured
+    // slower in practice — SQLite drove it from a full scan of events,
+    // checking event_addresses per row, rather than from the address index —
+    // confirmed with EXPLAIN QUERY PLAN before choosing this form over it.
+    // IN (SELECT ...) drives from idx_event_addresses_address instead: find
+    // the matching event_ids first, then look each up by primary key.
+    conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ?)');
+    values.push(query.address);
   }
   // Compared against undefined, not truthiness: index 0 is the first
   // transaction in a ledger and the first operation in a transaction, so it is

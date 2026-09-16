@@ -1182,3 +1182,146 @@ test('redecode upgrades a legacy plain-text row to compressed storage', async ()
   await store.close();
   await rm(dir, { recursive: true, force: true });
 });
+
+// ── #23 index events by decoded address ──────────────────────────────────────
+
+test('GET-equivalent: filtering by address finds an event whose address is beyond the 4 indexed topics', async () => {
+  const store = await seeded();
+  // Real fixture event: 5 topics, with addresses at position 4 (beyond the
+  // topic0..3 columns that a topic filter can reach).
+  const address = 'CCUUDM434BMZMYWYDITHFXHDMIVTGGD6T2I5UKNX5BSLXLW7HVR4MCGZ';
+  const page = await store.queryEvents({ address, limit: MAX_QUERY_LIMIT });
+  assert.ok(page.events.length > 0);
+  assert.ok(page.events.some((e) => e.id === '0020166232959406080-0000000000'));
+  await store.close();
+});
+
+test('filtering by address also finds one mentioned only inside the decoded value', async () => {
+  const store = await seeded();
+  // Every fixture event's value is a map or vec that itself contains
+  // addresses (token transfers carry from/to). Pick one from a real event and
+  // confirm the filter finds it via the value tree, not a topic.
+  const event = (await store.queryEvents({ limit: 1 })).events[0];
+  const addressInValue = findAddress(event.value);
+  assert.ok(addressInValue, 'expected the fixture to contain a decoded address inside a value');
+
+  const page = await store.queryEvents({ address: addressInValue, limit: MAX_QUERY_LIMIT });
+  assert.ok(page.events.some((e) => e.id === event.id));
+  await store.close();
+});
+
+function findAddress(decoded) {
+  if (decoded.type === 'address' && typeof decoded.value === 'string') return decoded.value;
+  const v = decoded.value;
+  if (Array.isArray(v)) {
+    for (const el of v) {
+      if (typeof el === 'string' && /^[GC][A-Z2-7]{55}$/.test(el)) return el;
+    }
+  } else if (v && typeof v === 'object') {
+    for (const val of Object.values(v)) {
+      if (typeof val === 'string' && /^[GC][A-Z2-7]{55}$/.test(val)) return val;
+    }
+  }
+  return null;
+}
+
+test('an address that appears nowhere returns an empty page', async () => {
+  const store = await seeded();
+  const page = await store.queryEvents({ address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB', limit: 10 });
+  assert.equal(page.total, 0);
+  assert.deepEqual(page.events, []);
+  await store.close();
+});
+
+test('the address filter drives from idx_event_addresses_address, not a full scan of events', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+  await store.close();
+
+  // The exact shape queryEvents({ address }) builds via buildWhere.
+  const db = new DatabaseSync(path);
+  const explained = db
+    .prepare(
+      `EXPLAIN QUERY PLAN SELECT * FROM events
+       WHERE id IN (SELECT event_id FROM event_addresses WHERE address = ?)
+       ORDER BY id DESC LIMIT ?`,
+    )
+    .all('GBIBH5UV4Q5L7VVJIHWYBTCSUDHJQXQC2V6Y5LOW4D26XNU5NREMIKE4', 50)
+    .map((r) => r.detail)
+    .join(' | ');
+  db.close();
+
+  assert.match(explained, /idx_event_addresses_address/, `planner chose: ${explained}`);
+  // The defining property: driven from the address index, not a scan of
+  // every row in events looking for a match.
+  assert.ok(!/SCAN events/.test(explained), `still scanning events: ${explained}`);
+
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('pruning cascades: deleted events lose their address-index rows too', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+
+  const db = new DatabaseSync(path);
+  const before = db.prepare('SELECT COUNT(*) AS n FROM event_addresses').get().n;
+  db.close();
+  assert.ok(before > 0);
+
+  await store.pruneBefore(9_999_999); // prunes everything
+  await store.close();
+
+  const after = new DatabaseSync(path);
+  const remaining = after.prepare('SELECT COUNT(*) AS n FROM event_addresses').get().n;
+  after.close();
+  assert.equal(remaining, 0, 'ON DELETE CASCADE should have removed every orphaned address row');
+
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('redecode refreshes the address index for the row it touches', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  const target = { id: fixture.events[0].id, contractId: fixture.events[0].contractId };
+  await store.insertEvents([fixture.events[0]]);
+
+  const db = new DatabaseSync(path);
+  const before = db.prepare('SELECT COUNT(*) AS n FROM event_addresses WHERE event_id = ?').get(target.id).n;
+  db.close();
+
+  await store.redecode(true);
+
+  const after = new DatabaseSync(path);
+  const afterCount = after.prepare('SELECT COUNT(*) AS n FROM event_addresses WHERE event_id = ?').get(target.id).n;
+  after.close();
+  assert.equal(afterCount, before, 're-decoding the same valid XDR must produce the same addresses, not duplicates');
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('inserting the same event twice (at-least-once replay) does not duplicate address rows', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  const id = fixture.events[0].id;
+
+  await store.insertEvents([fixture.events[0]]);
+  const db1 = new DatabaseSync(path);
+  const once = db1.prepare('SELECT COUNT(*) AS n FROM event_addresses WHERE event_id = ?').get(id).n;
+  db1.close();
+
+  await store.insertEvents([fixture.events[0]]); // the replay
+  const db2 = new DatabaseSync(path);
+  const twice = db2.prepare('SELECT COUNT(*) AS n FROM event_addresses WHERE event_id = ?').get(id).n;
+  db2.close();
+
+  assert.equal(twice, once, 'a replayed insert must not duplicate address rows');
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});

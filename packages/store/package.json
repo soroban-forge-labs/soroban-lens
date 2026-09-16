@@ -15,7 +15,8 @@
     "test": "npm run build && node --test test/*.test.js",
     "bench:count-cache": "npm run build && node bench/count-cache.bench.js",
     "bench:insert": "npm run build && node bench/insert-strategies.bench.js",
-    "bench:xdr-compression": "npm run build && node bench/xdr-compression.bench.js"
+    "bench:xdr-compression": "npm run build && node bench/xdr-compression.bench.js",
+    "bench:address-index": "npm run build && node bench/address-index.bench.js"
   },
   "dependencies": { "@stellar/stellar-sdk": "^17.1.0" },
   "devDependencies": { "typescript": "^5.9.0", "@types/node": "^22.10.0" }

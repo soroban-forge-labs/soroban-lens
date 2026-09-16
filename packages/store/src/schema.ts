@@ -110,6 +110,34 @@ export const MIGRATIONS: Migration[] = [
     `,
     down: `DROP INDEX IF EXISTS idx_events_closed_at_unix;`,
   },
+  {
+    version: 4,
+    name: 'index-decoded-addresses',
+    up: `
+      -- One row per (address, position) an address appears at inside an
+      -- event — a topic segment or anywhere in the decoded value. An event
+      -- can mention the same address more than once (sender and recipient
+      -- can differ, but a self-transfer mentions one address at two
+      -- positions), so this is not a simple many-to-one.
+      -- A composite primary key, not a synthetic id: it is what makes
+      -- INSERT OR IGNORE here idempotent, matching how the events table
+      -- itself absorbs Module 1's at-least-once delivery. The same address
+      -- can never legitimately appear twice at the same position for the
+      -- same event — extraction already de-duplicates within one position.
+      CREATE TABLE event_addresses (
+        event_id TEXT    NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        address  TEXT    NOT NULL,
+        position TEXT    NOT NULL,  -- 'topic0'..'topic3', 'topicN' (4+), or 'value'
+        PRIMARY KEY (event_id, address, position)
+      ) WITHOUT ROWID;
+
+      -- The address lookup this table exists for.
+      CREATE INDEX idx_event_addresses_address ON event_addresses (address, event_id);
+      -- Cleanup and re-extraction (prune, redecode) look up by event_id.
+      CREATE INDEX idx_event_addresses_event_id ON event_addresses (event_id);
+    `,
+    down: `DROP TABLE IF EXISTS event_addresses;`,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.reduce(

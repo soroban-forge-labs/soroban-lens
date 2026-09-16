@@ -137,6 +137,7 @@ correctness, so they never run in `npm test` or CI:
 npm run bench:count-cache -w @soroban-lens/store       # #26
 npm run bench:insert -w @soroban-lens/store            # #27
 npm run bench:xdr-compression -w @soroban-lens/store   # #35
+npm run bench:address-index -w @soroban-lens/store     # #23
 ```
 
 `insert-strategies.bench.js` (#27) measured `insertDecoded`'s one-prepared-
@@ -155,6 +156,22 @@ small integer — are stored as plain text rather than paying gzip's ~18-20
 byte fixed overhead to grow). Decompression costs about 1.7µs per call, which
 is irrelevant next to the UI's "Raw XDR" panel being a one-event, one-click
 fetch rather than a hot path.
+
+`address-index.bench.js` (#23) inserted 1,000,000 synthetic rows and queried
+`?address=` for two shapes: an address mentioned in ~0.1% of rows (a specific
+account) and one mentioned in every single row (a token contract's own
+address inside every transfer it emits). The rare address resolves in under a
+millisecond regardless of table size — `idx_event_addresses_address` drives
+straight to the matching rows. The common address takes several seconds: it
+is the honest worst case for any b-tree index, where a small page over a
+filter matching nearly everything has nowhere to push the pagination `LIMIT`
+down to. The extraction itself is not free either — inserting the same
+1,000,000 rows costs roughly 8x what it does without address extraction,
+since every topic and value gets parsed a second time (decodeEvent's own
+parse, plus extractAddresses' walk of the raw ScVal tree) to find what it
+mentions. Both numbers are reported as measured, not smoothed over — the
+address filter is for the selective case, and the benchmark shows both where
+it wins and where it does not.
 
 ## Tests
 

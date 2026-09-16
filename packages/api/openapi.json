@@ -191,6 +191,9 @@
             "$ref": "#/components/parameters/TxHash"
           },
           {
+            "$ref": "#/components/parameters/Address"
+          },
+          {
             "$ref": "#/components/parameters/TransactionIndex"
           },
           {
@@ -369,6 +372,9 @@
           },
           {
             "$ref": "#/components/parameters/TxHash"
+          },
+          {
+            "$ref": "#/components/parameters/Address"
           },
           {
             "$ref": "#/components/parameters/TransactionIndex"
@@ -622,6 +628,16 @@
           "type": "string"
         },
         "example": "0020166263024140288-0000000002,0020166263024140288-0000000000"
+      },
+      "Address": {
+        "name": "address",
+        "in": "query",
+        "description": "Match any event mentioning this address anywhere \u2014 a topic segment (indexed or beyond the 4-segment ceiling) or nested inside the decoded value. A StrKey: 'G' (account) or 'C' (contract) followed by 55 characters.",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "GBIBH5UV4Q5L7VVJIHWYBTCSUDHJQXQC2V6Y5LOW4D26XNU5NREMIKE4"
       }
     },
     "responses": {

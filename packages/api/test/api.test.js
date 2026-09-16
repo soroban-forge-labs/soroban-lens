@@ -4,14 +4,8 @@ import { readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { once } from 'node:events';
-import {
-  SqliteEventStore,
-  LATEST_SCHEMA_VERSION,
-  MAX_QUERY_LIMIT,
-  MIGRATIONS,
-} from '@soroban-lens/store';
+import { SqliteEventStore, LATEST_SCHEMA_VERSION, MAX_QUERY_LIMIT } from '@soroban-lens/store';
 import { createApiServer, MAX_BATCH_IDS } from '../dist/index.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
@@ -587,16 +581,19 @@ async function withStaleServer(run) {
   const dir = await mkdtemp(join(tmpdir(), 'lens-stale-'));
   const path = join(dir, 'lens.db');
 
-  const raw = new DatabaseSync(path);
-  raw.exec(`CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
-  raw.exec(MIGRATIONS[0].up);
-  raw.prepare('INSERT INTO schema_migrations VALUES (?, ?, ?)').run(1, MIGRATIONS[0].name, '');
-  raw.close();
+  // Seed on a fully-current store — insertDecoded may depend on tables later
+  // migrations add (event_addresses, #23) — then roll the schema back to v1.
+  // That models the realistic version of "stale schema": data that predates
+  // a rollback, read by code that still expects the newer schema. Building a
+  // v1-only schema by hand and inserting through it stopped being realistic
+  // once insertDecoded started writing to a table v1 does not have.
+  const seed = new SqliteEventStore({ path });
+  await seed.insertEvents(fixture.events);
+  await seed.migrateDown(1);
+  await seed.close();
 
   // migrateOnOpen: false, or opening it would bring it up to date.
   const store = new SqliteEventStore({ path, migrateOnOpen: false });
-  await store.insertEvents(fixture.events);
   const server = createApiServer({ store });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -735,4 +732,42 @@ test('no log option is silent, same as before structured logging existed', async
     await once(server, 'close');
     await store.close();
   }
+});
+
+// ── #23 GET /events?address= ─────────────────────────────────────────────────
+
+test('GET /events?address= finds an event whose address is beyond the 4 indexed topics', async () => {
+  await withServer(async ({ get }) => {
+    const address = 'CCUUDM434BMZMYWYDITHFXHDMIVTGGD6T2I5UKNX5BSLXLW7HVR4MCGZ';
+    const { res, body } = await get(`/events?address=${address}&limit=1000`);
+    assert.equal(res.status, 200);
+    assert.ok(body.events.some((e) => e.id === '0020166232959406080-0000000000'));
+  });
+});
+
+test('a malformed address is a 400 naming the parameter', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?address=not-an-address');
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'address');
+  });
+});
+
+test('a well-formed but unmentioned address returns an empty page', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?address=GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABC');
+    assert.equal(res.status, 200);
+    assert.equal(body.total, 0);
+  });
+});
+
+test('address combines with the contract route', async () => {
+  await withServer(async ({ get }) => {
+    const address = 'CCUUDM434BMZMYWYDITHFXHDMIVTGGD6T2I5UKNX5BSLXLW7HVR4MCGZ';
+    const contractId = 'CCJQB4EEQLBL7RHIPYMYG26ZT2QRKEYNGVWWL2EPZCECFI6GZGNXMIEX';
+    const { res, body } = await get(`/contracts/${contractId}/events?address=${address}&limit=1000`);
+    assert.equal(res.status, 200);
+    assert.ok(body.events.every((e) => e.contractId === contractId));
+    assert.ok(body.events.length > 0);
+  });
 });

@@ -1,4 +1,4 @@
-import { xdr, scValToNative } from '@stellar/stellar-sdk';
+import { xdr, scValToNative, Address } from '@stellar/stellar-sdk';
 import type { DecodedValue, JsonValue, LensEvent, RawEventInput } from './types.js';
 
 /**
@@ -131,6 +131,52 @@ export function topicKey(topic: DecodedValue | undefined): string | null {
   if (typeof v === 'string') return v;
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
   return null;
+}
+
+/**
+ * Every address anywhere inside a decoded ScVal, for #23's side-table index.
+ *
+ * scValToNative() collapses the whole tree into plain natives — a nested
+ * address inside a vec or a map comes out as a bare string, indistinguishable
+ * from any other string in the same position. That is fine for display, and
+ * useless for finding addresses: by the time a value is JSON, the type tag
+ * that said "this string is an address" is already gone. This walks the raw
+ * ScVal tree instead, before that information is lost, using the same
+ * constructor-name dispatch decodeScVal() uses for the same reason.
+ *
+ * Never throws: malformed XDR degrades to an empty list rather than breaking
+ * the insert it would otherwise be part of. decodeEvent() already carries the
+ * real error via decodeError; this is a secondary extraction, not the
+ * authoritative decode.
+ */
+export function extractAddresses(base64: string): string[] {
+  const found = new Set<string>();
+  try {
+    walkForAddresses(xdr.ScVal.fromXDR(base64, 'base64'), found);
+  } catch {
+    // decodeEvent's try/catch around decodeScVal is what reports this
+    // properly; here it is simply nothing to extract.
+  }
+  return [...found];
+}
+
+function walkForAddresses(scv: unknown, out: Set<string>): void {
+  const name = (scv as { constructor?: { name?: string } })?.constructor?.name;
+  if (name === 'ScValAddress') {
+    out.add(Address.fromScVal(scv as xdr.ScVal).toString());
+    return;
+  }
+  if (name === 'ScValVec') {
+    for (const element of (scv as xdr.ScValVec).value as unknown[]) walkForAddresses(element, out);
+    return;
+  }
+  if (name === 'ScValMap') {
+    for (const entry of (scv as xdr.ScValMap).value as xdr.ScMapEntry[]) {
+      walkForAddresses(entry.key, out);
+      walkForAddresses(entry.val, out);
+    }
+  }
+  // Every other arm is a scalar or a fixed shape with no address inside it.
 }
 
 function message(error: unknown): string {
