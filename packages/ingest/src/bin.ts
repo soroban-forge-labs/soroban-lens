@@ -11,6 +11,8 @@ import { EventPoller } from './poller.js';
 import { FileCursorStore, MemoryCursorStore } from './cursor.js';
 import { resolveNetwork, NETWORKS } from './networks.js';
 import type { EventType } from './types.js';
+import { IngestMetrics } from './metrics.js';
+import { startMetricsServer, closeMetricsServer } from './metrics-server.js';
 
 const EVENT_TYPES: EventType[] = ['contract', 'system', 'diagnostic'];
 
@@ -99,6 +101,8 @@ Options:
       --no-resume          Ignore and do not write any stored cursor.
       --once               Exit once caught up to the current tip.
       --max-events <n>     Exit after emitting this many events.
+      --metrics-port <n>   Enable /metrics (typically 9090; disabled by default).
+      --metrics-host <ip>  Bind address (default: 127.0.0.1).
   -h, --help               Show this help.
 
 Environment:
@@ -133,6 +137,8 @@ async function main(argv: string[]): Promise<number> {
       'no-resume': { type: 'boolean' },
       once: { type: 'boolean' },
       'max-events': { type: 'string' },
+      'metrics-port': { type: 'string' },
+      'metrics-host': { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: false,
@@ -213,7 +219,14 @@ async function main(argv: string[]): Promise<number> {
     ...numeric('maxDelayMs', values['retry-max-delay'] ?? process.env.LENS_RETRY_MAX_DELAY_MS),
   };
 
+  const metricsPort = values['metrics-port'] ?? process.env.LENS_METRICS_PORT;
+  const port = metricsPort === undefined ? undefined : Number(metricsPort);
+  if (port !== undefined && (!/^\d+$/.test(metricsPort!) || !Number.isInteger(port) || port < 1 || port > 65535)) {
+    throw new Error('--metrics-port must be an integer from 1 to 65535');
+  }
+  const metrics = new IngestMetrics();
   const client = new LensRpcClient({
+    metrics,
     rpcUrl: network.rpcUrl,
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
     retry: {
@@ -241,6 +254,7 @@ async function main(argv: string[]): Promise<number> {
     {
       client,
       cursors,
+      metrics,
       log: (m) => process.stderr.write(`[ingest] ${m}\n`),
     },
   );
@@ -259,6 +273,10 @@ async function main(argv: string[]): Promise<number> {
       '\n',
   );
 
+  const metricsServer = port === undefined ? undefined : await startMetricsServer(
+    metrics, port, values['metrics-host'] ?? process.env.LENS_METRICS_HOST ?? '127.0.0.1',
+  );
+  try {
   for await (const batch of poller.stream()) {
     for (const event of batch.events) {
       process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -277,6 +295,9 @@ async function main(argv: string[]): Promise<number> {
     }
   }
   return 0;
+  } finally {
+    if (metricsServer) await closeMetricsServer(metricsServer);
+  }
 }
 
 main(process.argv.slice(2))
