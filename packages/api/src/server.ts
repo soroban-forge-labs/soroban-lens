@@ -204,7 +204,42 @@ const routes: Route[] = [
       contentType: 'application/json; charset=utf-8',
     }),
   },
+  {
+    // A browsable page over the same spec /openapi.json serves, for a
+    // newcomer who would rather click through routes than read raw JSON.
+    // Redoc reads /openapi.json client-side, same-origin, so this route
+    // itself never needs to know the spec's content and stays exempt from
+    // the schema-currency check the same way the JSON route already is.
+    method: 'GET',
+    pattern: /^\/docs$/,
+    exemptFromSchemaCheck: true,
+    handler: async () => ({
+      body: DOCS_HTML,
+      contentType: 'text/html; charset=utf-8',
+    }),
+  },
 ];
+
+/**
+ * Redoc, pinned to an exact version from a CDN — not `@latest`, so an
+ * unrelated Redoc release can never change what this route serves. Reads
+ * /openapi.json itself, so this page carries no spec content of its own and
+ * cannot drift from the committed spec the way a static copy could.
+ */
+const DOCS_HTML = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>soroban-lens API</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>body { margin: 0; padding: 0; }</style>
+</head>
+<body>
+  <redoc spec-url="/openapi.json"></redoc>
+  <script src="https://cdn.jsdelivr.net/npm/redoc@2.5.4/bundles/redoc.standalone.js"></script>
+</body>
+</html>
+`;
 
 /**
  * The committed spec with the live query ceiling patched in.

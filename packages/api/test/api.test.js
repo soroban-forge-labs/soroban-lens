@@ -865,3 +865,37 @@ test('gzip is preferred over deflate when a client advertises both', async () =>
     assert.equal(res.headers.get('content-encoding'), 'gzip');
   });
 });
+
+// ── #45 GET /docs ─────────────────────────────────────────────────────────────
+
+test('GET /docs renders an HTML page pointing Redoc at the live spec', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/docs`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /text\/html/);
+    const html = await res.text();
+    assert.match(html, /<redoc spec-url="\/openapi\.json">/);
+    assert.match(html, /redoc\.standalone\.js/);
+    // Pinned, not @latest — an unrelated Redoc release must not change this route.
+    assert.ok(!html.includes('redoc@latest'));
+  });
+});
+
+test('/docs reads the same spec /openapi.json serves — no duplicated content', async () => {
+  await withServer(async ({ base }) => {
+    const docs = await fetch(`${base}/docs`);
+    const html = await docs.text();
+    // The page references the live route rather than embedding a copy of the
+    // spec, so it can never drift from what /openapi.json actually serves.
+    assert.match(html, /spec-url="\/openapi\.json"/);
+    assert.ok(!html.includes('"openapi"'), 'the spec must not be embedded inline');
+  });
+});
+
+test('HEAD /docs works, matching every other GET route', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/docs`, { method: 'HEAD' });
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), '');
+  });
+});
