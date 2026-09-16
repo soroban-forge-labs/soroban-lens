@@ -346,3 +346,50 @@ test('an in-memory database reports null size rather than a misleading zero', as
   assert.equal(stats.walSizeBytes, null);
   await store.close();
 });
+
+// ── #30 countByTopic aggregate ───────────────────────────────────────────────
+
+test('countByTopic ranks first-topic values across every contract', async () => {
+  const store = await seeded();
+  const topics = await store.countByTopic();
+
+  assert.ok(topics.length > 0);
+  // Ordered by frequency, descending.
+  const counts = topics.map((t) => t.count);
+  assert.deepEqual(counts, [...counts].sort((a, b) => b - a));
+
+  // It spans contracts, unlike listTopics. The global count for a topic must
+  // be at least what any single contract reports for it.
+  const perContract = await store.listTopics(SAC);
+  for (const { topic, count } of perContract) {
+    const global = topics.find((t) => t.topic === topic);
+    assert.ok(global, `global aggregate is missing ${topic}`);
+    assert.ok(global.count >= count, `${topic}: global ${global.count} < ${SAC} ${count}`);
+  }
+  await store.close();
+});
+
+test('countByTopic totals match the events that carry a scalar first topic', async () => {
+  const store = await seeded();
+  const topics = await store.countByTopic(1000);
+  const summed = topics.reduce((n, t) => n + t.count, 0);
+
+  const { total } = await store.queryEvents({ limit: 1000 });
+  // Every fixture event has a scalar symbol first topic, so the aggregate
+  // accounts for all of them.
+  assert.equal(summed, total);
+  await store.close();
+});
+
+test('countByTopic respects its limit and the documented ceiling', async () => {
+  const store = await seeded();
+  assert.equal((await store.countByTopic(2)).length, 2);
+  assert.ok((await store.countByTopic(MAX_QUERY_LIMIT + 500)).length <= MAX_QUERY_LIMIT);
+  await store.close();
+});
+
+test('countByTopic is empty on an empty database rather than erroring', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  assert.deepEqual(await store.countByTopic(), []);
+  await store.close();
+});

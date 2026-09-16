@@ -57,7 +57,12 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/stats$/,
-    handler: async ({ store }) => ({ body: await store.getStats() }),
+    handler: async ({ store }) => {
+      // topTopics answers "what event types are in here at all" without
+      // paging the whole table (#30).
+      const [stats, topTopics] = await Promise.all([store.getStats(), store.countByTopic(10)]);
+      return { body: { ...stats, topTopics } };
+    },
   },
   {
     // Indexer progress, so the UI can show lag without talking to the RPC.

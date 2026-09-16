@@ -112,6 +112,12 @@ export interface StreamState {
   updatedAt: string;
 }
 
+/** One topic and how many events carry it in the first position. */
+export interface TopicCount {
+  topic: string;
+  count: number;
+}
+
 export interface StoreStats {
   eventCount: number;
   contractCount: number;

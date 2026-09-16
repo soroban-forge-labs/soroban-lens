@@ -13,6 +13,7 @@ import type {
   RawEventInput,
   StoreStats,
   StreamState,
+  TopicCount,
 } from './types.js';
 
 export interface SqliteStoreOptions {
@@ -201,6 +202,20 @@ export class SqliteEventStore implements EventStore {
          LIMIT ?`,
       )
       .all(contractId, normaliseLimit(limit)) as { topic: string; count: number }[];
+    return rows.map((r) => ({ topic: r.topic, count: r.count }));
+  }
+
+  async countByTopic(limit = 50): Promise<TopicCount[]> {
+    const rows = this.#db
+      .prepare(
+        `SELECT topic0 AS topic, COUNT(*) AS count
+         FROM events
+         WHERE topic0 IS NOT NULL
+         GROUP BY topic0
+         ORDER BY count DESC, topic ASC
+         LIMIT ?`,
+      )
+      .all(normaliseLimit(limit)) as { topic: string; count: number }[];
     return rows.map((r) => ({ topic: r.topic, count: r.count }));
   }
 

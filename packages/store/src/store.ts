@@ -1,4 +1,5 @@
 import type {
+  TopicCount,
   ContractSummary,
   EventPage,
   EventQuery,
@@ -44,6 +45,12 @@ export interface EventStore {
 
   /** Distinct first-topic values for a contract, for building filter UIs. */
   listTopics(contractId: string, limit?: number): Promise<{ topic: string; count: number }[]>;
+
+  /**
+   * Distinct first-topic values across every indexed contract, most frequent
+   * first — "what event types exist in here at all", without paging the table.
+   */
+  countByTopic(limit?: number): Promise<TopicCount[]>;
 
   getStats(): Promise<StoreStats>;
 
