@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 /**
  * Re-run `tick` on an interval, and once immediately.
  *
- * Pauses while the tab is hidden: a background tab polling an indexer every two
+ * Pauses while the tab is hidden: a background tab polling an indexer every few
  * seconds is pure waste, and it produces a confusing burst of updates when the
  * user comes back.
  */
