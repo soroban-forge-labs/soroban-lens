@@ -139,7 +139,41 @@ export function App(): React.JSX.Element {
     return () => controller.abort();
   }, [selected.baseUrl, debouncedContractId, contractIdValid]);
 
-  const showContract = !query.contractId;
+  const showContract = !filters.contractId;
+
+  const exportJson = useCallback(() => {
+    if (events.length === 0) return;
+    const blob = new Blob([JSON.stringify(events, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `soroban-events-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [events]);
+
+  const exportCsv = useCallback(() => {
+    if (events.length === 0) return;
+    const headers = ['id', 'ledger', 'ledger_closed_at', 'contract_id', 'tx_hash', 'in_successful_tx', 'topics', 'data'];
+    const rows = events.map((e) => [
+      e.id,
+      e.ledger,
+      e.ledgerClosedAt,
+      e.contractId,
+      e.txHash,
+      e.inSuccessfulTx,
+      `"${e.topics.map((t) => t.decodedJson ?? t.rawXdr).join(' | ').replace(/"/g, '""')}"`,
+      `"${(e.data.decodedJson ?? e.data.rawXdr).replace(/"/g, '""')}"`,
+    ]);
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `soroban-events-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [events]);
 
   return (
     <div className="app">
@@ -184,12 +218,24 @@ export function App(): React.JSX.Element {
       )}
 
       <div className="result-meta">
-        <span>
-          {total.toLocaleString()} event{total === 1 ? '' : 's'}
-          {query.contractId ? ' for this contract' : ' indexed'}
-          {debouncedTopic ? ` with topic "${debouncedTopic}"` : ''}
-        </span>
-        {filters.live && <span className="live-dot" title="Polling every 5 seconds">live</span>}
+        <div className="result-meta-left">
+          <span>
+            {total.toLocaleString()} event{total === 1 ? '' : 's'}
+            {query.contractId ? ' for this contract' : ' indexed'}
+            {debouncedTopic ? ` with topic "${debouncedTopic}"` : ''}
+          </span>
+          {filters.live && <span className="live-dot" title="Polling every 5 seconds">live</span>}
+        </div>
+        {events.length > 0 && (
+          <div className="export-actions">
+            <button type="button" className="btn-export" onClick={exportJson} title="Export current events as JSON">
+              Export JSON
+            </button>
+            <button type="button" className="btn-export" onClick={exportCsv} title="Export current events as CSV">
+              Export CSV
+            </button>
+          </div>
+        )}
       </div>
 
       <ErrorBoundary title="Event Table Error">
