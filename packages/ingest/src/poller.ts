@@ -1,4 +1,4 @@
-import { buildFilters, type LensRpcClient } from './rpc-client.js';
+import { buildFilters, MAX_PAGE_SIZE, type LensRpcClient } from './rpc-client.js';
 import { assertContractIds } from './contract-id.js';
 import { MemoryCursorStore, type CursorStore } from './cursor.js';
 import { sleep as defaultSleep } from './retry.js';
@@ -147,6 +147,18 @@ export class EventPoller {
 
       const lastLedger = batch.events.at(-1)?.ledger ?? 0;
       const caughtUp = batch.events.length < pageSize;
+
+      // A page that came back exactly at the RPC's own ceiling is different
+      // from one that merely filled the configured page size: it means a single
+      // request straddled more events than the node will ever return at once,
+      // so the page boundary is the node's limit rather than ours.
+      if (!caughtUp && pageSize >= MAX_PAGE_SIZE) {
+        this.#log(
+          `page hit the RPC ceiling of ${MAX_PAGE_SIZE} events at ledger ${lastLedger}; ` +
+            'this ledger range emits more events than one request can return. ' +
+            'Progress is still correct — the cursor advances — but consider a narrower contract filter.',
+        );
+      }
 
       if (batch.events.length > 0) {
         yield {

@@ -6,6 +6,7 @@ import {
   buildFilters,
   ingestionLag,
   APPROX_LEDGER_SECONDS,
+  MAX_PAGE_SIZE,
 } from '../dist/index.js';
 
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -304,4 +305,35 @@ test('ingestionLag is the single definition every consumer shares', () => {
 test('lag never goes negative when the node reports a stale latestLedger', () => {
   // The page we were just served can be ahead of the node's own latestLedger.
   assert.deepEqual(ingestionLag(200, 160), { lagLedgers: 0, lagSeconds: 0 });
+});
+
+// ── #19 warn when a page hits the RPC ceiling ────────────────────────────────
+
+test('a page at the RPC ceiling logs a distinct warning naming the ledger', async () => {
+  const events = Array.from({ length: MAX_PAGE_SIZE }, (_, i) => rawEvent(4695317, i));
+  const client = fakeClient([{ events, cursor: 'cur-1' }]);
+  const logs = [];
+  const poller = new EventPoller(
+    { contractIds: [SAC], startLedger: 4695000, pageSize: MAX_PAGE_SIZE },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {}, log: (m) => logs.push(m) },
+  );
+  await take(poller.stream(), 1);
+
+  const warning = logs.find((l) => l.includes('RPC ceiling'));
+  assert.ok(warning, `expected a ceiling warning, got: ${logs.join(' | ')}`);
+  assert.match(warning, /10000 events at ledger 4695317/);
+});
+
+test('a full page below the ceiling is not a ceiling warning', async () => {
+  // Merely "not caught up" — the ordinary case, and must stay quiet.
+  const events = Array.from({ length: 2 }, (_, i) => rawEvent(4695317 + i, i));
+  const client = fakeClient([{ events, cursor: 'cur-1' }]);
+  const logs = [];
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000, pageSize: 2 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {}, log: (m) => logs.push(m),
+  });
+  const [batch] = await take(poller.stream(), 1);
+
+  assert.equal(batch.progress.caughtUp, false);
+  assert.equal(logs.find((l) => l.includes('RPC ceiling')), undefined);
 });
