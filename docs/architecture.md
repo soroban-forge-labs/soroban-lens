@@ -1,6 +1,6 @@
 # Architecture
 
-## The pipeline
+## Data pipeline
 
 ```
    Soroban RPC node
