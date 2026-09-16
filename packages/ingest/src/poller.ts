@@ -1,4 +1,5 @@
 import { buildFilters, type LensRpcClient } from './rpc-client.js';
+import { assertContractIds } from './contract-id.js';
 import { MemoryCursorStore, type CursorStore } from './cursor.js';
 import { sleep as defaultSleep } from './retry.js';
 import type { EventBatch, PollerOptions } from './types.js';
@@ -41,6 +42,9 @@ export class EventPoller {
   readonly #options: PollerOptions;
 
   constructor(options: PollerOptions, deps: PollerDeps) {
+    // Before anything reaches the network: a malformed id produces a doomed
+    // request whose RPC-side error is far less clear than naming the problem.
+    assertContractIds(options.contractIds);
     this.#options = options;
     this.#client = deps.client;
     this.#cursors = deps.cursors ?? new MemoryCursorStore();
