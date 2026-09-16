@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { MAX_QUERY_LIMIT, DEFAULT_MAX_QUERY_LIMIT, type EventStore } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
-import { assertContractId, parseEventQuery } from './params.js';
+import { assertContractId, parseEventQuery, parseIds } from './params.js';
 
 export interface ApiServerOptions {
   store: EventStore;
@@ -122,7 +122,25 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/events$/,
-    handler: async ({ query, store }) => ({ body: await store.queryEvents(parseEventQuery(query)) }),
+    handler: async ({ query, store }) => {
+      // ?ids= is a batch lookup, not a filter: it resolves a known list in one
+      // round trip rather than N. It short-circuits the filter path entirely,
+      // since mixing "these exact events" with "events matching X" has no
+      // sensible meaning.
+      const ids = parseIds(query);
+      if (ids) {
+        const found = await Promise.all(ids.map((id) => store.getEvent(id)));
+        return {
+          body: {
+            events: found.filter((e): e is NonNullable<typeof e> => e !== null),
+            // Reported rather than silently dropped, so a caller can tell
+            // "not indexed" from "I typo'd the id".
+            missing: ids.filter((_, i) => found[i] === null),
+          },
+        };
+      }
+      return { body: await store.queryEvents(parseEventQuery(query)) };
+    },
   },
   {
     method: 'GET',

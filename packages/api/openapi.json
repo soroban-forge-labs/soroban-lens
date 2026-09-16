@@ -323,6 +323,9 @@
         "operationId": "listEvents",
         "parameters": [
           {
+            "$ref": "#/components/parameters/Ids"
+          },
+          {
             "$ref": "#/components/parameters/Limit"
           },
           {
@@ -365,7 +368,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EventPage"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/EventPage"
+                    },
+                    {
+                      "$ref": "#/components/schemas/EventBatch"
+                    }
+                  ]
                 }
               }
             }
@@ -578,6 +588,16 @@
           "type": "string"
         },
         "example": "2026-09-15T20:00:00Z"
+      },
+      "Ids": {
+        "name": "ids",
+        "in": "query",
+        "description": "Comma-separated event ids to resolve in one request, at most 100. Returns the matching events in the order asked plus a `missing` array of ids with no indexed event. Mutually exclusive with the filter parameters, which are ignored when this is present.",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "0020166263024140288-0000000002,0020166263024140288-0000000000"
       }
     },
     "responses": {
@@ -957,6 +977,29 @@
                 "description": "The offending query parameter, when one is identifiable."
               }
             }
+          }
+        }
+      },
+      "EventBatch": {
+        "type": "object",
+        "description": "Returned when `ids` is supplied: the events that exist, plus the ids that did not.",
+        "required": [
+          "events",
+          "missing"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ids with no indexed event."
           }
         }
       }

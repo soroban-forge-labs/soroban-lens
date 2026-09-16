@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { SqliteEventStore, LATEST_SCHEMA_VERSION, MAX_QUERY_LIMIT } from '@soroban-lens/store';
-import { createApiServer } from '../dist/index.js';
+import { createApiServer, MAX_BATCH_IDS } from '../dist/index.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -480,5 +480,81 @@ test('the limit rejection message names the configured ceiling', async () => {
     assert.equal(res.status, 400);
     assert.equal(body.error.parameter, 'limit');
     assert.ok(body.error.message.includes(String(MAX_QUERY_LIMIT)));
+  });
+});
+
+// ── #50 batch fetch events by id ─────────────────────────────────────────────
+
+test('GET /events?ids= returns the events in the order asked', async () => {
+  await withServer(async ({ get }) => {
+    // Deliberately not the storage order, so "in the order asked" is a real
+    // assertion rather than an accident of how rows come back.
+    const wanted = [fixture.events[3].id, fixture.events[0].id, fixture.events[7].id];
+    const { res, body } = await get(`/events?ids=${wanted.join(',')}`);
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events.map((e) => e.id), wanted);
+    assert.deepEqual(body.missing, []);
+  });
+});
+
+test('missing ids are reported rather than silently dropped', async () => {
+  await withServer(async ({ get }) => {
+    const real = fixture.events[0].id;
+    const { res, body } = await get(`/events?ids=${real},no-such-event`);
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events.map((e) => e.id), [real]);
+    assert.deepEqual(body.missing, ['no-such-event']);
+  });
+});
+
+test('a batch of only missing ids is a 200 with everything reported missing', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?ids=nope-a,nope-b');
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events, []);
+    assert.deepEqual(body.missing, ['nope-a', 'nope-b']);
+  });
+});
+
+test('a batch over the documented ceiling is rejected', async () => {
+  await withServer(async ({ get }) => {
+    const ids = Array.from({ length: MAX_BATCH_IDS + 1 }, (_, i) => `id-${i}`);
+    const { res, body } = await get(`/events?ids=${ids.join(',')}`);
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'ids');
+    assert.ok(body.error.message.includes(String(MAX_BATCH_IDS)));
+  });
+});
+
+test('an empty or duplicated ids parameter is rejected', async () => {
+  await withServer(async ({ get }) => {
+    const empty = await get('/events?ids=');
+    assert.equal(empty.res.status, 400);
+
+    const id = fixture.events[0].id;
+    const dup = await get(`/events?ids=${id},${id}`);
+    assert.equal(dup.res.status, 400);
+    assert.match(dup.body.error.message, /duplicate/i);
+  });
+});
+
+test('whitespace around ids is tolerated', async () => {
+  await withServer(async ({ get }) => {
+    const id = fixture.events[0].id;
+    const { res, body } = await get(`/events?ids=${encodeURIComponent(` ${id} `)}`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events.map((e) => e.id), [id]);
+  });
+});
+
+test('without ids, /events still behaves as a filtered query', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?limit=5');
+    assert.equal(res.status, 200);
+    assert.equal(body.events.length, 5);
+    assert.equal(body.total, fixture.events.length);
+    assert.equal(body.missing, undefined, 'the filter path must not grow a missing field');
   });
 });

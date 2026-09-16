@@ -139,6 +139,43 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
   };
 }
 
+/** Ceiling on a batch lookup, so one request cannot ask for unbounded work. */
+export const MAX_BATCH_IDS = 100;
+
+/**
+ * Parse `?ids=a,b,c` into the list to resolve, preserving the caller's order.
+ *
+ * Returns undefined when the parameter is absent, which is what keeps the
+ * ordinary filter path untouched. An explicitly empty `ids=` is a caller
+ * mistake rather than "every event", so it is rejected.
+ */
+export function parseIds(params: URLSearchParams): string[] | undefined {
+  const raw = params.get('ids');
+  if (raw === null) return undefined;
+
+  const ids = raw
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id) => id !== '');
+
+  if (ids.length === 0) {
+    throw ApiError.badRequest('"ids" was empty. Omit it to query without a batch.', 'ids');
+  }
+  if (ids.length > MAX_BATCH_IDS) {
+    throw ApiError.badRequest(
+      `At most ${MAX_BATCH_IDS} "ids" per request, got ${ids.length}.`,
+      'ids',
+    );
+  }
+  // Duplicates would make the response shorter than the request for no stated
+  // reason, so they are rejected rather than quietly collapsed.
+  const unique = new Set(ids);
+  if (unique.size !== ids.length) {
+    throw ApiError.badRequest('"ids" contained duplicates.', 'ids');
+  }
+  return ids;
+}
+
 /**
  * Repeated `?topic=` parameters form a topic *prefix*, positionally.
  * `*` is a wildcard for one position: `?topic=*&topic=order` matches any event
