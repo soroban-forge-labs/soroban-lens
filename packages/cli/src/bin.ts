@@ -25,6 +25,7 @@ Usage:
   lens stats  [options]              Print database statistics.
   lens prune --before-ledger <n>     Delete events below a ledger and reclaim disk space.
   lens redecode [--all]              Re-run the decoder over previously-failed rows.
+  lens verify [--repair]             Check stored-row invariants; optionally fix them.
   lens completion [bash|zsh|fish]    Generate shell auto-completion script.
 
 
@@ -47,6 +48,7 @@ Options:
       --fixture <path>    seed: file to load (default fixtures/testnet-events.json).
       --before-ledger <n> prune: delete events with ledger below this.
       --all               redecode: re-run over every row, not only failures.
+      --repair            verify: recompute derived columns for any bad row found.
   -h, --help              Show this help.
 
 Examples:
@@ -76,6 +78,7 @@ async function main(argv: string[]): Promise<number> {
       'retry-max-delay': { type: 'string' },
       once: { type: 'boolean' },
       all: { type: 'boolean' },
+      repair: { type: 'boolean' },
       'max-events': { type: 'string' },
       fixture: { type: 'string' },
       'before-ledger': { type: 'string' },
@@ -209,6 +212,29 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'verify': {
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        const problems = await store.checkIntegrity();
+        if (problems.length === 0) {
+          process.stderr.write('[lens] verify: all rows are internally consistent\n');
+          return 0;
+        }
+        for (const { id, problems: rowProblems } of problems) {
+          process.stderr.write(`[lens] ${id}: ${rowProblems.join('; ')}\n`);
+        }
+        if (values.repair) {
+          for (const { id } of problems) await store.repairRow(id);
+          process.stderr.write(`[lens] repaired ${problems.length} row(s)\n`);
+          return 0;
+        }
+        process.stderr.write(`[lens] verify: ${problems.length} row(s) with problems. Re-run with --repair to fix.\n`);
+        return 1;
+      } finally {
+        await store.close();
+      }
+    }
+
     case 'completion': {
       const shell = rest[0] || 'bash';
       process.stdout.write(`${generateCompletion(shell)}\n`);
@@ -228,7 +254,7 @@ function generateCompletion(shell: string): string {
   local cur prev commands options
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="doctor index seed stats prune redecode completion"
+  commands="doctor index seed stats prune redecode verify completion"
   options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --poll-interval --once --max-events --fixture --before-ledger -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
@@ -264,6 +290,7 @@ _lens() {
     'stats:Print database statistics'
     'prune:Delete events below a ledger'
     'redecode:Re-run the decoder over failed rows'
+    'verify:Check stored-row invariants'
     'completion:Generate shell autocompletions'
   )
   _arguments '1: :->command' '*: :->args'
@@ -281,6 +308,7 @@ complete -c lens -n "__fish_use_subcommand" -a seed -d "Load testnet events fixt
 complete -c lens -n "__fish_use_subcommand" -a stats -d "Print database statistics"
 complete -c lens -n "__fish_use_subcommand" -a prune -d "Delete events below a ledger"
 complete -c lens -n "__fish_use_subcommand" -a redecode -d "Re-run the decoder over failed rows"
+complete -c lens -n "__fish_use_subcommand" -a verify -d "Check stored-row invariants"
 complete -c lens -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c lens -l network -s n -x -a "testnet mainnet futurenet"
 complete -c lens -l help -s h -d "Show help"`;

@@ -100,6 +100,19 @@ export interface EventStore {
    */
   redecode(all?: boolean): Promise<number>;
 
+  /**
+   * Check stored invariants: `topics_json` parses and its length matches
+   * `topic_count`; `topic0..3` match a fresh projection of the parsed
+   * topics; `value_json` and `topics_xdr_json` parse at all. Nothing writes
+   * these bugs today, but nothing has ever checked for them either — a disk
+   * fault, a hand edit, or a future migration bug could leave one behind.
+   * @returns one entry per row with a problem, empty when the database is clean.
+   */
+  checkIntegrity(): Promise<{ id: string; problems: string[] }[]>;
+
+  /** Recompute one row's derived columns from its stored raw XDR. */
+  repairRow(id: string): Promise<void>;
+
   close(): Promise<void>;
 }
 

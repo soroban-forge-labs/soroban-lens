@@ -762,3 +762,90 @@ test('redecode on an empty database does nothing', async () => {
   assert.equal(await store.redecode(true), 0);
   await store.close();
 });
+
+// ── #39 detect and repair corrupt rows ────────────────────────────────────────
+
+test('checkIntegrity reports nothing on a freshly-decoded database', async () => {
+  const store = await seeded();
+  assert.deepEqual(await store.checkIntegrity(), []);
+  await store.close();
+});
+
+test('a hand-corrupted topic0 is detected and repaired', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents([fixture.events[0]]);
+  const id = fixture.events[0].id;
+
+  const db = new DatabaseSync(path);
+  db.exec(`UPDATE events SET topic0 = 'hand-corrupted-value' WHERE id = '${id}'`);
+  db.close();
+
+  const problems = await store.checkIntegrity();
+  assert.equal(problems.length, 1);
+  assert.equal(problems[0].id, id);
+  assert.match(problems[0].problems[0], /topic0 is "hand-corrupted-value"/);
+
+  await store.repairRow(id);
+  assert.deepEqual(await store.checkIntegrity(), []);
+
+  const event = await store.getEvent(id);
+  assert.equal(event.topics[0].value, 'fee'); // the real decoded first topic
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('a topic_count mismatch is detected', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents([fixture.events[0]]);
+  const id = fixture.events[0].id;
+
+  const db = new DatabaseSync(path);
+  db.exec(`UPDATE events SET topic_count = 999 WHERE id = '${id}'`);
+  db.close();
+
+  const problems = await store.checkIntegrity();
+  assert.equal(problems.length, 1);
+  assert.match(problems[0].problems[0], /topic_count \(999\)/);
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('malformed JSON in a stored column is detected without throwing', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents([fixture.events[0]]);
+  const id = fixture.events[0].id;
+
+  const db = new DatabaseSync(path);
+  db.exec(`UPDATE events SET value_json = 'not json at all {{{' WHERE id = '${id}'`);
+  db.close();
+
+  const problems = await store.checkIntegrity();
+  assert.equal(problems.length, 1);
+  assert.match(problems[0].problems[0], /value_json is not valid JSON/);
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('repairRow on a clean id is a no-op', async () => {
+  const store = await seeded();
+  const before = await store.getEvent(fixture.events[0].id);
+  await store.repairRow(fixture.events[0].id);
+  const after = await store.getEvent(fixture.events[0].id);
+  assert.deepEqual(after, before);
+  await store.close();
+});
+
+test('repairRow on an unknown id does nothing', async () => {
+  const store = await seeded();
+  await assert.doesNotReject(() => store.repairRow('does-not-exist'));
+  await store.close();
+});

@@ -381,74 +381,13 @@ export class SqliteEventStore implements EventStore {
   }
 
   async redecode(all = false): Promise<number> {
-    const rows = this.#db
-      .prepare(
-        `SELECT id, contract_id, type, ledger, ledger_closed_at, tx_hash,
-                transaction_index, operation_index, in_successful_call,
-                topics_xdr_json, value_xdr, indexed_at
-         FROM events
-         ${all ? '' : 'WHERE decode_error IS NOT NULL'}`,
-      )
-      .all() as {
-      id: string;
-      contract_id: string;
-      type: 'contract' | 'system';
-      ledger: number;
-      ledger_closed_at: string;
-      tx_hash: string;
-      transaction_index: number;
-      operation_index: number;
-      in_successful_call: number;
-      topics_xdr_json: string;
-      value_xdr: string;
-      indexed_at: string;
-    }[];
-
+    const rows = this.#rawRows(all ? '' : 'WHERE decode_error IS NOT NULL');
     if (rows.length === 0) return 0;
 
-    const update = this.#db.prepare(`
-      UPDATE events SET
-        topics_json = ?, topics_xdr_json = ?, topic_count = ?,
-        topic0 = ?, topic1 = ?, topic2 = ?, topic3 = ?,
-        value_type = ?, value_json = ?, value_xdr = ?, decode_error = ?
-      WHERE id = ?
-    `);
-
+    const update = this.#recomputeStatement();
     this.#db.exec('BEGIN');
     try {
-      for (const row of rows) {
-        const raw: RawEventInput = {
-          id: row.id,
-          contractId: row.contract_id,
-          type: row.type,
-          ledger: row.ledger,
-          ledgerClosedAt: row.ledger_closed_at,
-          txHash: row.tx_hash,
-          transactionIndex: row.transaction_index,
-          operationIndex: row.operation_index,
-          inSuccessfulContractCall: row.in_successful_call === 1,
-          topic: JSON.parse(row.topics_xdr_json) as string[],
-          value: row.value_xdr,
-        };
-        // Re-decode with the current decoder, from the raw XDR every row
-        // keeps for exactly this — indexedAt is left untouched, since it
-        // records when the event was first ingested, not when it was decoded.
-        const redecoded = decodeEvent(raw, new Date(row.indexed_at));
-        update.run(
-          JSON.stringify(redecoded.topics),
-          JSON.stringify(redecoded.topicsXdr),
-          redecoded.topics.length,
-          topicKey(redecoded.topics[0]),
-          topicKey(redecoded.topics[1]),
-          topicKey(redecoded.topics[2]),
-          topicKey(redecoded.topics[3]),
-          redecoded.value.type,
-          JSON.stringify(redecoded.value),
-          redecoded.valueXdr,
-          redecoded.decodeError ?? null,
-          row.id,
-        );
-      }
+      for (const row of rows) update.run(...this.#recomputeParams(row));
       this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.exec('ROLLBACK');
@@ -456,6 +395,128 @@ export class SqliteEventStore implements EventStore {
     }
 
     return rows.length;
+  }
+
+  async checkIntegrity(): Promise<{ id: string; problems: string[] }[]> {
+    const rows = this.#db
+      .prepare(
+        `SELECT id, topics_json, topics_xdr_json, value_json, topic_count,
+                topic0, topic1, topic2, topic3
+         FROM events`,
+      )
+      .all() as {
+      id: string;
+      topics_json: string;
+      topics_xdr_json: string;
+      value_json: string;
+      topic_count: number;
+      topic0: string | null;
+      topic1: string | null;
+      topic2: string | null;
+      topic3: string | null;
+    }[];
+
+    const results: { id: string; problems: string[] }[] = [];
+    for (const row of rows) {
+      const problems: string[] = [];
+
+      let topics: DecodedValue[] | undefined;
+      try {
+        topics = JSON.parse(row.topics_json) as DecodedValue[];
+        if (!Array.isArray(topics)) problems.push('topics_json is not a JSON array');
+      } catch {
+        problems.push('topics_json is not valid JSON');
+      }
+      try {
+        JSON.parse(row.topics_xdr_json);
+      } catch {
+        problems.push('topics_xdr_json is not valid JSON');
+      }
+      try {
+        JSON.parse(row.value_json);
+      } catch {
+        problems.push('value_json is not valid JSON');
+      }
+
+      if (topics && Array.isArray(topics)) {
+        if (topics.length !== row.topic_count) {
+          problems.push(`topic_count (${row.topic_count}) does not match topics_json length (${topics.length})`);
+        }
+        const expected = [topicKey(topics[0]), topicKey(topics[1]), topicKey(topics[2]), topicKey(topics[3])];
+        const actual = [row.topic0, row.topic1, row.topic2, row.topic3];
+        expected.forEach((exp, i) => {
+          if (exp !== actual[i]) {
+            problems.push(`topic${i} is "${actual[i]}", expected "${exp}" from topics_json`);
+          }
+        });
+      }
+
+      if (problems.length > 0) results.push({ id: row.id, problems });
+    }
+    return results;
+  }
+
+  async repairRow(id: string): Promise<void> {
+    const rows = this.#rawRows('WHERE id = ?', [id]);
+    if (rows.length === 0) return;
+    this.#recomputeStatement().run(...this.#recomputeParams(rows[0]!));
+  }
+
+  /** Shared shape read by both redecode() and repairRow() to recompute derived columns. */
+  #rawRows(whereClause: string, params: SqlParam[] = []): RawRow[] {
+    return this.#db
+      .prepare(
+        `SELECT id, contract_id, type, ledger, ledger_closed_at, tx_hash,
+                transaction_index, operation_index, in_successful_call,
+                topics_xdr_json, value_xdr, indexed_at
+         FROM events
+         ${whereClause}`,
+      )
+      .all(...params) as unknown as RawRow[];
+  }
+
+  #recomputeStatement(): StatementSync {
+    return this.#db.prepare(`
+      UPDATE events SET
+        topics_json = ?, topics_xdr_json = ?, topic_count = ?,
+        topic0 = ?, topic1 = ?, topic2 = ?, topic3 = ?,
+        value_type = ?, value_json = ?, value_xdr = ?, decode_error = ?
+      WHERE id = ?
+    `);
+  }
+
+  #recomputeParams(row: RawRow): SqlParam[] {
+    const raw: RawEventInput = {
+      id: row.id,
+      contractId: row.contract_id,
+      type: row.type,
+      ledger: row.ledger,
+      ledgerClosedAt: row.ledger_closed_at,
+      txHash: row.tx_hash,
+      transactionIndex: row.transaction_index,
+      operationIndex: row.operation_index,
+      inSuccessfulContractCall: row.in_successful_call === 1,
+      topic: JSON.parse(row.topics_xdr_json) as string[],
+      value: row.value_xdr,
+    };
+    // Re-decode with the current decoder, from the raw XDR every row keeps for
+    // exactly this — indexedAt is left untouched, since it records when the
+    // event was first ingested, not when it was decoded or repaired.
+    const redecoded = decodeEvent(raw, new Date(row.indexed_at));
+    return [
+      JSON.stringify(redecoded.topics),
+      JSON.stringify(redecoded.topicsXdr),
+      redecoded.topics.length,
+      topicKey(redecoded.topics[0]),
+      topicKey(redecoded.topics[1]),
+      topicKey(redecoded.topics[2]),
+      topicKey(redecoded.topics[3]),
+      redecoded.value.type,
+      JSON.stringify(redecoded.value),
+      redecoded.valueXdr,
+      redecoded.decodeError ?? null,
+      row.id,
+    ];
   }
 
   async close(): Promise<void> {
@@ -466,6 +527,21 @@ export class SqliteEventStore implements EventStore {
 // ---------------------------------------------------------------------------
 // row mapping
 // ---------------------------------------------------------------------------
+
+interface RawRow {
+  id: string;
+  contract_id: string;
+  type: 'contract' | 'system';
+  ledger: number;
+  ledger_closed_at: string;
+  tx_hash: string;
+  transaction_index: number;
+  operation_index: number;
+  in_successful_call: number;
+  topics_xdr_json: string;
+  value_xdr: string;
+  indexed_at: string;
+}
 
 interface EventRow {
   id: string;
