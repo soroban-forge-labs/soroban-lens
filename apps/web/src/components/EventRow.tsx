@@ -111,3 +111,4 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
     </>
   );
 }
+// Component for displaying individual event rows in the table
