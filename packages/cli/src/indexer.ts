@@ -64,7 +64,9 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
   const store = new SqliteEventStore({ path: config.dbPath });
   const client = new LensRpcClient({
     rpcUrl: config.network.rpcUrl,
+    ...(Object.keys(config.rpcHeaders).length > 0 ? { headers: config.rpcHeaders } : {}),
     retry: {
+      ...config.retry,
       onRetry: (attempt, delay, error) =>
         log(`rpc retry ${attempt} in ${delay}ms: ${error instanceof Error ? error.message : String(error)}`),
     },

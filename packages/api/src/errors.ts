@@ -15,6 +15,8 @@ export class ApiError extends Error {
   readonly parameter: string | undefined;
   /** Methods to advertise in `Allow`, which RFC 9110 requires on a 405. */
   readonly allow: string | undefined;
+  /** Seconds to advertise in `Retry-After` on a 503. */
+  retryAfterSeconds: number | undefined;
 
   constructor(status: number, code: string, message: string, parameter?: string, allow?: string) {
     super(message);
@@ -23,6 +25,7 @@ export class ApiError extends Error {
     this.code = code;
     this.parameter = parameter;
     this.allow = allow;
+    this.retryAfterSeconds = undefined;
   }
 
   static badRequest(message: string, parameter?: string): ApiError {
@@ -31,6 +34,13 @@ export class ApiError extends Error {
 
   static notFound(message: string): ApiError {
     return new ApiError(404, 'not_found', message);
+  }
+
+  /** Temporarily unable to serve, with the wait a client should honour. */
+  static unavailable(message: string, retryAfterSeconds: number): ApiError {
+    const error = new ApiError(503, 'unavailable', message);
+    error.retryAfterSeconds = retryAfterSeconds;
+    return error;
   }
 
   toBody(): ApiErrorBody {

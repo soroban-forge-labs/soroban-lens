@@ -69,6 +69,29 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 2,
+    name: 'index-indexed-at',
+    up: `
+      -- "What did we ingest in the last hour" is the first question anyone asks
+      -- of a stalled indexer, and it was a full table scan: indexed_at was
+      -- written on every row and indexed by nothing.
+      --
+      -- DESC because every use of this column is recent-first.
+      CREATE INDEX idx_events_indexed_at ON events (indexed_at DESC);
+    `,
+  },
+  {
+    version: 3,
+    name: 'index-closed-at-unix',
+    up: `
+      -- closed_at_unix was populated on every insert and read by nothing.
+      -- Backing fromTime/toTime with it means time bounds are an integer
+      -- comparison on an indexed column rather than string maths on
+      -- ledger_closed_at.
+      CREATE INDEX idx_events_closed_at_unix ON events (closed_at_unix, id DESC);
+    `,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.reduce(

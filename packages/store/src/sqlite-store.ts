@@ -462,6 +462,16 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
     conditions.push('ledger <= ?');
     values.push(query.toLedger);
   }
+  // Seconds since the epoch against the indexed integer column, rather than
+  // lexicographic comparison on the ISO text — the column exists for this.
+  if (query.fromTime !== undefined) {
+    conditions.push('closed_at_unix >= ?');
+    values.push(query.fromTime);
+  }
+  if (query.toTime !== undefined) {
+    conditions.push('closed_at_unix <= ?');
+    values.push(query.toTime);
+  }
   if (query.successfulOnly === true) {
     conditions.push('in_successful_call = 1');
   }

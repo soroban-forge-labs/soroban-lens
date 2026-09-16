@@ -11,6 +11,7 @@ export type {
   PollerOptions,
   RetentionState,
   TopicSegment,
+  EventType,
 } from './types.js';
 
 export { LensRpcClient, buildFilters, MAX_PAGE_SIZE, MAX_CONTRACT_IDS_PER_FILTER } from './rpc-client.js';

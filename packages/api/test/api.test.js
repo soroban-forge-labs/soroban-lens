@@ -1,9 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { once } from 'node:events';
-import { SqliteEventStore } from '@soroban-lens/store';
-import { createApiServer } from '../dist/index.js';
+import {
+  SqliteEventStore,
+  LATEST_SCHEMA_VERSION,
+  MAX_QUERY_LIMIT,
+  MIGRATIONS,
+} from '@soroban-lens/store';
+import { createApiServer, MAX_BATCH_IDS } from '../dist/index.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -35,7 +44,7 @@ test('GET /health reports a writable store', async () => {
     assert.equal(res.status, 200);
     assert.equal(body.status, 'ok');
     assert.equal(body.events, fixture.events.length);
-    assert.equal(body.schemaVersion, 1);
+    assert.equal(body.schemaVersion, LATEST_SCHEMA_VERSION);
     assert.equal(typeof body.uptimeSeconds, 'number');
   });
 });
@@ -403,5 +412,249 @@ test('CORS advertises HEAD alongside GET', async () => {
   await withServer(async ({ base }) => {
     const res = await fetch(`${base}/health`);
     assert.match(res.headers.get('access-control-allow-methods'), /HEAD/);
+  });
+});
+
+// ── #24 time-bounded queries ─────────────────────────────────────────────────
+
+test('GET /events accepts ISO-8601 time bounds', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(
+      '/events?fromTime=2026-09-15T19:22:55Z&toTime=2026-09-15T19:23:00Z&limit=1000',
+    );
+    assert.equal(res.status, 200);
+    assert.ok(body.events.length > 0);
+    for (const event of body.events) {
+      const at = Date.parse(event.ledgerClosedAt);
+      assert.ok(at >= Date.parse('2026-09-15T19:22:55Z'));
+      assert.ok(at <= Date.parse('2026-09-15T19:23:00Z'));
+    }
+  });
+});
+
+test('epoch seconds and ISO-8601 select the same events', async () => {
+  await withServer(async ({ get }) => {
+    const iso = '2026-09-15T19:22:55Z';
+    const seconds = Math.floor(Date.parse(iso) / 1000);
+    const { body: a } = await get(`/events?fromTime=${encodeURIComponent(iso)}&limit=1000`);
+    const { body: b } = await get(`/events?fromTime=${seconds}&limit=1000`);
+    assert.equal(a.total, b.total);
+    assert.deepEqual(a.events.map((e) => e.id), b.events.map((e) => e.id));
+  });
+});
+
+test('an unparseable timestamp is a 400 naming the parameter', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?fromTime=last%20tuesday');
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'fromTime');
+    assert.match(body.error.message, /ISO-8601/);
+  });
+});
+
+test('fromTime after toTime is rejected rather than returning nothing', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(
+      '/events?fromTime=2026-09-16T00:00:00Z&toTime=2026-09-15T00:00:00Z',
+    );
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'fromTime');
+  });
+});
+
+test('time bounds combine with a contract route', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(
+      `/contracts/${SAC}/events?fromTime=2026-09-15T00:00:00Z&limit=1000`,
+    );
+    assert.equal(res.status, 200);
+    assert.ok(body.events.every((e) => e.contractId === SAC));
+  });
+});
+
+// ── #55 configurable query limit ─────────────────────────────────────────────
+
+test('the served spec reflects the running query ceiling', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/openapi.json');
+    assert.equal(res.status, 200);
+    // Default configuration, so the served value matches the committed file.
+    assert.equal(body.components.parameters.Limit.schema.maximum, MAX_QUERY_LIMIT);
+  });
+});
+
+test('the limit rejection message names the configured ceiling', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(`/events?limit=${MAX_QUERY_LIMIT + 1}`);
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'limit');
+    assert.ok(body.error.message.includes(String(MAX_QUERY_LIMIT)));
+  });
+});
+
+// ── #50 batch fetch events by id ─────────────────────────────────────────────
+
+test('GET /events?ids= returns the events in the order asked', async () => {
+  await withServer(async ({ get }) => {
+    // Deliberately not the storage order, so "in the order asked" is a real
+    // assertion rather than an accident of how rows come back.
+    const wanted = [fixture.events[3].id, fixture.events[0].id, fixture.events[7].id];
+    const { res, body } = await get(`/events?ids=${wanted.join(',')}`);
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events.map((e) => e.id), wanted);
+    assert.deepEqual(body.missing, []);
+  });
+});
+
+test('missing ids are reported rather than silently dropped', async () => {
+  await withServer(async ({ get }) => {
+    const real = fixture.events[0].id;
+    const { res, body } = await get(`/events?ids=${real},no-such-event`);
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events.map((e) => e.id), [real]);
+    assert.deepEqual(body.missing, ['no-such-event']);
+  });
+});
+
+test('a batch of only missing ids is a 200 with everything reported missing', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?ids=nope-a,nope-b');
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events, []);
+    assert.deepEqual(body.missing, ['nope-a', 'nope-b']);
+  });
+});
+
+test('a batch over the documented ceiling is rejected', async () => {
+  await withServer(async ({ get }) => {
+    const ids = Array.from({ length: MAX_BATCH_IDS + 1 }, (_, i) => `id-${i}`);
+    const { res, body } = await get(`/events?ids=${ids.join(',')}`);
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'ids');
+    assert.ok(body.error.message.includes(String(MAX_BATCH_IDS)));
+  });
+});
+
+test('an empty or duplicated ids parameter is rejected', async () => {
+  await withServer(async ({ get }) => {
+    const empty = await get('/events?ids=');
+    assert.equal(empty.res.status, 400);
+
+    const id = fixture.events[0].id;
+    const dup = await get(`/events?ids=${id},${id}`);
+    assert.equal(dup.res.status, 400);
+    assert.match(dup.body.error.message, /duplicate/i);
+  });
+});
+
+test('whitespace around ids is tolerated', async () => {
+  await withServer(async ({ get }) => {
+    const id = fixture.events[0].id;
+    const { res, body } = await get(`/events?ids=${encodeURIComponent(` ${id} `)}`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events.map((e) => e.id), [id]);
+  });
+});
+
+test('without ids, /events still behaves as a filtered query', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?limit=5');
+    assert.equal(res.status, 200);
+    assert.equal(body.events.length, 5);
+    assert.equal(body.total, fixture.events.length);
+    assert.equal(body.missing, undefined, 'the filter path must not grow a missing field');
+  });
+});
+
+// ── #57 503 with Retry-After during migrations ───────────────────────────────
+
+/**
+ * Boot the API against a database that genuinely stopped at schema v1.
+ *
+ * A real stale database rather than a stubbed getStats: healthCheck() derives
+ * its own verdict from the store, so faking one method would have left health
+ * reporting "ok" and the test asserting against a fiction.
+ */
+async function withStaleServer(run) {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-stale-'));
+  const path = join(dir, 'lens.db');
+
+  const raw = new DatabaseSync(path);
+  raw.exec(`CREATE TABLE schema_migrations (
+    version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
+  raw.exec(MIGRATIONS[0].up);
+  raw.prepare('INSERT INTO schema_migrations VALUES (?, ?, ?)').run(1, MIGRATIONS[0].name, '');
+  raw.close();
+
+  // migrateOnOpen: false, or opening it would bring it up to date.
+  const store = new SqliteEventStore({ path, migrateOnOpen: false });
+  await store.insertEvents(fixture.events);
+  const server = createApiServer({ store });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await run({ base, get: async (p) => {
+      const res = await fetch(base + p);
+      const text = await res.text();
+      return { res, body: text ? JSON.parse(text) : null };
+    } });
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('data routes return 503 with Retry-After while a migration is pending', async () => {
+  await withStaleServer(async ({ get }) => {
+    for (const path of [
+      '/events',
+      '/stats',
+      '/status',
+      '/contracts',
+      `/contracts/${SAC}/events`,
+      `/contracts/${SAC}/topics`,
+      `/contracts/${SAC}/stats`,
+      '/events/anything',
+    ]) {
+      const { res, body } = await get(path);
+      assert.equal(res.status, 503, path);
+      // A client that honours Retry-After needs the header, not just the code.
+      assert.equal(res.headers.get('retry-after'), '5', path);
+      assert.equal(body.error.code, 'unavailable', path);
+      assert.match(body.error.message, /schema v/, path);
+    }
+  });
+});
+
+test('/health still answers during a migration, with the reason', async () => {
+  await withStaleServer(async ({ get }) => {
+    const { res, body } = await get('/health');
+    // Health is how an operator finds out why everything else is 503ing, so it
+    // must not be gated by the same check.
+    assert.equal(res.status, 503);
+    assert.equal(body.status, 'degraded');
+    assert.match(body.detail, /schema is v/);
+    assert.equal(body.schemaVersion, 1);
+  });
+});
+
+test('the spec is still served during a migration', async () => {
+  await withStaleServer(async ({ get }) => {
+    const { res, body } = await get('/openapi.json');
+    assert.equal(res.status, 200, 'a static document does not depend on the schema');
+    assert.ok(body.paths['/events']);
+  });
+});
+
+test('a current schema serves data routes normally', async () => {
+  await withServer(async ({ get }) => {
+    const { res } = await get('/events?limit=1');
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('retry-after'), null);
   });
 });

@@ -29,6 +29,8 @@ export interface PollerProgress {
   ledger: number;
   latestLedger: number;
   caughtUp: boolean;
+  /** True on the final batch of a bounded `endLedger` run. */
+  reachedEndLedger: boolean;
   /** Ledgers between the last event yielded and the node's latest ledger. */
   lagLedgers: number;
   /**
@@ -115,13 +117,18 @@ export class EventPoller {
   async *stream(): AsyncGenerator<EventBatch & { progress: PollerProgress }> {
     const pageSize = this.#options.pageSize ?? 200;
     const idleMs = this.#options.pollIntervalMs ?? 2000;
-    const filters = buildFilters(this.#options.contractIds, this.#options.topics);
+    const filters = buildFilters(
+      this.#options.contractIds,
+      this.#options.topics,
+      this.#options.eventType,
+    );
     // At-least-once delivery means a crash mid-write replays the last batch.
     // Module 2 absorbs that with INSERT OR IGNORE, but every other consumer —
     // the NDJSON stdout path, for one — would emit the repeat. Drop repeats
     // here so "at least once" is not every consumer's problem to solve.
     const seen = new RecentIds(pageSize * RECENT_ID_WINDOW_PAGES);
 
+    const endLedger = this.#options.endLedger;
     let { cursor, startLedger } = await this.#resolveStart();
 
     while (!this.#signal?.aborted) {
@@ -130,6 +137,7 @@ export class EventPoller {
         batch = await this.#client.getEvents({
           filters,
           limit: pageSize,
+          ...(endLedger !== undefined ? { endLedger } : {}),
           ...(cursor ? { cursor } : { startLedger: startLedger as number }),
         });
       } catch (error) {
@@ -168,6 +176,11 @@ export class EventPoller {
         );
       }
 
+      // A bounded run is finished when the RPC stops filling pages: it will
+      // not serve anything past endLedger, so a short page is the end of the
+      // range rather than the tip of the chain.
+      const reachedEndLedger = endLedger !== undefined && caughtUp;
+
       if (fresh.length > 0) {
         yield {
           ...batch,
@@ -177,6 +190,7 @@ export class EventPoller {
             ledger: lastLedger,
             latestLedger: batch.latestLedger,
             caughtUp,
+            reachedEndLedger,
             ...ingestionLag(lastLedger, batch.latestLedger),
           },
         };
@@ -193,6 +207,8 @@ export class EventPoller {
       cursor = batch.cursor;
       startLedger = undefined;
 
+      // End the generator rather than idling forever on a finished range.
+      if (reachedEndLedger) return;
       if (caughtUp) await this.#sleep(idleMs);
     }
   }

@@ -2,9 +2,14 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { MAX_QUERY_LIMIT, type EventStore } from '@soroban-lens/store';
+import {
+  MAX_QUERY_LIMIT,
+  DEFAULT_MAX_QUERY_LIMIT,
+  LATEST_SCHEMA_VERSION,
+  type EventStore,
+} from '@soroban-lens/store';
 import { ApiError } from './errors.js';
-import { assertContractId, parseEventQuery } from './params.js';
+import { assertContractId, parseEventQuery, parseIds } from './params.js';
 
 export interface ApiServerOptions {
   store: EventStore;
@@ -21,8 +26,6 @@ export interface ApiServerOptions {
   log?: (message: string) => void;
 }
 
-/** Matches "/contracts/{id}/events" and friends. */
-type Route = { method: string; pattern: RegExp; handler: Handler };
 type Handler = (ctx: {
   params: string[];
   query: URLSearchParams;
@@ -30,12 +33,49 @@ type Handler = (ctx: {
   options: ApiServerOptions;
 }) => Promise<{ status?: number; body: unknown; contentType?: string }>;
 
+/** Matches "/contracts/{id}/events" and friends. */
+interface Route {
+  method: string;
+  pattern: RegExp;
+  handler: Handler;
+  /** Serves without reading event rows, so a pending migration does not block it. */
+  exemptFromSchemaCheck?: boolean;
+}
+
+/**
+ * How long a client should wait before retrying during a migration.
+ *
+ * A migration on a SQLite file is seconds, not minutes. Short enough that a
+ * poller recovers promptly; long enough that it does not hammer the API while
+ * the migration holds the write lock.
+ */
+const MIGRATION_RETRY_AFTER_SECONDS = 5;
+
+/**
+ * Data routes refuse to serve from a half-migrated database.
+ *
+ * /health and /openapi.json are deliberately exempt: health is how an operator
+ * finds out *why* everything else is 503ing, and a spec is static. Returning
+ * rows from a schema the code does not expect is worse than being briefly
+ * unavailable — the rows would look plausible and be wrong.
+ */
+async function assertSchemaCurrent(store: EventStore): Promise<void> {
+  const { schemaVersion } = await store.getStats();
+  if (schemaVersion === LATEST_SCHEMA_VERSION) return;
+  throw ApiError.unavailable(
+    `The database is at schema v${schemaVersion}, expected v${LATEST_SCHEMA_VERSION}. ` +
+      'A migration is pending; see GET /health.',
+    MIGRATION_RETRY_AFTER_SECONDS,
+  );
+}
+
 const routes: Route[] = [
   {
     // Liveness plus a real write probe against the store, so a read-only volume
     // shows up here rather than as a mysterious indexer failure later.
     method: 'GET',
     pattern: /^\/health$/,
+    exemptFromSchemaCheck: true,
     handler: async ({ store, options }) => {
       const health = await store.healthCheck();
       const stats = await store.getStats();
@@ -122,7 +162,25 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/events$/,
-    handler: async ({ query, store }) => ({ body: await store.queryEvents(parseEventQuery(query)) }),
+    handler: async ({ query, store }) => {
+      // ?ids= is a batch lookup, not a filter: it resolves a known list in one
+      // round trip rather than N. It short-circuits the filter path entirely,
+      // since mixing "these exact events" with "events matching X" has no
+      // sensible meaning.
+      const ids = parseIds(query);
+      if (ids) {
+        const found = await Promise.all(ids.map((id) => store.getEvent(id)));
+        return {
+          body: {
+            events: found.filter((e): e is NonNullable<typeof e> => e !== null),
+            // Reported rather than silently dropped, so a caller can tell
+            // "not indexed" from "I typo'd the id".
+            missing: ids.filter((_, i) => found[i] === null),
+          },
+        };
+      }
+      return { body: await store.queryEvents(parseEventQuery(query)) };
+    },
   },
   {
     method: 'GET',
@@ -137,12 +195,33 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/openapi\.json$/,
+    exemptFromSchemaCheck: true,
     handler: async () => ({
-      body: await readFile(join(packageRoot(), 'openapi.json'), 'utf8'),
+      body: await servedSpec(),
       contentType: 'application/json; charset=utf-8',
     }),
   },
 ];
+
+/**
+ * The committed spec with the live query ceiling patched in.
+ *
+ * MAX_QUERY_LIMIT is configurable (#55), so a spec that always claimed 1000
+ * would be wrong on any instance that changed it — and the spec is what a
+ * generated client trusts. The file on disk stays the documented default; only
+ * what is served reflects the running configuration.
+ */
+async function servedSpec(): Promise<string> {
+  const raw = await readFile(join(packageRoot(), 'openapi.json'), 'utf8');
+  if (MAX_QUERY_LIMIT === DEFAULT_MAX_QUERY_LIMIT) return raw;
+
+  const spec = JSON.parse(raw) as {
+    components?: { parameters?: Record<string, { schema?: { maximum?: number } }> };
+  };
+  const limit = spec.components?.parameters?.['Limit'];
+  if (limit?.schema) limit.schema.maximum = MAX_QUERY_LIMIT;
+  return JSON.stringify(spec, null, 2);
+}
 
 function packageRoot(): string {
   // dist/server.js -> package root
@@ -205,6 +284,10 @@ export function createApiServer(options: ApiServerOptions): Server {
         );
       }
 
+      // Everything except /health and /openapi.json reads rows, so everything
+      // else waits for the schema to be current.
+      if (!route.exemptFromSchemaCheck) await assertSchemaCurrent(store);
+
       const match = route.pattern.exec(path);
       const result = await route.handler({
         params: match ? match.slice(1) : [],
@@ -221,6 +304,9 @@ export function createApiServer(options: ApiServerOptions): Server {
           ? error
           : new ApiError(500, 'internal_error', error instanceof Error ? error.message : String(error));
       if (apiError.allow) res.setHeader('Allow', apiError.allow);
+      if (apiError.retryAfterSeconds !== undefined) {
+        res.setHeader('Retry-After', String(apiError.retryAfterSeconds));
+      }
       if (apiError.status >= 500) {
         log(`${req.method} ${url.pathname} -> ${apiError.status}: ${error instanceof Error ? error.stack : error}`);
       }

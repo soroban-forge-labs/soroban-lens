@@ -56,8 +56,15 @@ export interface RetentionState {
 /** A topic filter segment: an exact base64 ScVal, or "*" to match any one segment. */
 export type TopicSegment = string;
 
+/**
+ * Event classes the RPC serves. `contract` is what almost everyone wants and
+ * stays the default; `system` and `diagnostic` are what this package used to
+ * make unreachable by hardcoding the filter.
+ */
+export type EventType = 'contract' | 'system' | 'diagnostic';
+
 export interface EventFilter {
-  type?: 'contract' | 'system';
+  type?: EventType;
   /** Max 5 contract ids per filter (RPC limit). */
   contractIds?: string[];
   /** Max 5 topic filters per filter, each 1-4 segments (RPC limit). */
@@ -67,8 +74,19 @@ export interface EventFilter {
 export interface PollerOptions {
   /** Contract ids to watch. RPC allows at most 5 per filter. */
   contractIds: string[];
+  /**
+   * Which class of events to stream. Defaults to `contract`, which is the
+   * behaviour every existing caller already gets.
+   */
+  eventType?: EventType;
   /** Ledger to start from when no cursor is stored. Defaults to "as far back as retention allows". */
   startLedger?: number;
+  /**
+   * Last ledger to read, inclusive. The stream ends cleanly once the range is
+   * exhausted, which is what makes indexing a bounded historical window
+   * possible without watching the log and killing the process.
+   */
+  endLedger?: number;
   /** Events per RPC page, 1..10000. Defaults to 200. */
   pageSize?: number;
   /** Milliseconds to wait after catching up to the tip. Defaults to 2000. */

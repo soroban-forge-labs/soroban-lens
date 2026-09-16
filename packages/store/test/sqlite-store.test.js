@@ -5,7 +5,15 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SqliteEventStore, LATEST_SCHEMA_VERSION, MAX_QUERY_LIMIT, normaliseLimit } from '../dist/index.js';
+import {
+  SqliteEventStore,
+  LATEST_SCHEMA_VERSION,
+  MAX_QUERY_LIMIT,
+  MIGRATIONS,
+  DEFAULT_MAX_QUERY_LIMIT,
+  resolveMaxQueryLimit,
+  normaliseLimit,
+} from '../dist/index.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -235,7 +243,7 @@ test('healthCheck reports schema and event count', async () => {
   const store = new SqliteEventStore({ path: ':memory:' });
   const health = await store.healthCheck();
   assert.equal(health.ok, true);
-  assert.match(health.detail, /schema v1/);
+  assert.match(health.detail, new RegExp(`schema v${LATEST_SCHEMA_VERSION}`));
   await store.close();
 });
 
@@ -439,4 +447,154 @@ test('an index that matches nothing returns an empty page, not everything', asyn
   assert.equal(page.total, 0);
   assert.deepEqual(page.events, []);
   await store.close();
+});
+
+// ── #36 index indexed_at ─────────────────────────────────────────────────────
+
+test('the indexed_at index exists in a migration and the planner uses it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+  await store.close();
+
+  const db = new DatabaseSync(path);
+  const indexes = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'")
+    .all()
+    .map((r) => r.name);
+  assert.ok(indexes.includes('idx_events_indexed_at'), `indexes: ${indexes.join(', ')}`);
+
+  // The bar the issue sets: a query ordering by indexed_at must actually use it,
+  // not merely have an index sitting there unused.
+  const plan = db
+    .prepare('EXPLAIN QUERY PLAN SELECT id FROM events ORDER BY indexed_at DESC LIMIT 10')
+    .all()
+    .map((r) => r.detail)
+    .join(' | ');
+  assert.match(plan, /idx_events_indexed_at/, `planner chose: ${plan}`);
+  assert.ok(!/SCAN events(?! USING)/.test(plan), `still a full scan: ${plan}`);
+
+  db.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('migrating an existing v1 database adds the index without touching rows', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+
+  // Build a database that stopped at v1, exactly as a deployed one would be.
+  const v1 = new DatabaseSync(path);
+  v1.exec(`CREATE TABLE schema_migrations (
+    version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
+  v1.exec(MIGRATIONS[0].up);
+  v1.prepare('INSERT INTO schema_migrations VALUES (?, ?, ?)').run(1, MIGRATIONS[0].name, '');
+  v1.close();
+
+  // Opening it runs only the pending migration.
+  const store = new SqliteEventStore({ path });
+  const inserted = await store.insertEvents(fixture.events);
+  const stats = await store.getStats();
+  assert.equal(stats.schemaVersion, LATEST_SCHEMA_VERSION);
+  assert.equal(inserted, fixture.events.length);
+  await store.close();
+
+  const db = new DatabaseSync(path);
+  const names = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'")
+    .all()
+    .map((r) => r.name);
+  db.close();
+  assert.ok(names.includes('idx_events_indexed_at'));
+
+  await rm(dir, { recursive: true, force: true });
+});
+
+// ── #24 time-bounded queries backed by closed_at_unix ────────────────────────
+
+const unix = (iso) => Math.floor(Date.parse(iso) / 1000);
+
+test('fromTime and toTime bound a query by ledger close time', async () => {
+  const store = await seeded();
+  const from = unix('2026-09-15T19:22:55Z');
+  const to = unix('2026-09-15T19:23:00Z');
+  const page = await store.queryEvents({ fromTime: from, toTime: to, limit: MAX_QUERY_LIMIT });
+
+  assert.ok(page.events.length > 0);
+  for (const event of page.events) {
+    const at = unix(event.ledgerClosedAt);
+    assert.ok(at >= from && at <= to, `${event.ledgerClosedAt} is outside the window`);
+  }
+  await store.close();
+});
+
+test('time bounds are inclusive on both ends', async () => {
+  const store = await seeded();
+  const all = await store.queryEvents({ limit: MAX_QUERY_LIMIT });
+  const exact = unix(all.events[0].ledgerClosedAt);
+
+  // A single-second window must still contain the event that closed in it.
+  const page = await store.queryEvents({ fromTime: exact, toTime: exact, limit: MAX_QUERY_LIMIT });
+  assert.ok(page.events.some((e) => e.id === all.events[0].id));
+  await store.close();
+});
+
+test('time bounds combine with contract and topic filters', async () => {
+  const store = await seeded();
+  const page = await store.queryEvents({
+    contractId: SAC,
+    fromTime: unix('2026-09-15T00:00:00Z'),
+    limit: MAX_QUERY_LIMIT,
+  });
+  assert.ok(page.events.length > 0);
+  assert.ok(page.events.every((e) => e.contractId === SAC));
+  await store.close();
+});
+
+test('a window before anything indexed returns nothing, not everything', async () => {
+  const store = await seeded();
+  const page = await store.queryEvents({ toTime: unix('2020-01-01T00:00:00Z'), limit: 10 });
+  assert.equal(page.total, 0);
+  await store.close();
+});
+
+test('time-bounded queries use the closed_at_unix index', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+  await store.close();
+
+  const db = new DatabaseSync(path);
+  const plan = db
+    .prepare('EXPLAIN QUERY PLAN SELECT * FROM events WHERE closed_at_unix >= ? AND closed_at_unix <= ?')
+    .all(0, 9_999_999_999)
+    .map((r) => r.detail)
+    .join(' | ');
+  db.close();
+  assert.match(plan, /idx_events_closed_at_unix/, `planner chose: ${plan}`);
+
+  await rm(dir, { recursive: true, force: true });
+});
+
+// ── #55 configurable query limit ─────────────────────────────────────────────
+
+test('the query ceiling defaults to 1000', () => {
+  assert.equal(resolveMaxQueryLimit(undefined), DEFAULT_MAX_QUERY_LIMIT);
+  assert.equal(resolveMaxQueryLimit(''), DEFAULT_MAX_QUERY_LIMIT);
+  assert.equal(DEFAULT_MAX_QUERY_LIMIT, 1000);
+});
+
+test('the query ceiling can be raised or lowered', () => {
+  assert.equal(resolveMaxQueryLimit('5000'), 5000);
+  assert.equal(resolveMaxQueryLimit('10'), 10);
+  assert.equal(resolveMaxQueryLimit('250.9'), 250, 'truncated, not rounded up past the ceiling');
+});
+
+test('an unusable ceiling falls back rather than rejecting every request', () => {
+  // A ceiling of NaN or 0 would make the API reject every limit, which is a
+  // far worse outcome than ignoring a typo.
+  for (const bad of ['lots', '0', '-5', 'NaN']) {
+    assert.equal(resolveMaxQueryLimit(bad), DEFAULT_MAX_QUERY_LIMIT, bad);
+  }
 });

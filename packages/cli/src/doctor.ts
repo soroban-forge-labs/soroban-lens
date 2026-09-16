@@ -2,7 +2,7 @@ import { access, constants, mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { LensRpcClient, isContractId, CONTRACT_ID_HINT } from '@soroban-lens/ingest';
 import { SqliteEventStore, LATEST_SCHEMA_VERSION } from '@soroban-lens/store';
-import type { LensConfig } from './config.js';
+import { redactHeaders, type LensConfig } from './config.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -38,7 +38,7 @@ export async function runDoctor(config: LensConfig): Promise<CheckResult[]> {
     checkDatabase(config.dbPath),
     checkRpc(config),
   ]);
-  return [...checks, checkContractIds(config.contractIds)];
+  return [...checks, checkContractIds(config.contractIds), checkRpcHeaders(config.rpcHeaders)];
 }
 
 function checkNodeVersion(): CheckResult {
@@ -109,6 +109,9 @@ async function checkDatabase(dbPath: string): Promise<CheckResult> {
 async function checkRpc(config: LensConfig): Promise<CheckResult> {
   const client = new LensRpcClient({
     rpcUrl: config.network.rpcUrl,
+    // Headers are part of what makes the endpoint reachable, so doctor has to
+    // use them or it would report a 401 the real indexer would never hit.
+    ...(Object.keys(config.rpcHeaders).length > 0 ? { headers: config.rpcHeaders } : {}),
     // One quick attempt: doctor reports a problem, it does not wait one out.
     retry: { attempts: 1 },
     timeoutSeconds: 10,
@@ -135,6 +138,22 @@ async function checkRpc(config: LensConfig): Promise<CheckResult> {
           : 'Check network access and that LENS_RPC_URL is correct. The public testnet endpoint is https://soroban-testnet.stellar.org.',
     };
   }
+}
+
+/**
+ * Report which RPC headers are configured, by name only.
+ *
+ * Confirming a header is being sent is the whole debugging value; the value
+ * itself is a provider API key, and doctor output is the single most likely
+ * thing to end up pasted into an issue.
+ */
+function checkRpcHeaders(headers: Record<string, string>): CheckResult {
+  const names = Object.keys(headers);
+  return {
+    name: 'RPC headers',
+    status: 'pass',
+    detail: names.length === 0 ? 'none configured' : redactHeaders(headers),
+  };
 }
 
 /** Contract ids are StrKey: 'C' followed by 55 base32 characters. */

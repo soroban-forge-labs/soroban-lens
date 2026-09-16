@@ -17,7 +17,13 @@ export type {
 } from './types.js';
 
 export type { EventStore } from './store.js';
-export { MAX_QUERY_LIMIT, DEFAULT_QUERY_LIMIT, normaliseLimit } from './store.js';
+export {
+  MAX_QUERY_LIMIT,
+  DEFAULT_MAX_QUERY_LIMIT,
+  DEFAULT_QUERY_LIMIT,
+  resolveMaxQueryLimit,
+  normaliseLimit,
+} from './store.js';
 
 export { SqliteEventStore, INDEXED_TOPIC_DEPTH } from './sqlite-store.js';
 export type { SqliteStoreOptions } from './sqlite-store.js';
