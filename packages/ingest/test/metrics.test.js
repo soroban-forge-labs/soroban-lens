@@ -25,3 +25,31 @@ test('metrics port accepts TCP ports and rejects ambiguous configuration', () =>
     assert.throws(() => parseMetricsPort(raw), /integer from 1 to 65535/);
   }
 });
+
+test('histogram buckets are cumulative with an infinite bucket equal to count', () => {
+  const metrics = new IngestMetrics();
+  metrics.rpcDuration('getEvents', 0.05);
+  metrics.rpcDuration('getEvents', 40);
+  const text = metrics.render();
+  assert.match(text, /bucket\{method="getEvents",le="0.01"\} 0\n/);
+  assert.match(text, /bucket\{method="getEvents",le="0.05"\} 1\n/);
+  assert.match(text, /bucket\{method="getEvents",le="30"\} 1\n/);
+  assert.match(text, /bucket\{method="getEvents",le="\+Inf"\} 2\n/);
+  assert.match(text, /duration_seconds_sum\{method="getEvents"\} 40.05\n/);
+  assert.match(text, /duration_seconds_count\{method="getEvents"\} 2\n/);
+  assert.ok(text.endsWith('\n'));
+});
+
+test('error labels classify failures without exposing provider messages', () => {
+  const metrics = new IngestMetrics();
+  for (const error of [
+    { response: { status: 429 } }, { status: 503 }, { code: 'ETIMEDOUT' },
+    { code: -32600 }, new Error('secret provider token'), null,
+  ]) metrics.rpcError('getEvents', error);
+  const text = metrics.render();
+  for (const kind of ['rate_limit', 'http', 'timeout', 'json_rpc']) {
+    assert.ok(text.includes(`kind="${kind}"} 1\n`));
+  }
+  assert.ok(text.includes('kind="transport"} 2\n'));
+  assert.ok(!text.includes('secret'));
+});
