@@ -45,4 +45,4 @@ export {
 export type { RetryOptions } from './retry.js';
 
 export { IngestMetrics } from './metrics.js';
-export { startMetricsServer, closeMetricsServer } from './metrics-server.js';
+export { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';

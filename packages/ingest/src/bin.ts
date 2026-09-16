@@ -12,7 +12,7 @@ import { FileCursorStore, MemoryCursorStore } from './cursor.js';
 import { resolveNetwork, NETWORKS } from './networks.js';
 import type { EventType } from './types.js';
 import { IngestMetrics } from './metrics.js';
-import { startMetricsServer, closeMetricsServer } from './metrics-server.js';
+import { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';
 
 const EVENT_TYPES: EventType[] = ['contract', 'system', 'diagnostic'];
 
@@ -219,11 +219,7 @@ async function main(argv: string[]): Promise<number> {
     ...numeric('maxDelayMs', values['retry-max-delay'] ?? process.env.LENS_RETRY_MAX_DELAY_MS),
   };
 
-  const metricsPort = values['metrics-port'] ?? process.env.LENS_METRICS_PORT;
-  const port = metricsPort === undefined ? undefined : Number(metricsPort);
-  if (port !== undefined && (!/^\d+$/.test(metricsPort!) || !Number.isInteger(port) || port < 1 || port > 65535)) {
-    throw new Error('--metrics-port must be an integer from 1 to 65535');
-  }
+  const port = parseMetricsPort(values['metrics-port'] ?? process.env.LENS_METRICS_PORT);
   const metrics = new IngestMetrics();
   const client = new LensRpcClient({
     metrics,

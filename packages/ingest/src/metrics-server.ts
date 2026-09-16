@@ -1,6 +1,15 @@
 import { createServer, type Server } from 'node:http';
 import type { IngestMetrics } from './metrics.js';
 
+export function parseMetricsPort(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const port = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('metrics port must be an integer from 1 to 65535');
+  }
+  return port;
+}
+
 /** Opt-in endpoint. Binding failure rejects startup rather than losing monitoring silently. */
 export async function startMetricsServer(
   metrics: IngestMetrics,
