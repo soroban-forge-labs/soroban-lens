@@ -11,6 +11,8 @@ import { EventPoller } from './poller.js';
 import { FileCursorStore, MemoryCursorStore } from './cursor.js';
 import { resolveNetwork, NETWORKS } from './networks.js';
 import type { EventType } from './types.js';
+import { IngestMetrics } from './metrics.js';
+import { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';
 
 const EVENT_TYPES: EventType[] = ['contract', 'system', 'diagnostic'];
 
@@ -99,12 +101,15 @@ Options:
       --no-resume          Ignore and do not write any stored cursor.
       --once               Exit once caught up to the current tip.
       --max-events <n>     Exit after emitting this many events.
+      --metrics-port <n>   Enable /metrics (typically 9090; disabled by default).
+      --metrics-host <ip>  Bind address (default: 127.0.0.1).
   -h, --help               Show this help.
 
 Environment:
   LENS_NETWORK, LENS_RPC_URL, LENS_CONTRACT_IDS (comma separated), LENS_DATA_DIR
   LENS_RPC_HEADERS (comma separated 'Name: value' pairs)
   LENS_RETRY_ATTEMPTS, LENS_RETRY_BASE_DELAY_MS, LENS_RETRY_MAX_DELAY_MS
+  LENS_METRICS_PORT, LENS_METRICS_HOST
 
 Examples:
   # Testnet native XLM contract, 20 events, then exit
@@ -133,6 +138,8 @@ async function main(argv: string[]): Promise<number> {
       'no-resume': { type: 'boolean' },
       once: { type: 'boolean' },
       'max-events': { type: 'string' },
+      'metrics-port': { type: 'string' },
+      'metrics-host': { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: false,
@@ -213,7 +220,10 @@ async function main(argv: string[]): Promise<number> {
     ...numeric('maxDelayMs', values['retry-max-delay'] ?? process.env.LENS_RETRY_MAX_DELAY_MS),
   };
 
+  const port = parseMetricsPort(values['metrics-port'] ?? process.env.LENS_METRICS_PORT);
+  const metrics = new IngestMetrics();
   const client = new LensRpcClient({
+    metrics,
     rpcUrl: network.rpcUrl,
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
     retry: {
@@ -241,6 +251,7 @@ async function main(argv: string[]): Promise<number> {
     {
       client,
       cursors,
+      metrics,
       log: (m) => process.stderr.write(`[ingest] ${m}\n`),
     },
   );
@@ -259,24 +270,31 @@ async function main(argv: string[]): Promise<number> {
       '\n',
   );
 
-  for await (const batch of poller.stream()) {
-    for (const event of batch.events) {
-      process.stdout.write(`${JSON.stringify(event)}\n`);
-      if (++emitted >= maxEvents) {
-        process.stderr.write(`[ingest] reached --max-events (${maxEvents})\n`);
+  const metricsServer = port === undefined ? undefined : await startMetricsServer(
+    metrics, port, values['metrics-host'] ?? process.env.LENS_METRICS_HOST ?? '127.0.0.1',
+  );
+  try {
+    for await (const batch of poller.stream()) {
+      for (const event of batch.events) {
+        process.stdout.write(`${JSON.stringify(event)}\n`);
+        if (++emitted >= maxEvents) {
+          process.stderr.write(`[ingest] reached --max-events (${maxEvents})\n`);
+          return 0;
+        }
+      }
+      if (batch.progress.reachedEndLedger) {
+        process.stderr.write(`[ingest] reached --end-ledger (${endLedger})\n`);
+        return 0;
+      }
+      if (values.once && batch.progress.caughtUp) {
+        process.stderr.write(`[ingest] caught up at ledger ${batch.progress.latestLedger}\n`);
         return 0;
       }
     }
-    if (batch.progress.reachedEndLedger) {
-      process.stderr.write(`[ingest] reached --end-ledger (${endLedger})\n`);
-      return 0;
-    }
-    if (values.once && batch.progress.caughtUp) {
-      process.stderr.write(`[ingest] caught up at ledger ${batch.progress.latestLedger}\n`);
-      return 0;
-    }
+    return 0;
+  } finally {
+    if (metricsServer) await closeMetricsServer(metricsServer);
   }
-  return 0;
 }
 
 main(process.argv.slice(2))

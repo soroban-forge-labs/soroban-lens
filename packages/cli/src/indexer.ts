@@ -1,3 +1,7 @@
+import {
+  EventPoller, LensRpcClient, defaultCursorKey, IngestMetrics,
+  startMetricsServer, closeMetricsServer, parseMetricsPort,
+} from '@soroban-lens/ingest';
 import { writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -66,9 +70,12 @@ export interface IndexerResult {
 export async function runIndexer(options: IndexerOptions): Promise<IndexerResult> {
   const { config } = options;
   const log = options.log ?? (() => {});
+  const metricsPort = parseMetricsPort(process.env.LENS_METRICS_PORT);
+  const metrics = new IngestMetrics();
 
   const store = new SqliteEventStore({ path: config.dbPath });
   const client = new LensRpcClient({
+    metrics,
     rpcUrl: config.network.rpcUrl,
     ...(Object.keys(config.rpcHeaders).length > 0 ? { headers: config.rpcHeaders } : {}),
     retry: {
@@ -88,6 +95,7 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
     },
     {
       client,
+      metrics,
       cursors: new StoreBackedCursors(store),
       cursorKey,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -98,8 +106,13 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
   let inserted = 0;
   let seen = 0;
   let lastLedger = 0;
+  let metricsServer: Awaited<ReturnType<typeof startMetricsServer>> | undefined;
 
   try {
+    if (metricsPort !== undefined) {
+      metricsServer = await startMetricsServer(metrics, metricsPort, process.env.LENS_METRICS_HOST ?? '127.0.0.1');
+      log(`metrics listening on ${process.env.LENS_METRICS_HOST ?? '127.0.0.1'}:${metricsPort}/metrics`);
+    }
     log(
       `indexing ${config.network.name} (${config.network.rpcUrl}) into ${config.dbPath}; ` +
         `${config.contractIds.length || 'all'} contract(s), stream "${cursorKey}"`,
@@ -134,7 +147,11 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       }
     }
   } finally {
-    await store.close();
+    try {
+      if (metricsServer) await closeMetricsServer(metricsServer);
+    } finally {
+      await store.close();
+    }
   }
 
   return { inserted, seen, lastLedger };
