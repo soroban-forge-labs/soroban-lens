@@ -1,8 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { once } from 'node:events';
-import { SqliteEventStore, LATEST_SCHEMA_VERSION, MAX_QUERY_LIMIT } from '@soroban-lens/store';
+import {
+  SqliteEventStore,
+  LATEST_SCHEMA_VERSION,
+  MAX_QUERY_LIMIT,
+  MIGRATIONS,
+} from '@soroban-lens/store';
 import { createApiServer, MAX_BATCH_IDS } from '../dist/index.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
@@ -556,5 +565,96 @@ test('without ids, /events still behaves as a filtered query', async () => {
     assert.equal(body.events.length, 5);
     assert.equal(body.total, fixture.events.length);
     assert.equal(body.missing, undefined, 'the filter path must not grow a missing field');
+  });
+});
+
+// ── #57 503 with Retry-After during migrations ───────────────────────────────
+
+/**
+ * Boot the API against a database that genuinely stopped at schema v1.
+ *
+ * A real stale database rather than a stubbed getStats: healthCheck() derives
+ * its own verdict from the store, so faking one method would have left health
+ * reporting "ok" and the test asserting against a fiction.
+ */
+async function withStaleServer(run) {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-stale-'));
+  const path = join(dir, 'lens.db');
+
+  const raw = new DatabaseSync(path);
+  raw.exec(`CREATE TABLE schema_migrations (
+    version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
+  raw.exec(MIGRATIONS[0].up);
+  raw.prepare('INSERT INTO schema_migrations VALUES (?, ?, ?)').run(1, MIGRATIONS[0].name, '');
+  raw.close();
+
+  // migrateOnOpen: false, or opening it would bring it up to date.
+  const store = new SqliteEventStore({ path, migrateOnOpen: false });
+  await store.insertEvents(fixture.events);
+  const server = createApiServer({ store });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await run({ base, get: async (p) => {
+      const res = await fetch(base + p);
+      const text = await res.text();
+      return { res, body: text ? JSON.parse(text) : null };
+    } });
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('data routes return 503 with Retry-After while a migration is pending', async () => {
+  await withStaleServer(async ({ get }) => {
+    for (const path of [
+      '/events',
+      '/stats',
+      '/status',
+      '/contracts',
+      `/contracts/${SAC}/events`,
+      `/contracts/${SAC}/topics`,
+      `/contracts/${SAC}/stats`,
+      '/events/anything',
+    ]) {
+      const { res, body } = await get(path);
+      assert.equal(res.status, 503, path);
+      // A client that honours Retry-After needs the header, not just the code.
+      assert.equal(res.headers.get('retry-after'), '5', path);
+      assert.equal(body.error.code, 'unavailable', path);
+      assert.match(body.error.message, /schema v/, path);
+    }
+  });
+});
+
+test('/health still answers during a migration, with the reason', async () => {
+  await withStaleServer(async ({ get }) => {
+    const { res, body } = await get('/health');
+    // Health is how an operator finds out why everything else is 503ing, so it
+    // must not be gated by the same check.
+    assert.equal(res.status, 503);
+    assert.equal(body.status, 'degraded');
+    assert.match(body.detail, /schema is v/);
+    assert.equal(body.schemaVersion, 1);
+  });
+});
+
+test('the spec is still served during a migration', async () => {
+  await withStaleServer(async ({ get }) => {
+    const { res, body } = await get('/openapi.json');
+    assert.equal(res.status, 200, 'a static document does not depend on the schema');
+    assert.ok(body.paths['/events']);
+  });
+});
+
+test('a current schema serves data routes normally', async () => {
+  await withServer(async ({ get }) => {
+    const { res } = await get('/events?limit=1');
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('retry-after'), null);
   });
 });
