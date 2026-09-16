@@ -138,6 +138,7 @@ npm run bench:count-cache -w @soroban-lens/store       # #26
 npm run bench:insert -w @soroban-lens/store            # #27
 npm run bench:xdr-compression -w @soroban-lens/store   # #35
 npm run bench:address-index -w @soroban-lens/store     # #23
+npm run bench:fts-search -w @soroban-lens/store         # #32
 ```
 
 `insert-strategies.bench.js` (#27) measured `insertDecoded`'s one-prepared-

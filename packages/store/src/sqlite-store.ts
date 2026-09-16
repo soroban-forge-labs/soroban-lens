@@ -682,6 +682,21 @@ export class SqliteEventStore implements EventStore {
     return { params, event: redecoded };
   }
 
+  async rebuildSearchIndex(): Promise<void> {
+    this.#db.exec('BEGIN');
+    try {
+      this.#db.exec('DELETE FROM events_fts');
+      this.#db.exec(`
+        INSERT INTO events_fts (event_id, topics_text, value_text)
+        SELECT id, topics_json, value_json FROM events
+      `);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   async checkpoint(mode: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE' = 'TRUNCATE'): Promise<void> {
     if (this.#path === ':memory:') return; // no WAL file to checkpoint
     // The mode is typed and only ever one of four literal SQL keywords, never
@@ -827,6 +842,14 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
     conditions.push('tx_hash = ?');
     values.push(query.txHash);
   }
+  if (query.search) {
+    // A quoted phrase, not the raw string, so a user's own FTS5 operator
+    // characters (AND, OR, NOT, *, -) are matched literally rather than
+    // parsed as query syntax — a search for "high-value" must not become a
+    // "high NOT value" query because it contains a hyphen.
+    conditions.push('id IN (SELECT event_id FROM events_fts WHERE events_fts MATCH ?)');
+    values.push(ftsPhraseQuery(query.search));
+  }
   if (query.address) {
     // IN (subquery), not a JOIN or a correlated EXISTS: a JOIN would multiply
     // the row when an address appears at several positions in one event,
@@ -888,6 +911,15 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
     clause: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '',
     values,
   };
+}
+
+/**
+ * Turn arbitrary user input into a literal FTS5 phrase query: wrap in double
+ * quotes, doubling any quote already inside (FTS5's own escaping rule for a
+ * quote character within a quoted string).
+ */
+function ftsPhraseQuery(text: string): string {
+  return `"${text.replace(/"/g, '""')}"`;
 }
 
 /** Number of topic positions that can be filtered on. */

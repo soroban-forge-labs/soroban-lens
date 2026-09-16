@@ -91,6 +91,12 @@ export interface EventQuery {
    */
   address?: string | undefined;
   /**
+   * Substring match against a decoded event's topics and value, via the
+   * trigram full-text index (#32). At least 3 characters — trigram indexes
+   * 3-character runs, so anything shorter matches nothing by construction.
+   */
+  search?: string | undefined;
+  /**
    * Position of the transaction within its ledger. Paired with `txHash` or a
    * ledger bound it pins down one transaction's events exactly.
    */

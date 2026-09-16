@@ -771,3 +771,28 @@ test('address combines with the contract route', async () => {
     assert.ok(body.events.length > 0);
   });
 });
+
+// ── #32 GET /events?search= ──────────────────────────────────────────────────
+
+test('GET /events?search= matches a substring inside a decoded topic', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?search=posure&limit=1000');
+    assert.equal(res.status, 200);
+    assert.ok(body.total > 0);
+  });
+});
+
+test('a search term with FTS operator characters does not error', async () => {
+  await withServer(async ({ get }) => {
+    const { res } = await get(`/events?search=${encodeURIComponent('fee AND NOT "x')}`);
+    assert.equal(res.status, 200);
+  });
+});
+
+test('search combines with the contract route', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(`/contracts/${SAC}/events?search=exposure&limit=1000`);
+    assert.equal(res.status, 200);
+    assert.ok(body.events.every((e) => e.contractId === SAC));
+  });
+});

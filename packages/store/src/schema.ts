@@ -138,6 +138,52 @@ export const MIGRATIONS: Migration[] = [
     `,
     down: `DROP TABLE IF EXISTS event_addresses;`,
   },
+  {
+    version: 5,
+    name: 'full-text-search',
+    up: `
+      -- trigram, not the default unicode61 tokenizer: "searching a substring"
+      -- means matching 'ick br' inside 'quick brown', which a token-based
+      -- tokenizer cannot do (it only matches whole tokens or a token prefix).
+      -- Trigram indexes every 3-character run, so any substring of at least
+      -- 3 characters is findable. Shorter search terms simply match nothing,
+      -- a limitation of the technique rather than a bug — documented on the
+      -- API parameter rather than left for someone to discover.
+      --
+      -- Standalone rather than an external-content table: events' primary key
+      -- is TEXT, and FTS5's content= mapping needs an INTEGER rowid to alias.
+      -- Kept in sync by trigger instead, which also means every write path —
+      -- insert, redecode's UPDATE, prune's DELETE — updates this table for
+      -- free, with no code changes to any of them.
+      CREATE VIRTUAL TABLE events_fts USING fts5(
+        event_id UNINDEXED,
+        topics_text,
+        value_text,
+        tokenize = 'trigram'
+      );
+
+      CREATE TRIGGER trg_events_fts_insert AFTER INSERT ON events BEGIN
+        INSERT INTO events_fts (event_id, topics_text, value_text)
+        VALUES (new.id, new.topics_json, new.value_json);
+      END;
+
+      CREATE TRIGGER trg_events_fts_update AFTER UPDATE ON events BEGIN
+        DELETE FROM events_fts WHERE event_id = old.id;
+        INSERT INTO events_fts (event_id, topics_text, value_text)
+        VALUES (new.id, new.topics_json, new.value_json);
+      END;
+
+      CREATE TRIGGER trg_events_fts_delete AFTER DELETE ON events BEGIN
+        DELETE FROM events_fts WHERE event_id = old.id;
+      END;
+    `,
+    down: `
+      DROP TRIGGER IF EXISTS trg_events_fts_delete;
+      DROP TRIGGER IF EXISTS trg_events_fts_update;
+      DROP TRIGGER IF EXISTS trg_events_fts_insert;
+      DROP TABLE IF EXISTS events_fts;
+    `,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.reduce(

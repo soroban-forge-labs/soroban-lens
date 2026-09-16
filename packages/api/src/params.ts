@@ -113,6 +113,11 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     );
   }
 
+  // No minimum-length rejection: a 1-2 character search is a valid request
+  // that the trigram index simply cannot match anything with, which is
+  // honest behaviour (an empty page), not an error.
+  const search = params.get('search') ?? undefined;
+
   // Both are ledger-relative positions, so negatives are meaningless rather
   // than merely unusual — reject instead of returning a guaranteed empty page.
   const transactionIndex = intParam(params, 'transactionIndex');
@@ -143,6 +148,7 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     ...(toTime !== undefined ? { toTime } : {}),
     ...(txHash !== undefined ? { txHash } : {}),
     ...(address !== undefined ? { address } : {}),
+    ...(search !== undefined && search !== '' ? { search } : {}),
     ...(transactionIndex !== undefined ? { transactionIndex } : {}),
     ...(operationIndex !== undefined ? { operationIndex } : {}),
     ...(cursor ? { cursor } : {}),

@@ -37,6 +37,15 @@ export interface EventStore {
   migrateDown(toVersion: number): Promise<number[]>;
 
   /**
+   * Fully repopulate the full-text search index from `events`, from scratch.
+   *
+   * Triggers keep events_fts in sync automatically on every write, so this is
+   * for recovery — the tokenizer changed, the index is suspected corrupt — not
+   * something a normal write path needs to call.
+   */
+  rebuildSearchIndex(): Promise<void>;
+
+  /**
    * Force a WAL checkpoint. A continuously-writing indexer with a long-lived
    * reader (the API, kept open by an in-flight request) can grow `-wal`
    * without bound between natural checkpoints, which looks like a disk leak.

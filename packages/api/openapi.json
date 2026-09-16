@@ -194,6 +194,9 @@
             "$ref": "#/components/parameters/Address"
           },
           {
+            "$ref": "#/components/parameters/Search"
+          },
+          {
             "$ref": "#/components/parameters/TransactionIndex"
           },
           {
@@ -375,6 +378,9 @@
           },
           {
             "$ref": "#/components/parameters/Address"
+          },
+          {
+            "$ref": "#/components/parameters/Search"
           },
           {
             "$ref": "#/components/parameters/TransactionIndex"
@@ -638,6 +644,16 @@
           "type": "string"
         },
         "example": "GBIBH5UV4Q5L7VVJIHWYBTCSUDHJQXQC2V6Y5LOW4D26XNU5NREMIKE4"
+      },
+      "Search": {
+        "name": "search",
+        "in": "query",
+        "description": "Substring match against a decoded event's topics and value, via a trigram full-text index. At least 3 characters \u2014 shorter terms match nothing, since trigram indexing works on 3-character runs.",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "exposure"
       }
     },
     "responses": {
