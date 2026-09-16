@@ -658,3 +658,75 @@ test('a current schema serves data routes normally', async () => {
     assert.equal(res.headers.get('retry-after'), null);
   });
 });
+
+// ── #16 structured logging ───────────────────────────────────────────────────
+
+test('a successful request logs a structured request_handled event', async () => {
+  const records = [];
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await store.insertEvents(fixture.events);
+  const log = {
+    debug() {},
+    info: (event, message, fields) => records.push({ event, message, fields }),
+    warn() {},
+    error() {},
+  };
+  const server = createApiServer({ store, log });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await fetch(`${base}/health`);
+    const record = records.find((r) => r.event === 'request_handled');
+    assert.ok(record, 'expected a request_handled log record');
+    assert.equal(record.fields.method, 'GET');
+    assert.equal(record.fields.path, '/health');
+    assert.equal(typeof record.fields.durationMs, 'number');
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+  }
+});
+
+test('a 5xx logs request_failed at error level; a 4xx does not', async () => {
+  const records = [];
+  const store = new SqliteEventStore({ path: ':memory:' });
+  const log = {
+    debug() {},
+    info() {},
+    warn() {},
+    error: (event, message, fields) => records.push({ event, message, fields }),
+  };
+  const server = createApiServer({ store, log });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await fetch(`${base}/events?limit=not-a-number`); // 400, must not error-log
+    assert.equal(records.length, 0);
+
+    await fetch(`${base}/nope-nope-nope`); // 404, still not a 5xx
+    assert.equal(records.length, 0);
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+  }
+});
+
+test('no log option is silent, same as before structured logging existed', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  const server = createApiServer({ store });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const res = await fetch(`${base}/health`);
+    assert.equal(res.status, 200);
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+  }
+});

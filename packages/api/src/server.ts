@@ -7,6 +7,7 @@ import {
   DEFAULT_MAX_QUERY_LIMIT,
   LATEST_SCHEMA_VERSION,
   type EventStore,
+  type Logger,
 } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
 import { assertContractId, parseEventQuery, parseIds } from './params.js';
@@ -23,7 +24,8 @@ export interface ApiServerOptions {
    * confirm it is pointed where the user thinks it is.
    */
   network?: string;
-  log?: (message: string) => void;
+  /** Structured logger, shared with the store's own logging (#16). Defaults to silent. */
+  log?: Logger;
 }
 
 type Handler = (ctx: {
@@ -238,7 +240,7 @@ function packageRoot(): string {
  */
 export function createApiServer(options: ApiServerOptions): Server {
   const { store } = options;
-  const log = options.log ?? (() => {});
+  const log = options.log ?? { debug() {}, info() {}, warn() {}, error() {} };
   const corsOrigin = options.corsOrigin ?? '*';
 
   return createHttpServer((req: IncomingMessage, res: ServerResponse) => {
@@ -297,7 +299,13 @@ export function createApiServer(options: ApiServerOptions): Server {
       });
 
       send(res, result.status ?? 200, result.body, result.contentType, isHead);
-      log(`${req.method} ${url.pathname}${url.search} -> ${result.status ?? 200} (${Date.now() - started}ms)`);
+      const status = result.status ?? 200;
+      const durationMs = Date.now() - started;
+      log.info(
+        'request_handled',
+        `${req.method} ${url.pathname}${url.search} -> ${status} (${durationMs}ms)`,
+        { method: req.method, path: url.pathname, status, durationMs },
+      );
     } catch (error) {
       const apiError =
         error instanceof ApiError
@@ -308,7 +316,11 @@ export function createApiServer(options: ApiServerOptions): Server {
         res.setHeader('Retry-After', String(apiError.retryAfterSeconds));
       }
       if (apiError.status >= 500) {
-        log(`${req.method} ${url.pathname} -> ${apiError.status}: ${error instanceof Error ? error.stack : error}`);
+        log.error(
+          'request_failed',
+          `${req.method} ${url.pathname} -> ${apiError.status}: ${error instanceof Error ? error.stack : error}`,
+          { method: req.method, path: url.pathname, status: apiError.status },
+        );
       }
       send(res, apiError.status, apiError.toBody(), undefined, isHead);
     }

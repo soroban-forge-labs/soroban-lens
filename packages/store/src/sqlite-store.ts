@@ -2,6 +2,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { decodeEvent, topicKey } from './decode.js';
+import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
 import { normaliseLimit, type EventStore } from './store.js';
 import type {
@@ -21,7 +22,16 @@ export interface SqliteStoreOptions {
   path: string;
   /** Run migrations on construction. Defaults to true. */
   migrateOnOpen?: boolean;
+  /**
+   * Structured logger for migration events — the store and the API share the
+   * same `Logger` shape from ./logger.js. Defaults to a no-op, so passing
+   * nothing keeps a library consumer's stderr silent, exactly as before this
+   * existed.
+   */
+  log?: Logger;
 }
+
+const noopLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
 /**
  * SQLite-backed `EventStore`, on Node's built-in `node:sqlite`.
@@ -33,10 +43,12 @@ export interface SqliteStoreOptions {
 export class SqliteEventStore implements EventStore {
   readonly #db: DatabaseSync;
   readonly #path: string;
+  readonly #log: Logger;
   #statements: Statements | null = null;
 
   constructor(options: SqliteStoreOptions) {
     this.#path = options.path;
+    this.#log = options.log ?? noopLogger;
     if (options.path !== ':memory:') mkdirSync(dirname(options.path), { recursive: true });
     this.#db = new DatabaseSync(options.path);
 
@@ -86,6 +98,11 @@ export class SqliteEventStore implements EventStore {
         this.#db
           .prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
           .run(migration.version, migration.name, new Date().toISOString());
+        this.#log.info(
+          'migration_applied',
+          `applied migration ${migration.version}: ${migration.name}`,
+          { version: migration.version, name: migration.name },
+        );
       }
       this.#db.exec('COMMIT');
     } catch (error) {

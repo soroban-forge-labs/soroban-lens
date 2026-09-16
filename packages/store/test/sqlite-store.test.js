@@ -598,3 +598,46 @@ test('an unusable ceiling falls back rather than rejecting every request', () =>
     assert.equal(resolveMaxQueryLimit(bad), DEFAULT_MAX_QUERY_LIMIT, bad);
   }
 });
+
+// ── #16 structured logging ───────────────────────────────────────────────────
+
+test('a fresh database logs one migration_applied event per migration, via the shared logger', async () => {
+  const records = [];
+  const log = {
+    debug() {},
+    info: (event, message, fields) => records.push({ event, message, fields }),
+    warn() {},
+    error() {},
+  };
+  const store = new SqliteEventStore({ path: ':memory:', log });
+  await store.close();
+
+  assert.equal(records.length, MIGRATIONS.length);
+  assert.ok(records.every((r) => r.event === 'migration_applied'));
+  assert.deepEqual(records.map((r) => r.fields.version), MIGRATIONS.map((m) => m.version));
+});
+
+test('a database already at the latest schema logs nothing on open', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  await (async () => {
+    const first = new SqliteEventStore({ path });
+    await first.close();
+  })();
+
+  const records = [];
+  const log = { debug() {}, info: (e) => records.push(e), warn() {}, error() {} };
+  const reopened = new SqliteEventStore({ path, log });
+  await reopened.close();
+
+  assert.deepEqual(records, []);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('a store built with no log option stays silent, unchanged from before this existed', async () => {
+  // No assertion beyond "does not throw" is possible without capturing
+  // process.stderr, but that absence is exactly the point: passing nothing
+  // must not require passing a no-op either.
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await store.close();
+});

@@ -31,4 +31,6 @@ export type { SqliteStoreOptions } from './sqlite-store.js';
 export { decodeEvent, decodeScVal, toJsonSafe, scValTypeName, topicKey } from './decode.js';
 
 export { MIGRATIONS, LATEST_SCHEMA_VERSION } from './schema.js';
+export { createLogger, formatRecord, resolveLogFormat } from './logger.js';
+export type { Logger, LogLevel, LogRecord, LogFields, LogFormat, LoggerOptions } from './logger.js';
 export type { Migration } from './schema.js';
