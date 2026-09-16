@@ -127,6 +127,25 @@ runs, because there is no earlier schema for the data to live in.** Every
 later migration's `down` is structural only (dropping an index it added) and
 loses nothing.
 
+## Performance
+
+Two benchmarks live in `bench/`, not `test/` — they insert hundreds of
+thousands to a million synthetic rows, which is slow and irrelevant to
+correctness, so they never run in `npm test` or CI:
+
+```bash
+npm run bench:count-cache -w @soroban-lens/store   # #26
+node packages/store/bench/insert-strategies.bench.js  # #27
+```
+
+`insert-strategies.bench.js` (#27) measured `insertDecoded`'s one-prepared-
+statement-per-row approach against multi-row `VALUES` batching and PRAGMA
+tuning. Neither alternative reliably beat it — the spread between candidates
+was consistently smaller than one candidate's own run-to-run variance across
+repeated trials. `insertDecoded` is unchanged as a result: this was a
+measurement, not an assumption, and the measurement said the current code is
+already fine.
+
 ## Tests
 
 ```bash

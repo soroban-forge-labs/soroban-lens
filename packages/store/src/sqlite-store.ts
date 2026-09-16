@@ -187,6 +187,14 @@ export class SqliteEventStore implements EventStore {
 
     // One transaction per batch: an interrupted batch leaves no partial page,
     // and Module 1 replays it on restart.
+    //
+    // #27 measured this against multi-row VALUES batching and PRAGMA tuning
+    // (cache_size, temp_store) at 500k rows, several trials each — see
+    // bench/insert-strategies.bench.js. Neither alternative reliably beat a
+    // single prepared statement called once per row inside one transaction;
+    // the spread between candidates was consistently smaller than one
+    // candidate's own run-to-run variance. Left as-is on the strength of that
+    // measurement, not assumption.
     this.#db.exec('BEGIN');
     try {
       let inserted = 0;
