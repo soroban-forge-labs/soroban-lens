@@ -112,8 +112,28 @@ API reads while the indexer writes.
 
 1. Implement `EventStore`.
 2. Reuse `decodeEvent()` — decoding is backend-independent.
-3. Run the same suite against it; the tests in `test/sqlite-store.test.js` are
-   written against the trait, not against SQLite.
+3. Call `runEventStoreSuite()` against it (#38) — one exported function that
+   validates any `EventStore`, unchanged:
+
+   ```js
+   import { runEventStoreSuite } from '@soroban-lens/store';
+   import { readFileSync } from 'node:fs';
+
+   const fixture = JSON.parse(readFileSync('fixtures/testnet-events.json', 'utf8'));
+
+   runEventStoreSuite({
+     name: 'PostgresEventStore',
+     fixtureEvents: fixture.events,
+     createStore: async () => new PostgresEventStore({ connectionString: '...' }),
+   });
+   ```
+
+   See `test/conformance.test.js` for SQLite's own copy of exactly this. The
+   suite covers the interface contract only — pagination, filtering, prune,
+   stream state, snapshots. Backend-specific behaviour (does a query use a
+   particular index, does a file shrink after VACUUM) stays in that backend's
+   own test file, because asserting it in the shared suite would fail it
+   against every backend that isn't SQLite.
 
 Migrations are append-only. Never edit a shipped migration; add the next
 version to `MIGRATIONS` in [`src/schema.ts`](./src/schema.ts).
