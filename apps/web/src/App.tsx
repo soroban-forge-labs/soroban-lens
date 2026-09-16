@@ -4,6 +4,7 @@ import type { Health, LensEvent, TopicCount } from './types.js';
 import { Filters, type FilterState } from './components/Filters.js';
 import { EventTable } from './components/EventTable.js';
 import { StatusBar } from './components/StatusBar.js';
+import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { usePersistentState, usePolling, useDebounced } from './hooks.js';
 
 /** Testnet Stellar Asset Contract for native XLM — always emitting events. */
@@ -138,7 +139,41 @@ export function App(): React.JSX.Element {
     return () => controller.abort();
   }, [selected.baseUrl, debouncedContractId, contractIdValid]);
 
-  const showContract = !query.contractId;
+  const showContract = !filters.contractId;
+
+  const exportJson = useCallback(() => {
+    if (events.length === 0) return;
+    const blob = new Blob([JSON.stringify(events, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `soroban-events-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [events]);
+
+  const exportCsv = useCallback(() => {
+    if (events.length === 0) return;
+    const headers = ['id', 'ledger', 'ledger_closed_at', 'contract_id', 'tx_hash', 'in_successful_call', 'topics', 'value'];
+    const rows = events.map((e) => [
+      e.id,
+      e.ledger,
+      e.ledgerClosedAt,
+      e.contractId,
+      e.txHash,
+      e.inSuccessfulContractCall,
+      `"${e.topics.map((t) => JSON.stringify(t.value)).join(' | ').replace(/"/g, '""')}"`,
+      `"${JSON.stringify(e.value.value).replace(/"/g, '""')}"`,
+    ]);
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `soroban-events-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [events]);
 
   return (
     <div className="app">
@@ -149,21 +184,25 @@ export function App(): React.JSX.Element {
         <p className="tagline">See what your Soroban contracts are actually emitting.</p>
       </header>
 
-      <StatusBar
-        networks={networks}
-        selected={selected}
-        onSelect={(n) => setNetworkLabel(n.label)}
-        health={health}
-        error={healthError}
-        lastUpdated={lastUpdated}
-      />
+      <ErrorBoundary title="Status Bar Error">
+        <StatusBar
+          networks={networks}
+          selected={selected}
+          onSelect={(n) => setNetworkLabel(n.label)}
+          health={health}
+          error={healthError}
+          lastUpdated={lastUpdated}
+        />
+      </ErrorBoundary>
 
-      <Filters
-        value={filters}
-        onChange={setFilters}
-        knownTopics={topics}
-        onUseExample={() => setFilters({ ...filters, contractId: EXAMPLE_CONTRACT })}
-      />
+      <ErrorBoundary title="Filter Controls Error">
+        <Filters
+          value={filters}
+          onChange={setFilters}
+          knownTopics={topics}
+          onUseExample={() => setFilters({ ...filters, contractId: EXAMPLE_CONTRACT })}
+        />
+      </ErrorBoundary>
 
       {!contractIdValid && (
         <p className="warning banner">
@@ -179,25 +218,39 @@ export function App(): React.JSX.Element {
       )}
 
       <div className="result-meta">
-        <span>
-          {total.toLocaleString()} event{total === 1 ? '' : 's'}
-          {query.contractId ? ' for this contract' : ' indexed'}
-          {debouncedTopic ? ` with topic "${debouncedTopic}"` : ''}
-        </span>
-        {filters.live && <span className="live-dot" title="Polling every 5 seconds">live</span>}
+        <div className="result-meta-left">
+          <span>
+            {total.toLocaleString()} event{total === 1 ? '' : 's'}
+            {query.contractId ? ' for this contract' : ' indexed'}
+            {debouncedTopic ? ` with topic "${debouncedTopic}"` : ''}
+          </span>
+          {filters.live && <span className="live-dot" title="Polling every 5 seconds">live</span>}
+        </div>
+        {events.length > 0 && (
+          <div className="export-actions">
+            <button type="button" className="btn-export" onClick={exportJson} title="Export current events as JSON">
+              Export JSON
+            </button>
+            <button type="button" className="btn-export" onClick={exportCsv} title="Export current events as CSV">
+              Export CSV
+            </button>
+          </div>
+        )}
       </div>
 
-      <EventTable
-        events={events}
-        showContract={showContract}
-        loading={loading}
-        onTopicClick={(topic) => setFilters({ ...filters, topic })}
-        emptyMessage={
-          health && health.events === 0
-            ? 'Nothing indexed yet. Start the indexer, or load the fixture with `npm run seed`.'
-            : 'No events match these filters.'
-        }
-      />
+      <ErrorBoundary title="Event Table Error">
+        <EventTable
+          events={events}
+          showContract={showContract}
+          loading={loading}
+          onTopicClick={(topic) => setFilters({ ...filters, topic })}
+          emptyMessage={
+            health && health.events === 0
+              ? 'Nothing indexed yet. Start the indexer, or load the fixture with `npm run seed`.'
+              : 'No events match these filters.'
+          }
+        />
+      </ErrorBoundary>
 
       {nextCursor && (
         <button type="button" className="load-more" onClick={() => void loadMore()} disabled={loadingMore}>

@@ -44,6 +44,25 @@ body {
   clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 
+.error-boundary-card {
+  padding: 16px;
+  margin: 12px 0;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius);
+}
+.error-boundary-header h3 {
+  margin: 0 0 6px;
+  color: var(--error);
+  font-size: 15px;
+}
+.error-boundary-msg {
+  margin: 0 0 12px;
+  color: var(--warn-text);
+  font-size: 13px;
+}
+
+
 /* ---------- status bar ---------- */
 
 .status-bar {
@@ -93,9 +112,19 @@ body {
 /* ---------- results ---------- */
 
 .result-meta {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
   margin-bottom: 8px; font-size: 13px; color: var(--muted);
 }
+.result-meta-left { display: flex; align-items: center; gap: 10px; }
+.export-actions { display: flex; gap: 6px; }
+.btn-export {
+  font: inherit; font-size: 12px; font-weight: 500;
+  padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); color: var(--text); cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-export:hover { border-color: var(--accent); color: var(--accent); }
+
 .live-dot {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; font-weight: 600; color: var(--accent);

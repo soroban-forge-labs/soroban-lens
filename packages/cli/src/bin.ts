@@ -23,6 +23,8 @@ Usage:
   lens index  [options]              Run the indexer (ingest -> decode -> store).
   lens seed   [--fixture <path>]     Load a captured getEvents response into the database.
   lens stats  [options]              Print database statistics.
+  lens completion [bash|zsh|fish]    Generate shell auto-completion script.
+
 
 Options:
   -c, --contract <id>     Contract to watch. Repeatable. (env LENS_CONTRACT_IDS)
@@ -162,11 +164,83 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'completion': {
+      const shell = rest[0] || 'bash';
+      process.stdout.write(`${generateCompletion(shell)}\n`);
+      return 0;
+    }
+
     default:
       process.stderr.write(`error: unknown command "${command}"\n${USAGE}\n`);
       return 2;
   }
 }
+
+function generateCompletion(shell: string): string {
+  switch (shell.toLowerCase()) {
+    case 'bash':
+      return `_lens_completions() {
+  local cur prev commands options
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  prev="\${COMP_WORDS[COMP_CWORD-1]}"
+  commands="doctor index seed stats completion"
+  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --poll-interval --once --max-events --fixture -h --help"
+
+  if [ $COMP_CWORD -eq 1 ]; then
+    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+    return 0
+  fi
+
+  case "$prev" in
+    -n|--network)
+      COMPREPLY=( $(compgen -W "testnet mainnet futurenet" -- "$cur") )
+      return 0
+      ;;
+    completion)
+      COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
+      return 0
+      ;;
+    *)
+      COMPREPLY=( $(compgen -W "$options" -- "$cur") )
+      return 0
+      ;;
+  esac
+}
+complete -F _lens_completions lens`;
+
+    case 'zsh':
+      return `#compdef lens
+_lens() {
+  local -a commands
+  commands=(
+    'doctor:Preflight checks'
+    'index:Run the indexer pipeline'
+    'seed:Load testnet events fixture'
+    'stats:Print database statistics'
+    'completion:Generate shell autocompletions'
+  )
+  _arguments '1: :->command' '*: :->args'
+  case $state in
+    command) _describe 'command' commands ;;
+  esac
+}
+compdef _lens lens`;
+
+    case 'fish':
+      return `complete -c lens -f
+complete -c lens -n "__fish_use_subcommand" -a doctor -d "Preflight checks"
+complete -c lens -n "__fish_use_subcommand" -a index -d "Run the indexer pipeline"
+complete -c lens -n "__fish_use_subcommand" -a seed -d "Load testnet events fixture"
+complete -c lens -n "__fish_use_subcommand" -a stats -d "Print database statistics"
+complete -c lens -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
+complete -c lens -l network -s n -x -a "testnet mainnet futurenet"
+complete -c lens -l help -s h -d "Show help"`;
+
+    default:
+      return 'Supported shells: bash, zsh, fish';
+  }
+}
+
 
 main(process.argv.slice(2))
   .then((code) => process.exit(code))

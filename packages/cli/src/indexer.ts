@@ -2,10 +2,17 @@ import {
   EventPoller, LensRpcClient, defaultCursorKey, IngestMetrics,
   startMetricsServer, closeMetricsServer, parseMetricsPort,
 } from '@soroban-lens/ingest';
+import { writeFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { EventPoller, LensRpcClient, defaultCursorKey } from '@soroban-lens/ingest';
 import type { CursorStore, CursorState } from '@soroban-lens/ingest';
 import { SqliteEventStore } from '@soroban-lens/store';
 import type { EventStore } from '@soroban-lens/store';
 import type { LensConfig } from './config.js';
+
+export const INDEXER_HEARTBEAT_FILE = join(tmpdir(), 'lens-indexer-heartbeat');
+
 
 /**
  * Adapts the `EventStore` to Module 1's `CursorStore` interface, so resume
@@ -112,6 +119,10 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
     );
 
     for await (const batch of poller.stream()) {
+      try {
+        writeFileSync(INDEXER_HEARTBEAT_FILE, Date.now().toString());
+      } catch {}
+
       const added = await store.insertEvents(batch.events);
       inserted += added;
       seen += batch.events.length;
