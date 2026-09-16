@@ -15,5 +15,5 @@
     "test": "npm run build && node --test test/*.test.js"
   },
   "dependencies": { "@soroban-lens/store": "*" },
-  "devDependencies": { "typescript": "^5.9.0", "@types/node": "^22.10.0" }
+  "devDependencies": { "typescript": "^7.0.2", "@types/node": "^26.5.1" }
 }
