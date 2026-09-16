@@ -43,3 +43,6 @@ export {
   RetryExhaustedError,
 } from './retry.js';
 export type { RetryOptions } from './retry.js';
+
+export { IngestMetrics } from './metrics.js';
+export { startMetricsServer, closeMetricsServer } from './metrics-server.js';
