@@ -58,6 +58,15 @@ export interface SqliteStoreOptions {
   countCacheTtlMs?: number;
   /** Clock for the count cache's TTL, swappable in tests. Defaults to Date.now. */
   now?: () => number;
+  /**
+   * Test-only: force FTS5 to be treated as unavailable regardless of what
+   * this build actually has, so the "no FTS5" path (#32's Node 22.13
+   * incident) is testable on a machine whose own SQLite does have it —
+   * which is every real machine this was actually verified on before that
+   * incident, which is exactly how it shipped broken. Never set this outside
+   * a test.
+   */
+  forceDisableFts5?: boolean;
 }
 
 const noopLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -78,6 +87,7 @@ export class SqliteEventStore implements EventStore {
   readonly #countCache = new Map<string, { total: number; expiresAt: number }>();
   #statements: Statements | null = null;
   #checkpointTimer: ReturnType<typeof setInterval> | undefined;
+  #searchAvailable = false;
 
   constructor(options: SqliteStoreOptions) {
     this.#path = options.path;
@@ -97,6 +107,7 @@ export class SqliteEventStore implements EventStore {
     // Wait rather than fail when the indexer holds the write lock.
     this.#db.exec('PRAGMA busy_timeout = 5000');
 
+    this.#searchAvailable = options.forceDisableFts5 ? false : this.#hasFts5();
     if (options.migrateOnOpen !== false) this.#migrateSync();
 
     const defaultInterval = options.path === ':memory:' ? 0 : 60_000;
@@ -186,15 +197,26 @@ export class SqliteEventStore implements EventStore {
     this.#db.exec('BEGIN');
     try {
       for (const migration of pending) {
-        this.#db.exec(migration.up);
+        if (migration.requiresFts5 && !this.#searchAvailable) {
+          // Recorded as applied regardless: retrying this exact check on
+          // every future open of a build that will never gain FTS5 achieves
+          // nothing except doing the check every time.
+          this.#log.warn(
+            'migration_skipped',
+            `skipped migration ${migration.version} (${migration.name}): this SQLite build has no FTS5. Full-text search (#32) is unavailable; everything else works normally.`,
+            { version: migration.version, name: migration.name },
+          );
+        } else {
+          this.#db.exec(migration.up);
+          this.#log.info(
+            'migration_applied',
+            `applied migration ${migration.version}: ${migration.name}`,
+            { version: migration.version, name: migration.name },
+          );
+        }
         this.#db
           .prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
           .run(migration.version, migration.name, new Date().toISOString());
-        this.#log.info(
-          'migration_applied',
-          `applied migration ${migration.version}: ${migration.name}`,
-          { version: migration.version, name: migration.name },
-        );
       }
       this.#db.exec('COMMIT');
     } catch (error) {
@@ -271,6 +293,13 @@ export class SqliteEventStore implements EventStore {
   }
 
   async queryEvents(query: EventQuery): Promise<EventPage> {
+    if (query.search && !this.#searchAvailable) {
+      throw new Error(
+        'search requires the FTS5 SQLite extension, which this build does not have ' +
+          '(this is a build-time property of node:sqlite, not something a query can work around). ' +
+          'Everything else in this query would have worked fine without `search`.',
+      );
+    }
     const limit = normaliseLimit(query.limit);
     const order = query.order === 'asc' ? 'ASC' : 'DESC';
     const where = buildWhere(query);
@@ -688,6 +717,9 @@ export class SqliteEventStore implements EventStore {
   }
 
   async rebuildSearchIndex(): Promise<void> {
+    if (!this.#searchAvailable) {
+      throw new Error('rebuildSearchIndex requires the FTS5 SQLite extension, which this build does not have.');
+    }
     this.#db.exec('BEGIN');
     try {
       this.#db.exec('DELETE FROM events_fts');
@@ -753,6 +785,21 @@ export class SqliteEventStore implements EventStore {
     await flush();
 
     return inserted;
+  }
+
+  /**
+   * Whether this SQLite build has FTS5 compiled in. Checked once at
+   * construction via PRAGMA compile_options — cheap, and the answer cannot
+   * change for the lifetime of a process, so there is nothing to gain by
+   * re-checking per call.
+   */
+  #hasFts5(): boolean {
+    try {
+      const options = this.#db.prepare('PRAGMA compile_options').all() as { compile_options: string }[];
+      return options.some((row) => row.compile_options === 'ENABLE_FTS5');
+    } catch {
+      return false;
+    }
   }
 
   async checkpoint(mode: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE' = 'TRUNCATE'): Promise<void> {

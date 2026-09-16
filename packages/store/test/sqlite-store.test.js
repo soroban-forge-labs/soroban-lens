@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, statSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -14,6 +14,24 @@ import {
   resolveMaxQueryLimit,
   normaliseLimit,
 } from '../dist/index.js';
+
+/**
+ * Whether the real SQLite build this test process is running against has
+ * FTS5 compiled in. Some tests below need it for real (they assert search
+ * actually finds things); the regression tests near the bottom of this file
+ * use forceDisableFts5 to test the fallback path deterministically and do
+ * not need this.
+ */
+const FTS5_AVAILABLE = (() => {
+  try {
+    const probe = new DatabaseSync(':memory:');
+    probe.exec("CREATE VIRTUAL TABLE t USING fts5(x)");
+    probe.close();
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -601,19 +619,22 @@ test('an unusable ceiling falls back rather than rejecting every request', () =>
 
 // ── #16 structured logging ───────────────────────────────────────────────────
 
-test('a fresh database logs one migration_applied event per migration, via the shared logger', async () => {
+test('a fresh database logs one migration_applied (or migration_skipped) event per migration, via the shared logger', async () => {
   const records = [];
   const log = {
     debug() {},
     info: (event, message, fields) => records.push({ event, message, fields }),
-    warn() {},
+    warn: (event, message, fields) => records.push({ event, message, fields }),
     error() {},
   };
   const store = new SqliteEventStore({ path: ':memory:', log });
   await store.close();
 
+  // On a build without FTS5, a requiresFts5 migration logs
+  // migration_skipped instead of migration_applied (#32's Node 22.13
+  // incident) — both are still exactly one record per migration.
   assert.equal(records.length, MIGRATIONS.length);
-  assert.ok(records.every((r) => r.event === 'migration_applied'));
+  assert.ok(records.every((r) => r.event === 'migration_applied' || r.event === 'migration_skipped'));
   assert.deepEqual(records.map((r) => r.fields.version), MIGRATIONS.map((m) => m.version));
 });
 
@@ -1327,119 +1348,121 @@ test('inserting the same event twice (at-least-once replay) does not duplicate a
 });
 
 // ── #32 full-text search over decoded values ─────────────────────────────────
+describe('full-text search (#32)', { skip: !FTS5_AVAILABLE && 'this SQLite build has no FTS5' }, () => {
 
-test('search matches a substring of a decoded topic symbol', async () => {
-  const store = await seeded();
-  // 'posure' is a substring of 'exposure_synced', not a whole token — the
-  // property a trigram index provides that a word tokenizer would not.
-  const page = await store.queryEvents({ search: 'posure', limit: MAX_QUERY_LIMIT });
-  assert.ok(page.total > 0);
-  assert.ok(page.events.every((e) => JSON.stringify(e.topics).toLowerCase().includes('posure')));
-  await store.close();
-});
-
-test('search matches inside the decoded value, not only topics', async () => {
-  const store = await seeded();
-  const event = (await store.queryEvents({ limit: 1 })).events[0];
-  const valueText = JSON.stringify(event.value);
-  // A distinctive-enough substring drawn from the actual stored value.
-  const needle = valueText.replace(/[{}[\]":]/g, ' ').trim().split(/\s+/).find((w) => w.length >= 6);
-  assert.ok(needle, 'expected a findable word-like substring in the fixture value');
-
-  const page = await store.queryEvents({ search: needle, limit: MAX_QUERY_LIMIT });
-  assert.ok(page.events.some((e) => e.id === event.id));
-  await store.close();
-});
-
-test('search is case-insensitive', async () => {
-  const store = await seeded();
-  const lower = await store.queryEvents({ search: 'exposure', limit: 10 });
-  const upper = await store.queryEvents({ search: 'EXPOSURE', limit: 10 });
-  const mixed = await store.queryEvents({ search: 'ExPoSuRe', limit: 10 });
-  assert.equal(lower.total, upper.total);
-  assert.equal(lower.total, mixed.total);
-  await store.close();
-});
-
-test('a search term with FTS5 operator characters is treated literally, not parsed as query syntax', async () => {
-  const store = await seeded();
-  // Must not throw, and must not be interpreted as "fee" AND NOT "transfer" —
-  // it is a literal, if nonsensical, search phrase.
-  await assert.doesNotReject(() => store.queryEvents({ search: 'fee AND NOT transfer OR "x', limit: 10 }));
-  const page = await store.queryEvents({ search: '"quoted" AND weird-input*', limit: 10 });
-  assert.equal(page.total, 0); // literally nothing contains that exact phrase
-  await store.close();
-});
-
-test('a search shorter than 3 characters matches nothing rather than erroring', async () => {
-  const store = await seeded();
-  await assert.doesNotReject(async () => {
-    const page = await store.queryEvents({ search: 'ab', limit: 10 });
-    assert.equal(page.total, 0);
+  test('search matches a substring of a decoded topic symbol', async () => {
+    const store = await seeded();
+    // 'posure' is a substring of 'exposure_synced', not a whole token — the
+    // property a trigram index provides that a word tokenizer would not.
+    const page = await store.queryEvents({ search: 'posure', limit: MAX_QUERY_LIMIT });
+    assert.ok(page.total > 0);
+    assert.ok(page.events.every((e) => JSON.stringify(e.topics).toLowerCase().includes('posure')));
+    await store.close();
   });
-  await store.close();
+
+  test('search matches inside the decoded value, not only topics', async () => {
+    const store = await seeded();
+    const event = (await store.queryEvents({ limit: 1 })).events[0];
+    const valueText = JSON.stringify(event.value);
+    // A distinctive-enough substring drawn from the actual stored value.
+    const needle = valueText.replace(/[{}[\]":]/g, ' ').trim().split(/\s+/).find((w) => w.length >= 6);
+    assert.ok(needle, 'expected a findable word-like substring in the fixture value');
+
+    const page = await store.queryEvents({ search: needle, limit: MAX_QUERY_LIMIT });
+    assert.ok(page.events.some((e) => e.id === event.id));
+    await store.close();
+  });
+
+  test('search is case-insensitive', async () => {
+    const store = await seeded();
+    const lower = await store.queryEvents({ search: 'exposure', limit: 10 });
+    const upper = await store.queryEvents({ search: 'EXPOSURE', limit: 10 });
+    const mixed = await store.queryEvents({ search: 'ExPoSuRe', limit: 10 });
+    assert.equal(lower.total, upper.total);
+    assert.equal(lower.total, mixed.total);
+    await store.close();
+  });
+
+  test('a search term with FTS5 operator characters is treated literally, not parsed as query syntax', async () => {
+    const store = await seeded();
+    // Must not throw, and must not be interpreted as "fee" AND NOT "transfer" —
+    // it is a literal, if nonsensical, search phrase.
+    await assert.doesNotReject(() => store.queryEvents({ search: 'fee AND NOT transfer OR "x', limit: 10 }));
+    const page = await store.queryEvents({ search: '"quoted" AND weird-input*', limit: 10 });
+    assert.equal(page.total, 0); // literally nothing contains that exact phrase
+    await store.close();
+  });
+
+  test('a search shorter than 3 characters matches nothing rather than erroring', async () => {
+    const store = await seeded();
+    await assert.doesNotReject(async () => {
+      const page = await store.queryEvents({ search: 'ab', limit: 10 });
+      assert.equal(page.total, 0);
+    });
+    await store.close();
+  });
+
+  test('search combines with a contract filter', async () => {
+    const store = await seeded();
+    const page = await store.queryEvents({ search: 'exposure', contractId: SAC, limit: 10 });
+    assert.ok(page.events.every((e) => e.contractId === SAC));
+    await store.close();
+  });
+
+  test('the FTS index stays in sync automatically: redecode updates it, prune removes from it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+    const path = join(dir, 'lens.db');
+    const store = new SqliteEventStore({ path });
+    await store.insertEvents(fixture.events);
+
+    // Removing rows removes their FTS entries (via the DELETE trigger), with no
+    // extra code in pruneBefore needed for it.
+    await store.pruneBefore(9_999_999); // everything
+    const afterPrune = await store.queryEvents({ search: 'exposure', limit: 10 });
+    assert.equal(afterPrune.total, 0);
+
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test('rebuildSearchIndex repopulates from events and search still works afterward', async () => {
+    const store = await seeded();
+    const before = await store.queryEvents({ search: 'exposure', limit: MAX_QUERY_LIMIT });
+
+    await store.rebuildSearchIndex();
+
+    const after = await store.queryEvents({ search: 'exposure', limit: MAX_QUERY_LIMIT });
+    assert.equal(after.total, before.total);
+    assert.deepEqual(after.events.map((e) => e.id), before.events.map((e) => e.id));
+    await store.close();
+  });
+
+  test('rebuildSearchIndex actually clears stale rows, not just adds', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+    const path = join(dir, 'lens.db');
+    const store = new SqliteEventStore({ path });
+    await store.insertEvents(fixture.events);
+
+    // Hand-insert a bogus FTS row for an event id that does not exist, bypassing
+    // the trigger — simulating drift the rebuild is meant to fix.
+    const db = new DatabaseSync(path);
+    db.prepare("INSERT INTO events_fts (event_id, topics_text, value_text) VALUES ('ghost', 'ghost', 'ghost')").run();
+    const before = db.prepare("SELECT COUNT(*) AS n FROM events_fts WHERE event_id = 'ghost'").get().n;
+    db.close();
+    assert.equal(before, 1);
+
+    await store.rebuildSearchIndex();
+
+    const after = new DatabaseSync(path);
+    const remaining = after.prepare("SELECT COUNT(*) AS n FROM events_fts WHERE event_id = 'ghost'").get().n;
+    after.close();
+    assert.equal(remaining, 0, 'a full rebuild must clear rows that do not correspond to a real event');
+
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
 });
-
-test('search combines with a contract filter', async () => {
-  const store = await seeded();
-  const page = await store.queryEvents({ search: 'exposure', contractId: SAC, limit: 10 });
-  assert.ok(page.events.every((e) => e.contractId === SAC));
-  await store.close();
-});
-
-test('the FTS index stays in sync automatically: redecode updates it, prune removes from it', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  await store.insertEvents(fixture.events);
-
-  // Removing rows removes their FTS entries (via the DELETE trigger), with no
-  // extra code in pruneBefore needed for it.
-  await store.pruneBefore(9_999_999); // everything
-  const afterPrune = await store.queryEvents({ search: 'exposure', limit: 10 });
-  assert.equal(afterPrune.total, 0);
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('rebuildSearchIndex repopulates from events and search still works afterward', async () => {
-  const store = await seeded();
-  const before = await store.queryEvents({ search: 'exposure', limit: MAX_QUERY_LIMIT });
-
-  await store.rebuildSearchIndex();
-
-  const after = await store.queryEvents({ search: 'exposure', limit: MAX_QUERY_LIMIT });
-  assert.equal(after.total, before.total);
-  assert.deepEqual(after.events.map((e) => e.id), before.events.map((e) => e.id));
-  await store.close();
-});
-
-test('rebuildSearchIndex actually clears stale rows, not just adds', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  await store.insertEvents(fixture.events);
-
-  // Hand-insert a bogus FTS row for an event id that does not exist, bypassing
-  // the trigger — simulating drift the rebuild is meant to fix.
-  const db = new DatabaseSync(path);
-  db.prepare("INSERT INTO events_fts (event_id, topics_text, value_text) VALUES ('ghost', 'ghost', 'ghost')").run();
-  const before = db.prepare("SELECT COUNT(*) AS n FROM events_fts WHERE event_id = 'ghost'").get().n;
-  db.close();
-  assert.equal(before, 1);
-
-  await store.rebuildSearchIndex();
-
-  const after = new DatabaseSync(path);
-  const remaining = after.prepare("SELECT COUNT(*) AS n FROM events_fts WHERE event_id = 'ghost'").get().n;
-  after.close();
-  assert.equal(remaining, 0, 'a full rebuild must clear rows that do not correspond to a real event');
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
 // ── #37 snapshot export and import ───────────────────────────────────────────
 
 test('a snapshot restores to an identical event set', async () => {
@@ -1521,4 +1544,63 @@ test('an empty database exports an empty, valid snapshot', async () => {
 
   await store.close();
   await rm(dir, { recursive: true, force: true });
+});
+
+// ── #32 regression: FTS5 is not guaranteed on every SQLite build ────────────
+//
+// Real incident: Node 22.13 (this project's own documented floor) ships
+// node:sqlite without FTS5 compiled in, while Node 24 has it. Verified only
+// on a machine that happened to have FTS5 (every machine this was developed
+// on), migration 5 crashed every single SqliteEventStore construction on
+// Node 22.13 in CI — not just search, everything, since migrations run
+// unconditionally at construction. forceDisableFts5 makes that exact
+// condition reproducible without needing an actual FTS5-less SQLite build.
+
+test('a store on a build without FTS5 still constructs and works for everything else', async () => {
+  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
+  await store.insertEvents(fixture.events);
+  const page = await store.queryEvents({ limit: 10 });
+  assert.equal(page.events.length, 10);
+  assert.equal((await store.getStats()).eventCount, fixture.events.length);
+  await store.close();
+});
+
+test('migration 5 is recorded as applied even when skipped, so it is never retried', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path, forceDisableFts5: true });
+  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
+
+  const db = new DatabaseSync(path);
+  const applied = db.prepare('SELECT version FROM schema_migrations WHERE version = 5').get();
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'events_fts'")
+    .get();
+  db.close();
+  assert.ok(applied, 'migration 5 must be recorded as applied, not left pending');
+  assert.equal(table, undefined, 'the FTS5 table itself must not exist on a build without FTS5');
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('using search without FTS5 throws a clear error, not a cryptic SQL one', async () => {
+  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
+  await store.insertEvents(fixture.events);
+  await assert.rejects(() => store.queryEvents({ search: 'exposure', limit: 10 }), /FTS5/);
+  await store.close();
+});
+
+test('a query with no search filter works normally without FTS5', async () => {
+  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
+  await store.insertEvents(fixture.events);
+  const page = await store.queryEvents({ contractId: SAC, limit: 10 });
+  assert.ok(page.events.length > 0);
+  await store.close();
+});
+
+test('rebuildSearchIndex without FTS5 throws a clear error', async () => {
+  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
+  await assert.rejects(() => store.rebuildSearchIndex(), /FTS5/);
+  await store.close();
 });

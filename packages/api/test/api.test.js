@@ -1,12 +1,25 @@
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { SqliteEventStore, LATEST_SCHEMA_VERSION, MAX_QUERY_LIMIT } from '@soroban-lens/store';
 import { createApiServer, MAX_BATCH_IDS } from '../dist/index.js';
+
+/** Whether this process's SQLite build has FTS5 compiled in — see the store's own note for why this can vary. */
+const FTS5_AVAILABLE = (() => {
+  try {
+    const probe = new DatabaseSync(':memory:');
+    probe.exec("CREATE VIRTUAL TABLE t USING fts5(x)");
+    probe.close();
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -780,30 +793,32 @@ test('address combines with the contract route', async () => {
 });
 
 // ── #32 GET /events?search= ──────────────────────────────────────────────────
+describe('search (#32)', { skip: !FTS5_AVAILABLE && 'this SQLite build has no FTS5' }, () => {
 
-test('GET /events?search= matches a substring inside a decoded topic', async () => {
-  await withServer(async ({ get }) => {
-    const { res, body } = await get('/events?search=posure&limit=1000');
-    assert.equal(res.status, 200);
-    assert.ok(body.total > 0);
+  test('GET /events?search= matches a substring inside a decoded topic', async () => {
+    await withServer(async ({ get }) => {
+      const { res, body } = await get('/events?search=posure&limit=1000');
+      assert.equal(res.status, 200);
+      assert.ok(body.total > 0);
+    });
   });
-});
 
-test('a search term with FTS operator characters does not error', async () => {
-  await withServer(async ({ get }) => {
-    const { res } = await get(`/events?search=${encodeURIComponent('fee AND NOT "x')}`);
-    assert.equal(res.status, 200);
+  test('a search term with FTS operator characters does not error', async () => {
+    await withServer(async ({ get }) => {
+      const { res } = await get(`/events?search=${encodeURIComponent('fee AND NOT "x')}`);
+      assert.equal(res.status, 200);
+    });
   });
-});
 
-test('search combines with the contract route', async () => {
-  await withServer(async ({ get }) => {
-    const { res, body } = await get(`/contracts/${SAC}/events?search=exposure&limit=1000`);
-    assert.equal(res.status, 200);
-    assert.ok(body.events.every((e) => e.contractId === SAC));
+  test('search combines with the contract route', async () => {
+    await withServer(async ({ get }) => {
+      const { res, body } = await get(`/contracts/${SAC}/events?search=exposure&limit=1000`);
+      assert.equal(res.status, 200);
+      assert.ok(body.events.every((e) => e.contractId === SAC));
+    });
   });
-});
 
+});
 // ── #44 response compression ─────────────────────────────────────────────────
 
 test('a large page is compressed when the client advertises gzip support', async () => {
