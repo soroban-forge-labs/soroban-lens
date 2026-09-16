@@ -1522,3 +1522,62 @@ test('an empty database exports an empty, valid snapshot', async () => {
   await store.close();
   await rm(dir, { recursive: true, force: true });
 });
+
+// ── #32 regression: FTS5 is not guaranteed on every SQLite build ────────────
+//
+// Real incident: Node 22.13 (this project's own documented floor) ships
+// node:sqlite without FTS5 compiled in, while Node 24 has it. Verified only
+// on a machine that happened to have FTS5 (every machine this was developed
+// on), migration 5 crashed every single SqliteEventStore construction on
+// Node 22.13 in CI — not just search, everything, since migrations run
+// unconditionally at construction. forceDisableFts5 makes that exact
+// condition reproducible without needing an actual FTS5-less SQLite build.
+
+test('a store on a build without FTS5 still constructs and works for everything else', async () => {
+  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
+  await store.insertEvents(fixture.events);
+  const page = await store.queryEvents({ limit: 10 });
+  assert.equal(page.events.length, 10);
+  assert.equal((await store.getStats()).eventCount, fixture.events.length);
+  await store.close();
+});
+
+test('migration 5 is recorded as applied even when skipped, so it is never retried', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path, forceDisableFts5: true });
+  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
+
+  const db = new DatabaseSync(path);
+  const applied = db.prepare('SELECT version FROM schema_migrations WHERE version = 5').get();
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'events_fts'")
+    .get();
+  db.close();
+  assert.ok(applied, 'migration 5 must be recorded as applied, not left pending');
+  assert.equal(table, undefined, 'the FTS5 table itself must not exist on a build without FTS5');
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('using search without FTS5 throws a clear error, not a cryptic SQL one', async () => {
+  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
+  await store.insertEvents(fixture.events);
+  await assert.rejects(() => store.queryEvents({ search: 'exposure', limit: 10 }), /FTS5/);
+  await store.close();
+});
+
+test('a query with no search filter works normally without FTS5', async () => {
+  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
+  await store.insertEvents(fixture.events);
+  const page = await store.queryEvents({ contractId: SAC, limit: 10 });
+  assert.ok(page.events.length > 0);
+  await store.close();
+});
+
+test('rebuildSearchIndex without FTS5 throws a clear error', async () => {
+  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
+  await assert.rejects(() => store.rebuildSearchIndex(), /FTS5/);
+  await store.close();
+});

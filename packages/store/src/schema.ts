@@ -18,6 +18,17 @@ export interface Migration {
   name: string;
   up: string;
   down?: string;
+  /**
+   * This migration's `up` needs the FTS5 extension. Not every SQLite build
+   * has it compiled in — notably, the exact Node 22.13 floor this project
+   * documents does not, while Node 24 does; both ship "node:sqlite", and
+   * nothing about the module's own API says which extensions its underlying
+   * SQLite was built with. A store on a build without FTS5 skips this
+   * migration's `up` (recorded as applied regardless, so it is never retried
+   * every time the store opens) rather than failing every single
+   * SqliteEventStore construction over one feature.
+   */
+  requiresFts5?: boolean;
 }
 
 export const MIGRATIONS: Migration[] = [
@@ -141,6 +152,7 @@ export const MIGRATIONS: Migration[] = [
   {
     version: 5,
     name: 'full-text-search',
+    requiresFts5: true,
     up: `
       -- trigram, not the default unicode61 tokenizer: "searching a substring"
       -- means matching 'ick br' inside 'quick brown', which a token-based
