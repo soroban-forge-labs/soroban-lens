@@ -9,7 +9,7 @@ import type { ApiErrorBody, ContractSummary, EventPage, Health, LensEvent, Topic
  */
 export interface NetworkOption {
   label: string;
-  baseUrl: string;
+  baseUrl: string; // URL of the API instance
 }
 
 const DEFAULT_NETWORKS: NetworkOption[] = [
