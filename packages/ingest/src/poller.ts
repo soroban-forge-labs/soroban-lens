@@ -3,6 +3,7 @@ import { assertContractIds } from './contract-id.js';
 import { MemoryCursorStore, type CursorStore } from './cursor.js';
 import { sleep as defaultSleep } from './retry.js';
 import type { EventBatch, PollerOptions } from './types.js';
+import type { IngestMetrics } from './metrics.js';
 
 export interface PollerDeps {
   client: LensRpcClient;
@@ -13,6 +14,7 @@ export interface PollerDeps {
   /** Set to stop the generator cleanly. */
   signal?: AbortSignal;
   log?: (message: string) => void;
+  metrics?: IngestMetrics;
 }
 
 /**
@@ -71,6 +73,7 @@ export class EventPoller {
   readonly #signal: AbortSignal | undefined;
   readonly #log: (message: string) => void;
   readonly #options: PollerOptions;
+  readonly #metrics: IngestMetrics | undefined;
 
   constructor(options: PollerOptions, deps: PollerDeps) {
     // Before anything reaches the network: a malformed id produces a doomed
@@ -83,6 +86,7 @@ export class EventPoller {
     this.#sleep = deps.sleep ?? defaultSleep;
     this.#signal = deps.signal;
     this.#log = deps.log ?? (() => {});
+    this.#metrics = deps.metrics;
   }
 
   get cursorKey(): string {
@@ -151,6 +155,7 @@ export class EventPoller {
               'Events between the old cursor and that ledger are unrecoverable from this node.',
           );
           await this.#cursors.clear(this.#key);
+          this.#metrics?.cursorRestarted();
           cursor = undefined;
           startLedger = oldestLedger;
           continue;
@@ -203,6 +208,8 @@ export class EventPoller {
         ledger: lastLedger || batch.latestLedger,
         updatedAt: new Date().toISOString(),
       });
+      this.#metrics?.eventsIngested(fresh.length);
+      this.#metrics?.progress(lastLedger || batch.latestLedger, batch.latestLedger);
 
       cursor = batch.cursor;
       startLedger = undefined;
