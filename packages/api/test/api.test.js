@@ -364,15 +364,22 @@ test('HEAD works on every GET route and returns no body', async () => {
 
 test('HEAD returns the headers GET would have sent', async () => {
   await withServer(async ({ base }) => {
+    // Accept-Encoding: identity — #44 compresses responses at or above 1KB,
+    // and Node's fetch transparently decompresses a real gzip response before
+    // handing back .text(), which would make Content-Length (the wire size)
+    // and Buffer.byteLength(body) (the decoded size) legitimately disagree.
+    // Asking for identity keeps this test about HEAD/GET consistency, not
+    // about compression, which has its own tests below.
+    const identity = { headers: { 'Accept-Encoding': 'identity' } };
     for (const path of ['/health', '/events?limit=5']) {
       // Warm the #26 count cache first: /events?limit=5's `total` carries
       // totalIsEstimate once cached, which changes the body's byte length.
       // Comparing HEAD against GET only makes sense once both are looking at
       // the same (warm) cache state, which is also the realistic steady state
       // for a path fetched more than once.
-      await fetch(base + path);
-      const head = await fetch(base + path, { method: 'HEAD' });
-      const get = await fetch(base + path);
+      await fetch(base + path, identity);
+      const head = await fetch(base + path, { method: 'HEAD', ...identity });
+      const get = await fetch(base + path, identity);
       const body = await get.text();
 
       assert.equal(head.status, get.status, path);
@@ -794,5 +801,67 @@ test('search combines with the contract route', async () => {
     const { res, body } = await get(`/contracts/${SAC}/events?search=exposure&limit=1000`);
     assert.equal(res.status, 200);
     assert.ok(body.events.every((e) => e.contractId === SAC));
+  });
+});
+
+// ── #44 response compression ─────────────────────────────────────────────────
+
+test('a large page is compressed when the client advertises gzip support', async () => {
+  await withServer(async ({ base }) => {
+    const compressed = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'gzip' } });
+    assert.equal(compressed.headers.get('content-encoding'), 'gzip');
+    assert.equal(compressed.headers.get('vary'), 'Accept-Encoding');
+
+    const uncompressed = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'identity' } });
+    assert.equal(uncompressed.headers.get('content-encoding'), null);
+
+    const compressedLen = Number(compressed.headers.get('content-length'));
+    const uncompressedLen = Number(uncompressed.headers.get('content-length'));
+    assert.ok(compressedLen < uncompressedLen, `expected smaller: ${compressedLen} >= ${uncompressedLen}`);
+
+    // And the body is genuinely valid, round-tripped JSON either way — fetch
+    // decompresses transparently, so this is really asserting the bytes on
+    // the wire were a well-formed gzip stream, not garbage the browser
+    // happened to tolerate.
+    const body = await compressed.json();
+    assert.equal(body.events.length, 60);
+  });
+});
+
+test('a client sending no Accept-Encoding still gets valid, uncompressed JSON', async () => {
+  await withServer(async ({ base }) => {
+    // No Accept-Encoding header at all — not even "identity" — is the
+    // "sends no Accept-Encoding" case the issue names explicitly.
+    const res = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': '' } });
+    assert.equal(res.headers.get('content-encoding'), null);
+    const body = await res.json();
+    assert.equal(body.events.length, 60);
+  });
+});
+
+test('a small response is not compressed even when the client supports it', async () => {
+  await withServer(async ({ base }) => {
+    // /health is well under the 1KB threshold — compressing it would add
+    // gzip's own framing overhead for no benefit, the same principle #35
+    // already established for the raw-XDR columns.
+    const res = await fetch(`${base}/health`, { headers: { 'Accept-Encoding': 'gzip' } });
+    assert.equal(res.headers.get('content-encoding'), null);
+    await res.json();
+  });
+});
+
+test('deflate is honoured when a client does not advertise gzip', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'deflate' } });
+    assert.equal(res.headers.get('content-encoding'), 'deflate');
+    const body = await res.json();
+    assert.equal(body.events.length, 60);
+  });
+});
+
+test('gzip is preferred over deflate when a client advertises both', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'deflate, gzip' } });
+    assert.equal(res.headers.get('content-encoding'), 'gzip');
   });
 });

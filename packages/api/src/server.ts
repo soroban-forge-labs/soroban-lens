@@ -1,5 +1,6 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { gzipSync, deflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -298,7 +299,7 @@ export function createApiServer(options: ApiServerOptions): Server {
         options,
       });
 
-      send(res, result.status ?? 200, result.body, result.contentType, isHead);
+      send(res, result.status ?? 200, result.body, result.contentType, isHead, req.headers['accept-encoding']);
       const status = result.status ?? 200;
       const durationMs = Date.now() - started;
       log.info(
@@ -322,9 +323,24 @@ export function createApiServer(options: ApiServerOptions): Server {
           { method: req.method, path: url.pathname, status: apiError.status },
         );
       }
-      send(res, apiError.status, apiError.toBody(), undefined, isHead);
+      send(res, apiError.status, apiError.toBody(), undefined, isHead, req.headers['accept-encoding']);
     }
   }
+}
+
+// Below this, gzip/deflate's own framing overhead can cost more than it
+// saves — matches the same "measure before compressing unconditionally"
+// finding #35 made for the raw-XDR columns, applied here rather than assumed.
+const COMPRESSION_THRESHOLD_BYTES = 1024;
+
+function pickEncoding(acceptEncoding: string | string[] | undefined): 'gzip' | 'deflate' | undefined {
+  const header = Array.isArray(acceptEncoding) ? acceptEncoding.join(',') : (acceptEncoding ?? '');
+  // Order of preference, not the client's — gzip is at least as well
+  // supported as deflate and typically compresses slightly better, so it
+  // wins when a client (correctly) advertises both with no explicit q-values.
+  if (/(?:^|,)\s*gzip\s*(?:;|,|$)/i.test(header)) return 'gzip';
+  if (/(?:^|,)\s*deflate\s*(?:;|,|$)/i.test(header)) return 'deflate';
+  return undefined;
 }
 
 function send(
@@ -333,17 +349,28 @@ function send(
   body: unknown,
   contentType?: string,
   headOnly = false,
+  acceptEncoding?: string | string[],
 ): void {
   // A handler that already produced a JSON string (the OpenAPI document) passes
   // it through untouched rather than being re-serialised.
   const payload = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+  const rawBytes = Buffer.byteLength(payload);
+
+  const encoding = rawBytes >= COMPRESSION_THRESHOLD_BYTES ? pickEncoding(acceptEncoding) : undefined;
+  const compressed = encoding === 'gzip' ? gzipSync(payload) : encoding === 'deflate' ? deflateSync(payload) : undefined;
+
   res.writeHead(status, {
     'Content-Type': contentType ?? 'application/json; charset=utf-8',
     // Deliberately the length the body *would* have had. RFC 9110 says a HEAD
     // response carries the same Content-Length as the GET, and a client that
     // sizes a request from it would otherwise read zero.
-    'Content-Length': Buffer.byteLength(payload),
+    'Content-Length': compressed ? compressed.length : rawBytes,
+    ...(encoding ? { 'Content-Encoding': encoding } : {}),
+    // A cache or proxy in front of this must know the body varies by this
+    // header, or it can serve a gzipped response to a client that never asked
+    // for one (or vice versa).
+    Vary: 'Accept-Encoding',
     'Cache-Control': 'no-store',
   });
-  res.end(headOnly ? undefined : payload);
+  res.end(headOnly ? undefined : (compressed ?? payload));
 }
