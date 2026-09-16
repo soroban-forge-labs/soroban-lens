@@ -26,6 +26,10 @@ lens stats     # what is in the database
 
 Run them from the repo with `npm run doctor`, `npm run index`, `npm run seed`.
 
+Set `LENS_METRICS_PORT=9090` when running `lens index` to enable Prometheus
+metrics. `LENS_METRICS_HOST` defaults to `127.0.0.1`; metrics are disabled when
+no port is configured. See [monitoring](../../docs/metrics.md) for scraping and alerts.
+
 ### `lens doctor`
 
 Checks the things that otherwise fail silently ten minutes later, and prints a
