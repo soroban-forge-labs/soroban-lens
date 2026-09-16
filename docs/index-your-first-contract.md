@@ -24,6 +24,14 @@ cd soroban-lens
 cp .env.example .env
 ```
 
+In PowerShell, use the equivalent commands:
+
+```powershell
+git clone https://github.com/soroban-forge-labs/soroban-lens
+Set-Location soroban-lens
+Copy-Item .env.example .env
+```
+
 Open `.env` and set your contract:
 
 ```bash
