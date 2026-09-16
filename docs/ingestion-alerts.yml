@@ -1,0 +1,18 @@
+groups:
+  - name: soroban-lens-ingestion
+    rules:
+      - alert: SorobanLensIngestionLag
+        expr: (clamp_min(lens_latest_ledger - lens_current_ledger, 0) > 120) and (lens_metrics_ready == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Soroban Lens ingestion is more than 120 ledgers behind'
+          description: 'Check RPC health and ingestion logs for {{ $labels.instance }}.'
+      - alert: SorobanLensMetricsUnavailable
+        expr: up{job="soroban-lens-ingest"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Soroban Lens metrics endpoint is unavailable'
