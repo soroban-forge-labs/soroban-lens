@@ -1,0 +1,25 @@
+[Unit]
+Description=Soroban Lens Web Dashboard Service
+Documentation=https://github.com/soroban-forge-labs/soroban-lens
+After=network.target lens-api.service
+
+[Service]
+Type=simple
+User=soroban-lens
+Group=soroban-lens
+WorkingDirectory=/opt/soroban-lens/apps/web
+Environment=NODE_ENV=production
+Environment=PORT=3000
+EnvironmentFile=-/etc/soroban-lens/web.env
+ExecStart=/usr/bin/npm run preview -- --port 3000 --host 0.0.0.0
+Restart=always
+RestartSec=5s
+
+# Sandboxing & Security
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

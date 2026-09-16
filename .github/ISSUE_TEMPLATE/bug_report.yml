@@ -1,0 +1,53 @@
+name: Bug Report
+description: Report a bug or unintended behavior in Soroban Lens
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing an issue! Please provide enough details so we can reproduce and fix it.
+  - type: input
+    id: component
+    attributes:
+      label: Affected Component
+      description: Which part of Soroban Lens is affected? (e.g. apps/web, packages/cli, packages/api, packages/ingest, packages/store)
+      placeholder: e.g. packages/cli
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: How can maintainers reproduce this behavior?
+      placeholder: |
+        1. Run `lens doctor`
+        2. Execute `...`
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment Info
+      description: OS version, Node version, Soroban RPC URL, Network (Testnet/Futurenet/Mainnet).
+      value: |
+        - OS: 
+        - Node Version: 
+        - Soroban Lens Version: 
+        - Stellar Network: 
+    validations:
+      required: false
