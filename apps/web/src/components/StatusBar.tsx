@@ -1,6 +1,7 @@
 import type { Health } from '../types.js';
 import type { NetworkOption } from '../api.js';
 
+// Props for StatusBar component
 interface Props {
   networks: NetworkOption[];
   selected: NetworkOption;
