@@ -10,6 +10,18 @@ export class IngestMetrics {
   #latest = 0;
   #ready = false;
   #durations = new Map<RpcMethod, Histogram>();
+  #errors = new Map<string, number>();
+
+  rpcError(method: RpcMethod, error: unknown): void {
+    const e = error as { code?: unknown; status?: unknown; response?: { status?: unknown } } | null;
+    const status = e?.response?.status ?? e?.status;
+    const kind = status === 429 ? 'rate_limit'
+      : typeof status === 'number' ? 'http'
+      : e?.code === 'ETIMEDOUT' || e?.code === 'ECONNABORTED' ? 'timeout'
+      : typeof e?.code === 'number' ? 'json_rpc' : 'transport';
+    const key = `method="${method}",kind="${kind}"`;
+    this.#errors.set(key, (this.#errors.get(key) ?? 0) + 1);
+  }
 
   rpcDuration(method: RpcMethod, seconds: number): void {
     const h = this.#durations.get(method) ?? {
@@ -48,6 +60,10 @@ export class IngestMetrics {
       '# HELP lens_metrics_ready Whether a page has been acknowledged.',
       '# TYPE lens_metrics_ready gauge',
       `lens_metrics_ready ${Number(this.#ready)}`,
+      '# HELP lens_rpc_errors_total Failed RPC attempts by bounded error kind.',
+      '# TYPE lens_rpc_errors_total counter',
+      ...[...this.#errors].sort(([a], [b]) => a.localeCompare(b))
+        .map(([labels, count]) => `lens_rpc_errors_total{${labels}} ${count}`),
       '# HELP lens_rpc_request_duration_seconds RPC attempt duration excluding retry waits.',
       '# TYPE lens_rpc_request_duration_seconds histogram',
       ...[...this.#durations].sort(([a], [b]) => a.localeCompare(b)).flatMap(([method, h]) => [
