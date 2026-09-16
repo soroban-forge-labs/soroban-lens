@@ -104,6 +104,10 @@ npm run web          # explore it
 - **`node:test`**, built in. No test framework dependency.
 - Tests are plain JavaScript under `test/`, importing from the built `dist/`.
   `npm test` builds first. This keeps the toolchain at one compiler.
+- `apps/web` is the exception: Vite owns its build and its `tsconfig.json` sets
+  `noEmit`, so `tsconfig.test.json` emits just the pure modules to
+  `.test-build/` for the test run. Component rendering is not covered —
+  adding that means picking a DOM harness, which v0.1 deliberately has not.
 - **New behaviour needs a test.** Bug fixes need one that fails before the fix.
 - **Tests must not need the network.** Use the fixture. If you are testing
   something the fixture cannot express — a node forgetting a ledger, an RPC

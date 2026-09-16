@@ -1,0 +1,15 @@
+// The app itself is compiled by Vite and never emits (tsconfig.json sets
+// noEmit). The pure modules are still worth testing under plain `node --test`,
+// which needs real .js on disk — so this config emits just those, to an
+// ignored directory, without disturbing the app build.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".test-build",
+    "rootDir": "src",
+    "composite": false,
+    "declaration": false
+  },
+  "include": ["src/types.ts", "src/format.ts", "src/api.ts"]
+}
