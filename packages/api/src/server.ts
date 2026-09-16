@@ -2,7 +2,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import type { EventStore } from '@soroban-lens/store';
+import { MAX_QUERY_LIMIT, type EventStore } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
 import { assertContractId, parseEventQuery } from './params.js';
 
@@ -88,6 +88,26 @@ const routes: Route[] = [
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
       const page = await store.queryEvents({ ...parseEventQuery(query), contractId });
       return { body: page };
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/contracts\/([^/]+)\/stats$/,
+    handler: async ({ params, store }) => {
+      const contractId = assertContractId(decodeURIComponent(params[0] as string));
+      // listContracts already computes exactly this summary per contract; the
+      // route exists so a caller does not have to fetch them all and filter.
+      const summary = (await store.listContracts(MAX_QUERY_LIMIT)).find(
+        (c) => c.contractId === contractId,
+      );
+      if (!summary) {
+        throw ApiError.notFound(
+          `No indexed events for contract "${contractId}". ` +
+            'The contract may exist on-chain but not be one this instance indexes — ' +
+            'check LENS_CONTRACT_IDS.',
+        );
+      }
+      return { body: summary };
     },
   },
   {

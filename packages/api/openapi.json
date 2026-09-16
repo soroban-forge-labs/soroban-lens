@@ -202,6 +202,46 @@
         }
       }
     },
+    "/contracts/{contractId}/stats": {
+      "get": {
+        "tags": [
+          "contracts"
+        ],
+        "summary": "Event count, ledger range and last-seen time for one contract",
+        "description": "The same summary GET /contracts returns for every contract, for a single one, so a caller does not have to fetch them all and filter client-side. Returns 404 when the contract has no indexed events.",
+        "operationId": "getContractStats",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContractId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Contract summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "description": "No indexed events for this contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/contracts/{contractId}/topics": {
       "get": {
         "tags": [

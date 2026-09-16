@@ -294,3 +294,44 @@ test('a non-numeric index is rejected', async () => {
     assert.equal(res.status, 400);
   });
 });
+
+// ── #49 /contracts/{id}/stats ────────────────────────────────────────────────
+
+test('GET /contracts/{id}/stats returns that contract summary', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(`/contracts/${SAC}/stats`);
+    assert.equal(res.status, 200);
+    assert.equal(body.contractId, SAC);
+
+    // It must agree with the entry /contracts already returns.
+    const { body: all } = await get('/contracts?limit=1000');
+    const fromList = all.contracts.find((c) => c.contractId === SAC);
+    assert.deepEqual(body, fromList);
+  });
+});
+
+test('the summary matches the events actually indexed for that contract', async () => {
+  await withServer(async ({ get }) => {
+    const { body } = await get(`/contracts/${SAC}/stats`);
+    const mine = fixture.events.filter((e) => e.contractId === SAC);
+    assert.equal(body.eventCount, mine.length);
+    assert.equal(body.firstLedger, Math.min(...mine.map((e) => e.ledger)));
+    assert.equal(body.lastLedger, Math.max(...mine.map((e) => e.ledger)));
+  });
+});
+
+test('a contract with no indexed events is a 404, not an empty summary', async () => {
+  await withServer(async ({ get }) => {
+    const absent = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB';
+    const { res, body } = await get(`/contracts/${absent}/stats`);
+    assert.equal(res.status, 404);
+    assert.match(body.error.message, /LENS_CONTRACT_IDS/);
+  });
+});
+
+test('a malformed contract id on the stats route is a 400', async () => {
+  await withServer(async ({ get }) => {
+    const { res } = await get('/contracts/not-a-contract/stats');
+    assert.equal(res.status, 400);
+  });
+});
