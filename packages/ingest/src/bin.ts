@@ -109,6 +109,7 @@ Environment:
   LENS_NETWORK, LENS_RPC_URL, LENS_CONTRACT_IDS (comma separated), LENS_DATA_DIR
   LENS_RPC_HEADERS (comma separated 'Name: value' pairs)
   LENS_RETRY_ATTEMPTS, LENS_RETRY_BASE_DELAY_MS, LENS_RETRY_MAX_DELAY_MS
+  LENS_METRICS_PORT, LENS_METRICS_HOST
 
 Examples:
   # Testnet native XLM contract, 20 events, then exit
@@ -273,24 +274,24 @@ async function main(argv: string[]): Promise<number> {
     metrics, port, values['metrics-host'] ?? process.env.LENS_METRICS_HOST ?? '127.0.0.1',
   );
   try {
-  for await (const batch of poller.stream()) {
-    for (const event of batch.events) {
-      process.stdout.write(`${JSON.stringify(event)}\n`);
-      if (++emitted >= maxEvents) {
-        process.stderr.write(`[ingest] reached --max-events (${maxEvents})\n`);
+    for await (const batch of poller.stream()) {
+      for (const event of batch.events) {
+        process.stdout.write(`${JSON.stringify(event)}\n`);
+        if (++emitted >= maxEvents) {
+          process.stderr.write(`[ingest] reached --max-events (${maxEvents})\n`);
+          return 0;
+        }
+      }
+      if (batch.progress.reachedEndLedger) {
+        process.stderr.write(`[ingest] reached --end-ledger (${endLedger})\n`);
+        return 0;
+      }
+      if (values.once && batch.progress.caughtUp) {
+        process.stderr.write(`[ingest] caught up at ledger ${batch.progress.latestLedger}\n`);
         return 0;
       }
     }
-    if (batch.progress.reachedEndLedger) {
-      process.stderr.write(`[ingest] reached --end-ledger (${endLedger})\n`);
-      return 0;
-    }
-    if (values.once && batch.progress.caughtUp) {
-      process.stderr.write(`[ingest] caught up at ledger ${batch.progress.latestLedger}\n`);
-      return 0;
-    }
-  }
-  return 0;
+    return 0;
   } finally {
     if (metricsServer) await closeMetricsServer(metricsServer);
   }

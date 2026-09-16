@@ -119,12 +119,13 @@ npm test -w @soroban-lens/ingest
 No network required. The poller tests drive a scripted fake RPC client, which is
 how retention-window recovery and cursor resumption get tested at all — you
 cannot make a real node forget a ledger on demand.
-# Prometheus metrics
+
+## Prometheus metrics
 
 Use `--metrics-port 9090` to enable `/metrics`, or set `LENS_METRICS_PORT=9090`.
 `--metrics-host` / `LENS_METRICS_HOST` defaults to `127.0.0.1`.
 Metrics are disabled by default. For embedded consumers, pass the same
 `IngestMetrics` instance to `LensRpcClient` and `EventPoller`, and manage the
 endpoint with `startMetricsServer` and `closeMetricsServer`.
-See [monitoring documentation](../../../docs/metrics.md) for metric semantics,
+See [monitoring documentation](../../docs/metrics.md) for metric semantics,
 a Prometheus scrape configuration, and sample lag alerts.
