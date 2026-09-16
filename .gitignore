@@ -1,6 +1,13 @@
 node_modules/
 dist/
 *.tsbuildinfo
+
+# tsc emits next to the source when it is invoked with --noEmit false. Nothing
+# in apps/web is authored as .js — Vite compiles the .tsx/.ts directly — so any
+# .js here is stale build output that shadows nothing and confuses greps.
+apps/web/src/**/*.js
+apps/web/vite.config.js
+
 .env
 .env.local
 data/
@@ -8,3 +15,6 @@ data/
 *.db-wal
 *.db-shm
 .DS_Store
+
+# Emitted by tsconfig.test.json so node --test has real .js to import.
+apps/web/.test-build/

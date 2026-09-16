@@ -48,7 +48,6 @@ export class EventPoller {
     this.#sleep = deps.sleep ?? defaultSleep;
     this.#signal = deps.signal;
     this.#log = deps.log ?? (() => {});
-    this.#options = options;
   }
 
   get cursorKey(): string {
@@ -169,7 +168,43 @@ function shortHash(input: string): string {
   return h.toString(16).padStart(8, '0');
 }
 
+/** JSON-RPC "Invalid Request" — how stellar-rpc reports an unusable resume position. */
+const JSONRPC_INVALID_REQUEST = -32600;
+
+/**
+ * Does this error mean "the position we asked to resume from is no longer
+ * retained by this node"?
+ *
+ * Deliberately narrow, because the recovery path is destructive: it clears the
+ * saved cursor and re-indexes from the oldest retained ledger, which is up to
+ * seven days of replay. A false positive silently turns a transient blip into
+ * a full re-index.
+ *
+ * The previous predicate matched a bare mention of "cursor" or "oldest"
+ * anywhere in the message, so an unrelated proxy error, a malformed-request
+ * rejection, or this client's own "accepts either `cursor` or `startLedger`"
+ * guard would all trigger that replay. We now require the message to actually
+ * be about a position falling outside a range, and — when the transport gives
+ * us a JSON-RPC code — that the code is the one stellar-rpc uses for it.
+ */
 function isCursorOutOfRange(error: unknown): boolean {
+  // A numeric JSON-RPC code is authoritative. A non-numeric `code` is an
+  // axios/undici transport tag such as 'ECONNREFUSED', which tells us nothing
+  // about retention, so it is ignored rather than treated as a mismatch.
+  const code = (error as { code?: unknown })?.code;
+  if (typeof code === 'number' && code !== JSONRPC_INVALID_REQUEST) return false;
+
   const message = error instanceof Error ? error.message : String(error);
-  return /cursor|start.?ledger|out of range|not.*retain|oldest/i.test(message);
+
+  // What the complaint is about: our resume position.
+  const aboutPosition = /\b(cursor|start\s*_?ledger)\b/i.test(message);
+  // What is wrong with it: it sits outside the window the node still holds.
+  const outOfRange =
+    /\bmust be (?:between|within|greater|newer|at least)\b/i.test(message) ||
+    /\b(?:is |was )?(?:before|older than|outside)\b.*\boldest\b/i.test(message) ||
+    /\bledger range\b/i.test(message) ||
+    /\bout(?:side)? of range\b/i.test(message) ||
+    /\bno longer (?:available|retained|in the retention window)\b/i.test(message);
+
+  return aboutPosition && outOfRange;
 }

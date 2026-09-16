@@ -51,8 +51,23 @@ export interface EventStore {
   loadStreamState(key: string): Promise<StreamState | null>;
   listStreamStates(): Promise<StreamState[]>;
 
-  /** True when the backing store accepts writes. Used by `lens doctor`. */
+  /**
+   * Read-only liveness: the store is readable and at the expected schema.
+   *
+   * Safe to call on every request, so this is what the API's `/health` serves.
+   * It deliberately does not test writability — see `writeProbe`.
+   */
   healthCheck(): Promise<{ ok: boolean; detail: string }>;
+
+  /**
+   * Verify the store actually accepts writes, by performing one.
+   *
+   * A read-only mount, a full disk or a uid mismatch on a bind mount is
+   * invisible to a read, so `lens doctor` runs this before the indexer starts.
+   * It is a preflight check, not a request handler: it mutates the database and
+   * takes the write lock, so nothing on a hot path should call it.
+   */
+  writeProbe(): Promise<{ ok: boolean; detail: string }>;
 
   close(): Promise<void>;
 }

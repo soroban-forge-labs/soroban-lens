@@ -86,7 +86,9 @@ jobs:
           node-version: '24'
       - name: Lint packages/api/openapi.json
         # Ruleset and the two deliberate exceptions are in redocly.yaml.
-        run: npx --yes @redocly/cli@latest lint packages/api/openapi.json --format stylish
+        # Pinned: @latest meant an unrelated Redocly release could fail this
+        # job on a commit that touched nothing. Bump deliberately.
+        run: npx --yes @redocly/cli@2.53.2 lint packages/api/openapi.json --format stylish
 
   docker:
     name: docker compose builds and serves

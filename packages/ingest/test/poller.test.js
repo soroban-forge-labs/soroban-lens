@@ -183,6 +183,48 @@ test('errors that are not retention problems propagate', async () => {
   await assert.rejects(() => take(poller.stream(), 1), /invalid contract id encoding/);
 });
 
+// Recovery clears the saved cursor and replays from the oldest retained
+// ledger — up to seven days of work. These guard against triggering that on
+// anything short of a genuine retention miss.
+for (const [name, error] of [
+  ['a transient error that merely mentions the cursor', new Error('bad gateway while forwarding cursor request')],
+  ['a malformed-cursor rejection', new Error('invalid cursor encoding')],
+  ["the client's own both-arguments guard", new Error('getEvents accepts either `cursor` or `startLedger`, never both')],
+  ['an internal error worded like a range problem', Object.assign(new Error('cursor must be between 1 and 2'), { code: -32603 })],
+]) {
+  test(`${name} does not trigger a full re-index`, async () => {
+    const cursors = new MemoryCursorStore();
+    await cursors.save('k', { cursor: 'saved', ledger: 4695317, updatedAt: '' });
+    const client = fakeClient([error, { events: [rawEvent(4576358, 0)], cursor: 'cur-fresh' }]);
+    const poller = new EventPoller({ contractIds: ['CA'] }, {
+      client, cursors, cursorKey: 'k', sleep: async () => {},
+    });
+
+    await assert.rejects(() => take(poller.stream(), 1), (thrown) => thrown === error);
+    // The saved position must survive, or the next start replays from scratch.
+    assert.equal((await cursors.load('k')).cursor, 'saved');
+    assert.equal(client.requests.length, 1, 'must not have retried from oldestLedger');
+  });
+}
+
+test('a retention miss carrying the JSON-RPC invalid-request code still recovers', async () => {
+  const cursors = new MemoryCursorStore();
+  await cursors.save('k', { cursor: 'ancient', ledger: 100, updatedAt: '' });
+  const client = fakeClient([
+    Object.assign(new Error('cursor must be within the ledger range: 4576358 - 4697317'), {
+      code: -32600,
+    }),
+    { events: [rawEvent(4576358, 0)], cursor: 'cur-fresh' },
+  ]);
+  const poller = new EventPoller({ contractIds: ['CA'] }, {
+    client, cursors, cursorKey: 'k', sleep: async () => {},
+  });
+
+  const [batch] = await take(poller.stream(), 1);
+  assert.equal(client.requests[1].startLedger, 4576358);
+  assert.equal(batch.events[0].ledger, 4576358);
+});
+
 test('an abort signal stops the stream', async () => {
   const controller = new AbortController();
   const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'c' }]);
