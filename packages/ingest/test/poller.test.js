@@ -432,3 +432,15 @@ test('the event type reaches the RPC filter, and defaults to contract', async ()
   await take(defaulted.stream(), 1);
   assert.equal(plain.requests[0].filters[0].type, 'contract');
 });
+// ── #5 topic filters reach the RPC ───────────────────────────────────────────
+
+test('topic filters are passed through to the RPC filter', async () => {
+  const topics = [['AAAADwAAAAh0cmFuc2Zlcg==', '*']];
+  const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
+  const poller = new EventPoller(
+    { contractIds: [SAC], startLedger: 4695000, topics },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  );
+  await take(poller.stream(), 1);
+  assert.deepEqual(client.requests[0].filters[0].topics, topics);
+});

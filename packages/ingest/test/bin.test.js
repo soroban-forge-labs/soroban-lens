@@ -40,3 +40,24 @@ test('--type is documented in the help text', async () => {
   assert.equal(code, 0);
   assert.ok(stdout.includes('--type'), 'help is missing --type');
 });
+
+// ── #5 --topic ───────────────────────────────────────────────────────────────
+
+test('the help text explains the 4-segment topic ceiling', async () => {
+  const { stdout } = await cli(['--help']);
+  assert.match(stdout, /at most 4/);
+});
+
+test('--topic is documented in the help text', async () => {
+  const { stdout } = await cli(['--help']);
+  assert.ok(stdout.includes('--topic'), 'help is missing --topic');
+});
+
+test('more than four --topic segments is rejected with the reason', async () => {
+  const { code, stderr } = await cli([
+    '-c', SAC,
+    '--topic', 'a', '--topic', 'b', '--topic', 'c', '--topic', 'd', '--topic', 'e',
+  ]);
+  assert.equal(code, 2);
+  assert.match(stderr, /at most 4 --topic segments/);
+});
