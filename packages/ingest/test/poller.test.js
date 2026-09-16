@@ -7,6 +7,7 @@ import {
   ingestionLag,
   APPROX_LEDGER_SECONDS,
   MAX_PAGE_SIZE,
+  IngestMetrics,
 } from '../dist/index.js';
 
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -51,6 +52,42 @@ async function take(stream, n) {
   }
   return out;
 }
+
+test('metrics advance after acknowledgement and include empty-page progress', async () => {
+  const metrics = new IngestMetrics();
+  const abort = new AbortController();
+  const client = fakeClient([
+    { events: [rawEvent(4695317, 0)], cursor: 'one' },
+    { events: [], cursor: 'two' },
+  ]);
+  const stream = new EventPoller({ contractIds: [SAC] }, {
+    client, metrics, signal: abort.signal,
+    sleep: async () => abort.abort(),
+  }).stream();
+  await stream.next();
+  assert.match(metrics.render(), /lens_events_ingested_total 0\n/);
+  assert.equal((await stream.next()).done, true);
+  assert.match(metrics.render(), /lens_events_ingested_total 1\n/);
+  // The first page's idle callback stops this stream; use an empty bounded run.
+  await new EventPoller({ contractIds: [SAC], endLedger: 4697317 }, {
+    client: fakeClient([{ events: [], cursor: 'empty' }]), metrics,
+  }).stream().next();
+  assert.match(metrics.render(), /lens_current_ledger 4697317\n/);
+  assert.match(metrics.render(), /lens_latest_ledger 4697317\n/);
+});
+
+test('metrics count retention recovery once', async () => {
+  const metrics = new IngestMetrics();
+  const cursors = new MemoryCursorStore();
+  await cursors.save('metrics', { cursor: 'ancient', ledger: 100, updatedAt: '' });
+  await take(new EventPoller({ contractIds: [SAC] }, {
+    client: fakeClient([
+      new Error('start ledger is before the oldest ledger retained by this node'),
+      { events: [rawEvent(4576358, 0)], cursor: 'fresh' },
+    ]), cursors, cursorKey: 'metrics', metrics,
+  }).stream(), 1);
+  assert.match(metrics.render(), /lens_cursor_restarts_total 1\n/);
+});
 
 test('buildFilters chunks contract ids into groups of five', () => {
   const ids = Array.from({ length: 12 }, (_, i) => `C${i}`);
