@@ -1,7 +1,7 @@
 # soroban-lens
 
 [![CI](https://github.com/soroban-forge-labs/soroban-lens/actions/workflows/ci.yml/badge.svg)](https://github.com/soroban-forge-labs/soroban-lens/actions/workflows/ci.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)](./LICENSE)
 
 **See what your Soroban contracts are actually emitting.**
 
