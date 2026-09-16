@@ -1,6 +1,7 @@
 import { rpc } from '@stellar/stellar-sdk';
 import type { EventBatch, EventFilter, EventType, RawEvent, RetentionState } from './types.js';
 import { withRetry, type RetryOptions } from './retry.js';
+import type { IngestMetrics } from './metrics.js';
 
 export interface RpcClientOptions {
   rpcUrl: string;
@@ -10,6 +11,7 @@ export interface RpcClientOptions {
   timeoutSeconds?: number;
   headers?: Record<string, string>;
   retry?: RetryOptions;
+  metrics?: IngestMetrics;
 }
 
 export interface GetEventsArgs {
@@ -39,6 +41,7 @@ export class LensRpcClient {
   readonly rpcUrl: string;
   readonly #server: rpc.Server;
   readonly #retry: RetryOptions;
+  readonly #metrics: IngestMetrics | undefined;
 
   constructor(options: RpcClientOptions) {
     this.rpcUrl = options.rpcUrl;
@@ -48,15 +51,28 @@ export class LensRpcClient {
       ...(options.headers ? { headers: options.headers } : {}),
     });
     this.#retry = options.retry ?? {};
+    this.#metrics = options.metrics;
+  }
+
+  async #attempt<T>(method: 'getHealth' | 'getLatestLedger' | 'getEvents', call: () => Promise<T>): Promise<T> {
+    const start = performance.now();
+    try {
+      return await call();
+    } catch (error) {
+      this.#metrics?.rpcError(method, error);
+      throw error;
+    } finally {
+      this.#metrics?.rpcDuration(method, (performance.now() - start) / 1000);
+    }
   }
 
   /** Liveness plus the node's current retention window. */
   async health(): Promise<rpc.Api.GetHealthResponse> {
-    return withRetry(() => this.#server.getHealth(), this.#retry);
+    return withRetry(() => this.#attempt('getHealth', () => this.#server.getHealth()), this.#retry);
   }
 
   async latestLedger(): Promise<number> {
-    const res = await withRetry(() => this.#server.getLatestLedger(), this.#retry);
+    const res = await withRetry(() => this.#attempt('getLatestLedger', () => this.#server.getLatestLedger()), this.#retry);
     return res.sequence;
   }
 
@@ -93,7 +109,7 @@ export class LensRpcClient {
         };
 
     const raw = await withRetry(
-      () => this.#server._getEvents(request as rpc.Api.GetEventsRequest),
+      () => this.#attempt('getEvents', () => this.#server._getEvents(request as rpc.Api.GetEventsRequest)),
       this.#retry,
     );
 
