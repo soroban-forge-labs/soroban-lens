@@ -26,6 +26,8 @@ Usage:
 
 Options:
   -c, --contract <id>     Contract to watch. Repeatable. (env LENS_CONTRACT_IDS)
+      --rpc-header <h>    'Name: value' header for the RPC. Repeatable.
+                          Values are redacted in all output. (env LENS_RPC_HEADERS)
       --retry-attempts <n>     Total RPC attempts including the first.
       --retry-base-delay <ms>  First retry delay.
       --retry-max-delay <ms>   Ceiling on any one retry delay.
@@ -62,6 +64,7 @@ async function main(argv: string[]): Promise<number> {
       'start-ledger': { type: 'string' },
       'page-size': { type: 'string' },
       'poll-interval': { type: 'string' },
+      'rpc-header': { type: 'string', multiple: true },
       'retry-attempts': { type: 'string' },
       'retry-base-delay': { type: 'string' },
       'retry-max-delay': { type: 'string' },
@@ -87,6 +90,7 @@ async function main(argv: string[]): Promise<number> {
     ...(values['start-ledger'] !== undefined ? { startLedger: Number(values['start-ledger']) } : {}),
     ...(values['page-size'] !== undefined ? { pageSize: Number(values['page-size']) } : {}),
     ...(values['poll-interval'] !== undefined ? { pollInterval: Number(values['poll-interval']) } : {}),
+    ...(values['rpc-header'] !== undefined ? { rpcHeaders: values['rpc-header'] } : {}),
     ...(values['retry-attempts'] !== undefined ? { retryAttempts: Number(values['retry-attempts']) } : {}),
     ...(values['retry-base-delay'] !== undefined ? { retryBaseDelay: Number(values['retry-base-delay']) } : {}),
     ...(values['retry-max-delay'] !== undefined ? { retryMaxDelay: Number(values['retry-max-delay']) } : {}),

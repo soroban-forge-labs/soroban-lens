@@ -61,6 +61,30 @@ test('more than four --topic segments is rejected with the reason', async () => 
   assert.equal(code, 2);
   assert.match(stderr, /at most 4 --topic segments/);
 });
+
+// ── #7 --rpc-header ──────────────────────────────────────────────────────────
+
+test('--rpc-header and LENS_RPC_HEADERS are documented in the help text', async () => {
+  const { stdout } = await cli(['--help']);
+  assert.ok(stdout.includes('--rpc-header'), 'help is missing --rpc-header');
+  assert.ok(stdout.includes('LENS_RPC_HEADERS'), 'help is missing LENS_RPC_HEADERS');
+});
+
+test('a malformed --rpc-header is rejected without echoing the value', async () => {
+  const secret = 'sk-live-not-a-real-key';
+  const { code, stderr } = await cli(['-c', SAC, '--rpc-header', secret]);
+  assert.equal(code, 2);
+  assert.match(stderr, /--rpc-header expects 'Name: value'/);
+  // The bare value is almost certainly an API key. It must not be echoed back.
+  assert.ok(!stderr.includes(secret), 'the rejected header value leaked into stderr');
+});
+
+test('an empty header name or value is rejected', async () => {
+  for (const bad of [': value', 'Name:', ':']) {
+    const { code } = await cli(['-c', SAC, '--rpc-header', bad]);
+    assert.equal(code, 2, bad);
+  }
+});
 // ── #6 retry tuning ──────────────────────────────────────────────────────────
 
 test('the retry flags and their env vars are documented in the help text', async () => {

@@ -37,6 +37,33 @@ function parseTopicFlags(flags: string[] | undefined): string[][] | undefined {
   return [flags];
 }
 
+/** Parse repeated `--rpc-header 'Name: value'` flags and LENS_RPC_HEADERS. */
+function parseHeaders(flags: string[] | undefined, env: string | undefined): Record<string, string> {
+  const raw = [...(env ? env.split(',') : []), ...(flags ?? [])];
+  const headers: Record<string, string> = {};
+  for (const entry of raw) {
+    const text = entry.trim();
+    if (text === '') continue;
+    const split = text.indexOf(':');
+    if (split <= 0) {
+      // Never echo the entry itself — it is most likely a bare API key.
+      throw new Error("--rpc-header expects 'Name: value'");
+    }
+    const name = text.slice(0, split).trim();
+    const value = text.slice(split + 1).trim();
+    if (name === '' || value === '') throw new Error("--rpc-header expects 'Name: value'");
+    headers[name] = value;
+  }
+  return headers;
+}
+
+/** Header names only. Values authenticate to a paid provider. */
+function redactHeaders(headers: Record<string, string>): string {
+  return Object.keys(headers)
+    .map((name) => `${name}: <redacted>`)
+    .join(', ');
+}
+
 /** A CLI/env number, dropped rather than passed through as NaN. */
 function numeric<K extends string>(key: K, raw: string | undefined): Partial<Record<K, number>> {
   if (raw === undefined || raw.trim() === '') return {};
@@ -62,6 +89,8 @@ Options:
                            '*' to match any value in that position. Repeatable,
                            positional, at most 4 — the RPC matches a prefix of
                            at most 4 segments, though events may carry more.
+      --rpc-header <h>     'Name: value' header for the RPC. Repeatable.
+                           Values are redacted in all output.
       --retry-attempts <n> Total RPC attempts including the first (default: 5).
       --retry-base-delay <ms>  First retry delay (default: 250).
       --retry-max-delay <ms>   Ceiling on any one retry delay (default: 30000).
@@ -73,6 +102,7 @@ Options:
 
 Environment:
   LENS_NETWORK, LENS_RPC_URL, LENS_CONTRACT_IDS (comma separated), LENS_DATA_DIR
+  LENS_RPC_HEADERS (comma separated 'Name: value' pairs)
   LENS_RETRY_ATTEMPTS, LENS_RETRY_BASE_DELAY_MS, LENS_RETRY_MAX_DELAY_MS
 
 Examples:
@@ -93,6 +123,7 @@ async function main(argv: string[]): Promise<number> {
       'poll-interval': { type: 'string' },
       type: { type: 'string' },
       topic: { type: 'string', multiple: true },
+      'rpc-header': { type: 'string', multiple: true },
       'retry-attempts': { type: 'string' },
       'retry-base-delay': { type: 'string' },
       'retry-max-delay': { type: 'string' },
@@ -147,6 +178,14 @@ async function main(argv: string[]): Promise<number> {
     return 2;
   }
 
+  let headers: Record<string, string>;
+  try {
+    headers = parseHeaders(values['rpc-header'], process.env.LENS_RPC_HEADERS);
+  } catch (error) {
+    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
+
   const retry = {
     ...numeric('attempts', values['retry-attempts'] ?? process.env.LENS_RETRY_ATTEMPTS),
     ...numeric('baseDelayMs', values['retry-base-delay'] ?? process.env.LENS_RETRY_BASE_DELAY_MS),
@@ -155,6 +194,7 @@ async function main(argv: string[]): Promise<number> {
 
   const client = new LensRpcClient({
     rpcUrl: network.rpcUrl,
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
     retry: {
       ...retry,
       onRetry: (attempt, delay, error) =>
@@ -190,6 +230,9 @@ async function main(argv: string[]): Promise<number> {
     `[ingest] ${network.name} ${network.rpcUrl} watching ${contractIds.length} contract(s)` +
       ` type=${eventType}` +
       (topics ? ` topics=${topics[0]?.join(',')}` : '') +
+      // Names only. A header value is a provider API key and must never reach
+      // a log, a terminal scrollback or a bug report.
+      (Object.keys(headers).length > 0 ? ` headers=${redactHeaders(headers)}` : '') +
       '\n',
   );
 

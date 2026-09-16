@@ -4,7 +4,14 @@ import { mkdtemp, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteEventStore } from '@soroban-lens/store';
-import { resolveConfig, splitList, runDoctor, formatReport, StoreBackedCursors } from '../dist/index.js';
+import {
+  resolveConfig,
+  splitList,
+  runDoctor,
+  formatReport,
+  redactHeaders,
+  StoreBackedCursors,
+} from '../dist/index.js';
 
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
 /** A host that cannot resolve, so the RPC check fails fast on or offline. */
@@ -178,4 +185,52 @@ test('retry tuning comes from the environment and flags beat it', () => {
 test('a non-numeric retry value falls back rather than becoming NaN', () => {
   const config = resolveConfig({}, { LENS_RETRY_ATTEMPTS: 'lots' });
   assert.equal(config.retry.attempts, 5);
+});
+
+// ── #7 RPC headers ───────────────────────────────────────────────────────────
+
+test('RPC headers are parsed from flags and the environment', () => {
+  const config = resolveConfig(
+    { rpcHeaders: ['X-Api-Key: flag-value'] },
+    { LENS_RPC_HEADERS: 'Authorization: Bearer env-token' },
+  );
+  assert.deepEqual(config.rpcHeaders, {
+    Authorization: 'Bearer env-token',
+    'X-Api-Key': 'flag-value',
+  });
+});
+
+test('a header value containing a colon survives intact', () => {
+  // "Bearer a:b" and any URL-valued header would break on a naive split(':').
+  const config = resolveConfig({ rpcHeaders: ['X-Origin: https://rpc.example.com:8000'] }, {});
+  assert.equal(config.rpcHeaders['X-Origin'], 'https://rpc.example.com:8000');
+});
+
+test('a malformed header is skipped rather than crashing doctor', () => {
+  const config = resolveConfig({ rpcHeaders: ['no-colon-here', 'Good: value'] }, {});
+  assert.deepEqual(config.rpcHeaders, { Good: 'value' });
+});
+
+test('redactHeaders never reveals a value', () => {
+  const secret = 'Bearer sk-live-do-not-log-me';
+  const rendered = redactHeaders({ Authorization: secret, 'X-Api-Key': 'another-secret' });
+  assert.ok(!rendered.includes(secret));
+  assert.ok(!rendered.includes('another-secret'));
+  // The names are the debugging value and are safe to show.
+  assert.match(rendered, /Authorization: <redacted>/);
+  assert.match(rendered, /X-Api-Key: <redacted>/);
+  assert.equal(redactHeaders({}), 'none');
+});
+
+test('doctor reports header names without their values', async () => {
+  const secret = 'Bearer sk-live-do-not-log-me';
+  const config = resolveConfig(
+    { rpcHeaders: [`Authorization: ${secret}`], db: ':memory:', dataDir: tmpdir() },
+    { LENS_RPC_URL: 'https://rpc.invalid.soroban-lens-test' },
+  );
+  const { text } = formatReport(await runDoctor(config));
+
+  assert.ok(!text.includes(secret), 'doctor leaked a header value into its report');
+  assert.match(text, /RPC headers/);
+  assert.match(text, /Authorization: <redacted>/);
 });
