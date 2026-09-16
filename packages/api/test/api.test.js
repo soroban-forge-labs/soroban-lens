@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { once } from 'node:events';
-import { SqliteEventStore, LATEST_SCHEMA_VERSION } from '@soroban-lens/store';
+import { SqliteEventStore, LATEST_SCHEMA_VERSION, MAX_QUERY_LIMIT } from '@soroban-lens/store';
 import { createApiServer } from '../dist/index.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
@@ -460,5 +460,25 @@ test('time bounds combine with a contract route', async () => {
     );
     assert.equal(res.status, 200);
     assert.ok(body.events.every((e) => e.contractId === SAC));
+  });
+});
+
+// ── #55 configurable query limit ─────────────────────────────────────────────
+
+test('the served spec reflects the running query ceiling', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/openapi.json');
+    assert.equal(res.status, 200);
+    // Default configuration, so the served value matches the committed file.
+    assert.equal(body.components.parameters.Limit.schema.maximum, MAX_QUERY_LIMIT);
+  });
+});
+
+test('the limit rejection message names the configured ceiling', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(`/events?limit=${MAX_QUERY_LIMIT + 1}`);
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'limit');
+    assert.ok(body.error.message.includes(String(MAX_QUERY_LIMIT)));
   });
 });

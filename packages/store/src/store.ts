@@ -80,7 +80,27 @@ export interface EventStore {
 }
 
 /** Ceiling on `limit`, enforced by every implementation. */
-export const MAX_QUERY_LIMIT = 1000;
+export const DEFAULT_MAX_QUERY_LIMIT = 1000;
+
+/**
+ * Ceiling on `limit`, overridable with `LENS_MAX_QUERY_LIMIT`.
+ *
+ * Read once at module load rather than per call, so every layer — the store's
+ * clamp, the API's rejection message and the served OpenAPI spec — agrees on
+ * one number for the life of the process.
+ *
+ * An unusable value falls back to the default: an operator who typo'd this
+ * wants the documented behaviour, not a ceiling of NaN that rejects every
+ * request.
+ */
+export const MAX_QUERY_LIMIT: number = resolveMaxQueryLimit(process.env.LENS_MAX_QUERY_LIMIT);
+
+export function resolveMaxQueryLimit(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_MAX_QUERY_LIMIT;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 1) return DEFAULT_MAX_QUERY_LIMIT;
+  return Math.trunc(value);
+}
 export const DEFAULT_QUERY_LIMIT = 50;
 
 export function normaliseLimit(limit: number | undefined): number {

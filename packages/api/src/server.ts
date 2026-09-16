@@ -2,7 +2,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { MAX_QUERY_LIMIT, type EventStore } from '@soroban-lens/store';
+import { MAX_QUERY_LIMIT, DEFAULT_MAX_QUERY_LIMIT, type EventStore } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
 import { assertContractId, parseEventQuery } from './params.js';
 
@@ -138,11 +138,31 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/openapi\.json$/,
     handler: async () => ({
-      body: await readFile(join(packageRoot(), 'openapi.json'), 'utf8'),
+      body: await servedSpec(),
       contentType: 'application/json; charset=utf-8',
     }),
   },
 ];
+
+/**
+ * The committed spec with the live query ceiling patched in.
+ *
+ * MAX_QUERY_LIMIT is configurable (#55), so a spec that always claimed 1000
+ * would be wrong on any instance that changed it — and the spec is what a
+ * generated client trusts. The file on disk stays the documented default; only
+ * what is served reflects the running configuration.
+ */
+async function servedSpec(): Promise<string> {
+  const raw = await readFile(join(packageRoot(), 'openapi.json'), 'utf8');
+  if (MAX_QUERY_LIMIT === DEFAULT_MAX_QUERY_LIMIT) return raw;
+
+  const spec = JSON.parse(raw) as {
+    components?: { parameters?: Record<string, { schema?: { maximum?: number } }> };
+  };
+  const limit = spec.components?.parameters?.['Limit'];
+  if (limit?.schema) limit.schema.maximum = MAX_QUERY_LIMIT;
+  return JSON.stringify(spec, null, 2);
+}
 
 function packageRoot(): string {
   // dist/server.js -> package root

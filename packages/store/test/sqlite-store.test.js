@@ -10,6 +10,8 @@ import {
   LATEST_SCHEMA_VERSION,
   MAX_QUERY_LIMIT,
   MIGRATIONS,
+  DEFAULT_MAX_QUERY_LIMIT,
+  resolveMaxQueryLimit,
   normaliseLimit,
 } from '../dist/index.js';
 
@@ -573,4 +575,26 @@ test('time-bounded queries use the closed_at_unix index', async () => {
   assert.match(plan, /idx_events_closed_at_unix/, `planner chose: ${plan}`);
 
   await rm(dir, { recursive: true, force: true });
+});
+
+// ── #55 configurable query limit ─────────────────────────────────────────────
+
+test('the query ceiling defaults to 1000', () => {
+  assert.equal(resolveMaxQueryLimit(undefined), DEFAULT_MAX_QUERY_LIMIT);
+  assert.equal(resolveMaxQueryLimit(''), DEFAULT_MAX_QUERY_LIMIT);
+  assert.equal(DEFAULT_MAX_QUERY_LIMIT, 1000);
+});
+
+test('the query ceiling can be raised or lowered', () => {
+  assert.equal(resolveMaxQueryLimit('5000'), 5000);
+  assert.equal(resolveMaxQueryLimit('10'), 10);
+  assert.equal(resolveMaxQueryLimit('250.9'), 250, 'truncated, not rounded up past the ceiling');
+});
+
+test('an unusable ceiling falls back rather than rejecting every request', () => {
+  // A ceiling of NaN or 0 would make the API reject every limit, which is a
+  // far worse outcome than ignoring a typo.
+  for (const bad of ['lots', '0', '-5', 'NaN']) {
+    assert.equal(resolveMaxQueryLimit(bad), DEFAULT_MAX_QUERY_LIMIT, bad);
+  }
 });
