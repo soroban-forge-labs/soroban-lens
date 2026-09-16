@@ -5,7 +5,6 @@ import {
 import { writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { EventPoller, LensRpcClient, defaultCursorKey } from '@soroban-lens/ingest';
 import type { CursorStore, CursorState } from '@soroban-lens/ingest';
 import { SqliteEventStore } from '@soroban-lens/store';
 import type { EventStore } from '@soroban-lens/store';
