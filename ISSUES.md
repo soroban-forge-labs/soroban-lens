@@ -8,10 +8,26 @@ worked. They are grounded in code that exists: where an issue says "currently
 hardcoded" or "stored but unused", that is a real line in this repo, not a
 hypothetical.
 
+**All 100 are also filed as GitHub issues, and the numbers match.** Issue #43
+here is [issue #43 on GitHub](https://github.com/soroban-forge-labs/soroban-lens/issues/43).
+This file is the readable index — one page, grouped by module, with the
+cross-references between related issues intact. GitHub is where the discussion
+and assignment happen. Labels there mirror this file: `module-1-ingest` …
+`module-5-devx`, and `effort: trivial` / `medium` / `high`.
+
 ## Where to start
 
 New here? These need one file each and have an obvious finished state:
-**#13**, **#19**, **#29**, **#44**, **#61**, **#65**, **#66**, **#96**.
+[#13](https://github.com/soroban-forge-labs/soroban-lens/issues/13),
+[#19](https://github.com/soroban-forge-labs/soroban-lens/issues/19),
+[#29](https://github.com/soroban-forge-labs/soroban-lens/issues/29),
+[#44](https://github.com/soroban-forge-labs/soroban-lens/issues/44),
+[#61](https://github.com/soroban-forge-labs/soroban-lens/issues/61),
+[#65](https://github.com/soroban-forge-labs/soroban-lens/issues/65),
+[#66](https://github.com/soroban-forge-labs/soroban-lens/issues/66),
+[#96](https://github.com/soroban-forge-labs/soroban-lens/issues/96) — or browse
+the [`good first issue`](https://github.com/soroban-forge-labs/soroban-lens/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+label.
 
 Want to move the needle most? **#2** (no history past ~7 days) and **#22**
 (SQLite is the only backend) are the two real ceilings on what soroban-lens can

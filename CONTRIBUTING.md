@@ -144,6 +144,11 @@ decoding cases the file is there to cover.
 issues that need one file each, and a note on which two are the real ceilings on
 what soroban-lens can do.
 
+All 100 are filed as [GitHub issues](https://github.com/soroban-forge-labs/soroban-lens/issues)
+too, with matching numbers, so `ISSUES.md #43` and GitHub issue #43 are the same
+thing. Filter by module with the `module-*` labels, or by effort with
+`effort: trivial` / `medium` / `high`.
+
 Comment on an issue before you start it — a number of them overlap, and the file
 says so where they do.
 
