@@ -84,6 +84,7 @@ Options:
       --start-ledger <n>   First ledger to read when no cursor is stored.
       --page-size <n>      Events per RPC page, 1-10000 (default: 200).
       --poll-interval <ms> Wait after catching up to the tip (default: 2000).
+      --end-ledger <n>     Last ledger to read. Exits cleanly once passed.
       --type <kind>        contract | system | diagnostic (default: contract).
       --topic <seg>        Server-side topic filter segment: a base64 ScVal, or
                            '*' to match any value in that position. Repeatable,
@@ -121,6 +122,7 @@ async function main(argv: string[]): Promise<number> {
       'start-ledger': { type: 'string' },
       'page-size': { type: 'string' },
       'poll-interval': { type: 'string' },
+      'end-ledger': { type: 'string' },
       type: { type: 'string' },
       topic: { type: 'string', multiple: true },
       'rpc-header': { type: 'string', multiple: true },
@@ -186,6 +188,25 @@ async function main(argv: string[]): Promise<number> {
     return 2;
   }
 
+  const endLedger = values['end-ledger'] ? Number(values['end-ledger']) : undefined;
+  const startLedger = values['start-ledger'] ? Number(values['start-ledger']) : undefined;
+  if (endLedger !== undefined && startLedger !== undefined && endLedger < startLedger) {
+    process.stderr.write(
+      `error: --end-ledger (${endLedger}) is before --start-ledger (${startLedger})\n`,
+    );
+    return 2;
+  }
+  // A stored cursor and a bounded range are contradictory instructions: the
+  // cursor says "carry on from where you were", the range says "read exactly
+  // this window". Rather than silently picking one, say so.
+  if (endLedger !== undefined && !values['no-resume']) {
+    process.stderr.write(
+      'error: --end-ledger indexes a fixed range and cannot resume from a stored cursor.\n' +
+        '       Add --no-resume to read the range, or drop --end-ledger to follow the tip.\n',
+    );
+    return 2;
+  }
+
   const retry = {
     ...numeric('attempts', values['retry-attempts'] ?? process.env.LENS_RETRY_ATTEMPTS),
     ...numeric('baseDelayMs', values['retry-base-delay'] ?? process.env.LENS_RETRY_BASE_DELAY_MS),
@@ -212,7 +233,8 @@ async function main(argv: string[]): Promise<number> {
       contractIds,
       eventType,
       ...(topics ? { topics } : {}),
-      ...(values['start-ledger'] ? { startLedger: Number(values['start-ledger']) } : {}),
+      ...(endLedger !== undefined ? { endLedger } : {}),
+      ...(startLedger !== undefined ? { startLedger } : {}),
       ...(values['page-size'] ? { pageSize: Number(values['page-size']) } : {}),
       ...(values['poll-interval'] ? { pollIntervalMs: Number(values['poll-interval']) } : {}),
     },
@@ -230,6 +252,7 @@ async function main(argv: string[]): Promise<number> {
     `[ingest] ${network.name} ${network.rpcUrl} watching ${contractIds.length} contract(s)` +
       ` type=${eventType}` +
       (topics ? ` topics=${topics[0]?.join(',')}` : '') +
+      (endLedger !== undefined ? ` endLedger=${endLedger}` : '') +
       // Names only. A header value is a provider API key and must never reach
       // a log, a terminal scrollback or a bug report.
       (Object.keys(headers).length > 0 ? ` headers=${redactHeaders(headers)}` : '') +
@@ -243,6 +266,10 @@ async function main(argv: string[]): Promise<number> {
         process.stderr.write(`[ingest] reached --max-events (${maxEvents})\n`);
         return 0;
       }
+    }
+    if (batch.progress.reachedEndLedger) {
+      process.stderr.write(`[ingest] reached --end-ledger (${endLedger})\n`);
+      return 0;
     }
     if (values.once && batch.progress.caughtUp) {
       process.stderr.write(`[ingest] caught up at ledger ${batch.progress.latestLedger}\n`);

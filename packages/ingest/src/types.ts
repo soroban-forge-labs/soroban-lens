@@ -81,6 +81,12 @@ export interface PollerOptions {
   eventType?: EventType;
   /** Ledger to start from when no cursor is stored. Defaults to "as far back as retention allows". */
   startLedger?: number;
+  /**
+   * Last ledger to read, inclusive. The stream ends cleanly once the range is
+   * exhausted, which is what makes indexing a bounded historical window
+   * possible without watching the log and killing the process.
+   */
+  endLedger?: number;
   /** Events per RPC page, 1..10000. Defaults to 200. */
   pageSize?: number;
   /** Milliseconds to wait after catching up to the tip. Defaults to 2000. */

@@ -432,6 +432,54 @@ test('the event type reaches the RPC filter, and defaults to contract', async ()
   await take(defaulted.stream(), 1);
   assert.equal(plain.requests[0].filters[0].type, 'contract');
 });
+
+// ── #9 bounded runs with endLedger ───────────────────────────────────────────
+
+test('endLedger is passed to the RPC and ends the stream cleanly', async () => {
+  const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
+  const poller = new EventPoller(
+    { contractIds: [SAC], startLedger: 4695000, endLedger: 4695400, pageSize: 200 },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  );
+
+  const batches = [];
+  for await (const batch of poller.stream()) batches.push(batch);
+
+  // The generator returned on its own rather than idling at the tip forever.
+  assert.equal(batches.length, 1);
+  assert.equal(client.requests[0].endLedger, 4695400);
+  assert.equal(batches[0].progress.reachedEndLedger, true);
+});
+
+test('a bounded run keeps paging while the RPC fills pages', async () => {
+  const full = Array.from({ length: 2 }, (_, i) => rawEvent(4695317 + i, i));
+  const client = fakeClient([
+    { events: full, cursor: 'cur-1' },
+    { events: [rawEvent(4695319, 5)], cursor: 'cur-2' },
+  ]);
+  const poller = new EventPoller(
+    { contractIds: [SAC], startLedger: 4695000, endLedger: 4695400, pageSize: 2 },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  );
+
+  const batches = [];
+  for await (const batch of poller.stream()) batches.push(batch);
+
+  assert.equal(batches.length, 2, 'a full page means the range is not exhausted yet');
+  assert.equal(batches[0].progress.reachedEndLedger, false);
+  assert.equal(batches[1].progress.reachedEndLedger, true);
+});
+
+test('an unbounded run never reports reachedEndLedger', async () => {
+  const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+  const [batch] = await take(poller.stream(), 1);
+  assert.equal(batch.progress.reachedEndLedger, false);
+  assert.equal(client.requests[0].endLedger, undefined);
+});
+
 // ── #5 topic filters reach the RPC ───────────────────────────────────────────
 
 test('topic filters are passed through to the RPC filter', async () => {

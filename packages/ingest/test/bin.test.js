@@ -85,6 +85,29 @@ test('an empty header name or value is rejected', async () => {
     assert.equal(code, 2, bad);
   }
 });
+
+// ── #9 --end-ledger ──────────────────────────────────────────────────────────
+
+test('--end-ledger is documented in the help text', async () => {
+  const { stdout } = await cli(['--help']);
+  assert.ok(stdout.includes('--end-ledger'), 'help is missing --end-ledger');
+});
+
+test('--end-ledger with a stored cursor is rejected, not silently resolved', async () => {
+  const { code, stderr } = await cli(['-c', SAC, '--end-ledger', '100']);
+  assert.equal(code, 2);
+  assert.match(stderr, /cannot resume from a stored cursor/);
+  assert.match(stderr, /--no-resume/, 'the error must say how to proceed');
+});
+
+test('--end-ledger before --start-ledger is rejected', async () => {
+  const { code, stderr } = await cli([
+    '-c', SAC, '--no-resume', '--start-ledger', '500', '--end-ledger', '100',
+  ]);
+  assert.equal(code, 2);
+  assert.match(stderr, /is before --start-ledger/);
+});
+
 // ── #6 retry tuning ──────────────────────────────────────────────────────────
 
 test('the retry flags and their env vars are documented in the help text', async () => {
