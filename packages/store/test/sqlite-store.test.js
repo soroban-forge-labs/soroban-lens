@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
@@ -305,4 +305,138 @@ test('data persists across reopening a file-backed database', async () => {
   const second = new SqliteEventStore({ path });
   assert.equal((await second.getStats()).eventCount, fixture.events.length);
   await second.close();
+});
+
+// ── #29 report database size in getStats ─────────────────────────────────────
+
+test('getStats reports a database size that matches the file on disk', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+
+  const stats = await store.getStats();
+  // The bar the issue sets is "matches du", so compare against stat(), which
+  // is what du reads.
+  assert.equal(stats.sizeBytes, statSync(path).size);
+  assert.ok(stats.sizeBytes > 0);
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('getStats reports the WAL separately, since it is what fills a volume', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+
+  const stats = await store.getStats();
+  assert.equal(stats.walSizeBytes, statSync(`${path}-wal`).size);
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('an in-memory database reports null size rather than a misleading zero', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  const stats = await store.getStats();
+  // null means "no file", which is a different fact from "a 0-byte file".
+  assert.equal(stats.sizeBytes, null);
+  assert.equal(stats.walSizeBytes, null);
+  await store.close();
+});
+
+// ── #30 countByTopic aggregate ───────────────────────────────────────────────
+
+test('countByTopic ranks first-topic values across every contract', async () => {
+  const store = await seeded();
+  const topics = await store.countByTopic();
+
+  assert.ok(topics.length > 0);
+  // Ordered by frequency, descending.
+  const counts = topics.map((t) => t.count);
+  assert.deepEqual(counts, [...counts].sort((a, b) => b - a));
+
+  // It spans contracts, unlike listTopics. The global count for a topic must
+  // be at least what any single contract reports for it.
+  const perContract = await store.listTopics(SAC);
+  for (const { topic, count } of perContract) {
+    const global = topics.find((t) => t.topic === topic);
+    assert.ok(global, `global aggregate is missing ${topic}`);
+    assert.ok(global.count >= count, `${topic}: global ${global.count} < ${SAC} ${count}`);
+  }
+  await store.close();
+});
+
+test('countByTopic totals match the events that carry a scalar first topic', async () => {
+  const store = await seeded();
+  const topics = await store.countByTopic(1000);
+  const summed = topics.reduce((n, t) => n + t.count, 0);
+
+  const { total } = await store.queryEvents({ limit: 1000 });
+  // Every fixture event has a scalar symbol first topic, so the aggregate
+  // accounts for all of them.
+  assert.equal(summed, total);
+  await store.close();
+});
+
+test('countByTopic respects its limit and the documented ceiling', async () => {
+  const store = await seeded();
+  assert.equal((await store.countByTopic(2)).length, 2);
+  assert.ok((await store.countByTopic(MAX_QUERY_LIMIT + 500)).length <= MAX_QUERY_LIMIT);
+  await store.close();
+});
+
+test('countByTopic is empty on an empty database rather than erroring', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  assert.deepEqual(await store.countByTopic(), []);
+  await store.close();
+});
+
+// ── #31 query by transaction and operation index ─────────────────────────────
+
+test('filtering by transaction index narrows to one transaction in a ledger', async () => {
+  const store = await seeded();
+  const sample = fixture.events[0];
+  const page = await store.queryEvents({
+    transactionIndex: sample.transactionIndex,
+    limit: MAX_QUERY_LIMIT,
+  });
+  assert.ok(page.events.length > 0);
+  assert.ok(page.events.every((e) => e.transactionIndex === sample.transactionIndex));
+  await store.close();
+});
+
+test('txHash and operationIndex together pin down a single operation', async () => {
+  const store = await seeded();
+  const sample = fixture.events.find((e) => e.operationIndex === 0);
+  const page = await store.queryEvents({
+    txHash: sample.txHash,
+    operationIndex: 0,
+    limit: MAX_QUERY_LIMIT,
+  });
+  assert.ok(page.events.length > 0);
+  assert.ok(page.events.every((e) => e.txHash === sample.txHash && e.operationIndex === 0));
+  await store.close();
+});
+
+test('index 0 is a real filter, not treated as absent', async () => {
+  const store = await seeded();
+  const all = await store.queryEvents({ limit: MAX_QUERY_LIMIT });
+  const atZero = await store.queryEvents({ operationIndex: 0, limit: MAX_QUERY_LIMIT });
+  // The classic falsy-zero bug: if 0 were dropped, this would return everything.
+  assert.ok(atZero.events.every((e) => e.operationIndex === 0));
+  const expected = fixture.events.filter((e) => e.operationIndex === 0).length;
+  assert.equal(atZero.total, expected);
+  assert.ok(expected < all.total || all.total === expected);
+  await store.close();
+});
+
+test('an index that matches nothing returns an empty page, not everything', async () => {
+  const store = await seeded();
+  const page = await store.queryEvents({ transactionIndex: 99999, limit: 10 });
+  assert.equal(page.total, 0);
+  assert.deepEqual(page.events, []);
+  await store.close();
 });

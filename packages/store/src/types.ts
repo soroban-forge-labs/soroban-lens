@@ -76,6 +76,13 @@ export interface EventQuery {
   /** Inclusive upper bound on ledger sequence. */
   toLedger?: number | undefined;
   txHash?: string | undefined;
+  /**
+   * Position of the transaction within its ledger. Paired with `txHash` or a
+   * ledger bound it pins down one transaction's events exactly.
+   */
+  transactionIndex?: number | undefined;
+  /** Position of the operation within its transaction. */
+  operationIndex?: number | undefined;
   /** Restrict to successful contract calls. Omitted means "both". */
   successfulOnly?: boolean | undefined;
   /** 1..1000. Defaults to 50. */
@@ -112,6 +119,12 @@ export interface StreamState {
   updatedAt: string;
 }
 
+/** One topic and how many events carry it in the first position. */
+export interface TopicCount {
+  topic: string;
+  count: number;
+}
+
 export interface StoreStats {
   eventCount: number;
   contractCount: number;
@@ -119,4 +132,16 @@ export interface StoreStats {
   maxLedger: number | null;
   /** Schema version the database is currently migrated to. */
   schemaVersion: number;
+  /**
+   * Size of the database file on disk, in bytes. `null` for a backend with no
+   * file (`:memory:`), which is different from a file that is genuinely 0 bytes.
+   */
+  sizeBytes: number | null;
+  /**
+   * Size of the write-ahead log, in bytes, or `null` when there is no WAL.
+   * Reported separately because a WAL that never checkpoints (#28) is exactly
+   * the case where the total on disk surprises someone whose volume filled up.
+   */
+  walSizeBytes: number | null;
 }
+

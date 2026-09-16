@@ -103,9 +103,13 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       seen += batch.events.length;
       lastLedger = batch.progress.ledger;
 
+      // Lag comes from the poller rather than being recomputed here, so the
+      // CLI, the metrics endpoint and the API all report the same number.
+      const { lagLedgers, lagSeconds } = batch.progress;
       log(
         `ledger ${batch.progress.ledger}/${batch.progress.latestLedger}: ` +
-          `+${added} new of ${batch.events.length} (${inserted} total)`,
+          `+${added} new of ${batch.events.length} (${inserted} total)` +
+          (lagLedgers > 0 ? `, ~${lagLedgers} ledgers behind (~${lagSeconds}s)` : ', caught up'),
       );
 
       if (options.maxEvents !== undefined && seen >= options.maxEvents) {

@@ -1,4 +1,5 @@
-import { buildFilters, type LensRpcClient } from './rpc-client.js';
+import { buildFilters, MAX_PAGE_SIZE, type LensRpcClient } from './rpc-client.js';
+import { assertContractIds } from './contract-id.js';
 import { MemoryCursorStore, type CursorStore } from './cursor.js';
 import { sleep as defaultSleep } from './retry.js';
 import type { EventBatch, PollerOptions } from './types.js';
@@ -14,12 +15,41 @@ export interface PollerDeps {
   log?: (message: string) => void;
 }
 
+/**
+ * Mean Stellar ledger close time, used to turn a ledger lag into a rough
+ * wall-clock lag. Protocol target is ~5s and mainnet sits close to it, but it
+ * is an average, not a guarantee — hence `lagSeconds` being documented as an
+ * estimate everywhere it is surfaced.
+ */
+export const APPROX_LEDGER_SECONDS = 5;
+
 /** Emitted alongside batches so callers can show progress without extra RPC calls. */
 export interface PollerProgress {
   cursor: string;
   ledger: number;
   latestLedger: number;
   caughtUp: boolean;
+  /** Ledgers between the last event yielded and the node's latest ledger. */
+  lagLedgers: number;
+  /**
+   * `lagLedgers` x ~5s. An **estimate**: ledger close time varies, so this is
+   * for a human-readable "about a minute behind", never for correctness.
+   */
+  lagSeconds: number;
+}
+
+/**
+ * One definition of lag, so the CLI, the metrics endpoint (#1) and the API
+ * cannot each compute a slightly different number.
+ */
+export function ingestionLag(ledger: number, latestLedger: number): {
+  lagLedgers: number;
+  lagSeconds: number;
+} {
+  // Clamped at zero: a node can report a latestLedger behind the page it just
+  // served us, and negative lag would be nonsense in a gauge.
+  const lagLedgers = Math.max(0, latestLedger - ledger);
+  return { lagLedgers, lagSeconds: lagLedgers * APPROX_LEDGER_SECONDS };
 }
 
 /**
@@ -41,6 +71,9 @@ export class EventPoller {
   readonly #options: PollerOptions;
 
   constructor(options: PollerOptions, deps: PollerDeps) {
+    // Before anything reaches the network: a malformed id produces a doomed
+    // request whose RPC-side error is far less clear than naming the problem.
+    assertContractIds(options.contractIds);
     this.#options = options;
     this.#client = deps.client;
     this.#cursors = deps.cursors ?? new MemoryCursorStore();
@@ -83,6 +116,11 @@ export class EventPoller {
     const pageSize = this.#options.pageSize ?? 200;
     const idleMs = this.#options.pollIntervalMs ?? 2000;
     const filters = buildFilters(this.#options.contractIds, this.#options.topics);
+    // At-least-once delivery means a crash mid-write replays the last batch.
+    // Module 2 absorbs that with INSERT OR IGNORE, but every other consumer —
+    // the NDJSON stdout path, for one — would emit the repeat. Drop repeats
+    // here so "at least once" is not every consumer's problem to solve.
+    const seen = new RecentIds(pageSize * RECENT_ID_WINDOW_PAGES);
 
     let { cursor, startLedger } = await this.#resolveStart();
 
@@ -112,17 +150,34 @@ export class EventPoller {
         throw error;
       }
 
-      const lastLedger = batch.events.at(-1)?.ledger ?? 0;
+      // caughtUp reflects what the RPC returned, not what survived dedup: a
+      // full page of repeats still means there is more history to walk.
       const caughtUp = batch.events.length < pageSize;
+      const fresh = batch.events.filter((event) => seen.add(event.id));
+      const lastLedger = batch.events.at(-1)?.ledger ?? 0;
 
-      if (batch.events.length > 0) {
+      // A page that came back exactly at the RPC's own ceiling is different
+      // from one that merely filled the configured page size: it means a single
+      // request straddled more events than the node will ever return at once,
+      // so the page boundary is the node's limit rather than ours.
+      if (!caughtUp && pageSize >= MAX_PAGE_SIZE) {
+        this.#log(
+          `page hit the RPC ceiling of ${MAX_PAGE_SIZE} events at ledger ${lastLedger}; ` +
+            'this ledger range emits more events than one request can return. ' +
+            'Progress is still correct — the cursor advances — but consider a narrower contract filter.',
+        );
+      }
+
+      if (fresh.length > 0) {
         yield {
           ...batch,
+          events: fresh,
           progress: {
             cursor: batch.cursor,
             ledger: lastLedger,
             latestLedger: batch.latestLedger,
             caughtUp,
+            ...ingestionLag(lastLedger, batch.latestLedger),
           },
         };
       }
@@ -207,4 +262,44 @@ function isCursorOutOfRange(error: unknown): boolean {
     /\bno longer (?:available|retained|in the retention window)\b/i.test(message);
 
   return aboutPosition && outOfRange;
+}
+
+/**
+ * How many pages of event ids to remember, as a multiple of the page size.
+ *
+ * A replay re-serves at most the page that was in flight, so one page would
+ * technically do. Three gives room for an overlapping cursor window without
+ * making the set unbounded — at the 10 000 ceiling that is 30 000 ids, a few
+ * megabytes, which is the price of not making every consumer dedupe.
+ */
+const RECENT_ID_WINDOW_PAGES = 3;
+
+/**
+ * Fixed-capacity set of recently seen event ids, in insertion order.
+ *
+ * A plain Set would grow without bound over a long-running index. Map preserves
+ * insertion order, so evicting the oldest key is O(1) and the window slides.
+ */
+class RecentIds {
+  readonly #capacity: number;
+  readonly #ids = new Map<string, true>();
+
+  constructor(capacity: number) {
+    this.#capacity = Math.max(1, capacity);
+  }
+
+  /** Records an id. Returns false when it had already been seen. */
+  add(id: string): boolean {
+    if (this.#ids.has(id)) return false;
+    this.#ids.set(id, true);
+    if (this.#ids.size > this.#capacity) {
+      const oldest = this.#ids.keys().next();
+      if (!oldest.done) this.#ids.delete(oldest.value);
+    }
+    return true;
+  }
+
+  get size(): number {
+    return this.#ids.size;
+  }
 }

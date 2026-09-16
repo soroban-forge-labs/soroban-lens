@@ -2,7 +2,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import type { EventStore } from '@soroban-lens/store';
+import { MAX_QUERY_LIMIT, type EventStore } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
 import { assertContractId, parseEventQuery } from './params.js';
 
@@ -57,7 +57,12 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/stats$/,
-    handler: async ({ store }) => ({ body: await store.getStats() }),
+    handler: async ({ store }) => {
+      // topTopics answers "what event types are in here at all" without
+      // paging the whole table (#30).
+      const [stats, topTopics] = await Promise.all([store.getStats(), store.countByTopic(10)]);
+      return { body: { ...stats, topTopics } };
+    },
   },
   {
     // Indexer progress, so the UI can show lag without talking to the RPC.
@@ -83,6 +88,26 @@ const routes: Route[] = [
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
       const page = await store.queryEvents({ ...parseEventQuery(query), contractId });
       return { body: page };
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/contracts\/([^/]+)\/stats$/,
+    handler: async ({ params, store }) => {
+      const contractId = assertContractId(decodeURIComponent(params[0] as string));
+      // listContracts already computes exactly this summary per contract; the
+      // route exists so a caller does not have to fetch them all and filter.
+      const summary = (await store.listContracts(MAX_QUERY_LIMIT)).find(
+        (c) => c.contractId === contractId,
+      );
+      if (!summary) {
+        throw ApiError.notFound(
+          `No indexed events for contract "${contractId}". ` +
+            'The contract may exist on-chain but not be one this instance indexes — ' +
+            'check LENS_CONTRACT_IDS.',
+        );
+      }
+      return { body: summary };
     },
   },
   {
@@ -147,13 +172,21 @@ export function createApiServer(options: ApiServerOptions): Server {
     const url = new URL(req.url ?? '/', 'http://localhost');
 
     res.setHeader('Access-Control-Allow-Origin', corsOrigin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204).end();
       return;
     }
+
+    // HEAD is GET without the body. RFC 9110 requires the headers to be the
+    // ones GET would have sent, so it runs the real handler and drops the
+    // payload at the end rather than short-circuiting to an empty 200 —
+    // Content-Length, Content-Type and the status all stay truthful, including
+    // on a 404. Monitoring tools use HEAD routinely and used to get a 405.
+    const isHead = req.method === 'HEAD';
+    const method = isHead ? 'GET' : req.method;
 
     try {
       const path = url.pathname.replace(/\/+$/, '') || '/';
@@ -162,8 +195,14 @@ export function createApiServer(options: ApiServerOptions): Server {
       if (!route) {
         throw ApiError.notFound(`No route for ${req.method} ${path}. See GET /openapi.json.`);
       }
-      if (route.method !== req.method) {
-        throw new ApiError(405, 'method_not_allowed', `${path} accepts ${route.method} only.`);
+      if (route.method !== method) {
+        throw new ApiError(
+          405,
+          'method_not_allowed',
+          `${path} accepts ${route.method} only.`,
+          undefined,
+          route.method === 'GET' ? 'GET, HEAD' : route.method,
+        );
       }
 
       const match = route.pattern.exec(path);
@@ -174,29 +213,39 @@ export function createApiServer(options: ApiServerOptions): Server {
         options,
       });
 
-      send(res, result.status ?? 200, result.body, result.contentType);
+      send(res, result.status ?? 200, result.body, result.contentType, isHead);
       log(`${req.method} ${url.pathname}${url.search} -> ${result.status ?? 200} (${Date.now() - started}ms)`);
     } catch (error) {
       const apiError =
         error instanceof ApiError
           ? error
           : new ApiError(500, 'internal_error', error instanceof Error ? error.message : String(error));
+      if (apiError.allow) res.setHeader('Allow', apiError.allow);
       if (apiError.status >= 500) {
         log(`${req.method} ${url.pathname} -> ${apiError.status}: ${error instanceof Error ? error.stack : error}`);
       }
-      send(res, apiError.status, apiError.toBody());
+      send(res, apiError.status, apiError.toBody(), undefined, isHead);
     }
   }
 }
 
-function send(res: ServerResponse, status: number, body: unknown, contentType?: string): void {
+function send(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  contentType?: string,
+  headOnly = false,
+): void {
   // A handler that already produced a JSON string (the OpenAPI document) passes
   // it through untouched rather than being re-serialised.
   const payload = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
   res.writeHead(status, {
     'Content-Type': contentType ?? 'application/json; charset=utf-8',
+    // Deliberately the length the body *would* have had. RFC 9110 says a HEAD
+    // response carries the same Content-Length as the GET, and a client that
+    // sizes a request from it would otherwise read zero.
     'Content-Length': Buffer.byteLength(payload),
     'Cache-Control': 'no-store',
   });
-  res.end(payload);
+  res.end(headOnly ? undefined : payload);
 }

@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EventPoller, MemoryCursorStore, buildFilters } from '../dist/index.js';
+import {
+  EventPoller,
+  MemoryCursorStore,
+  buildFilters,
+  ingestionLag,
+  APPROX_LEDGER_SECONDS,
+  MAX_PAGE_SIZE,
+} from '../dist/index.js';
+
+const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+const OTHER = 'CA6F5E42TCRGPMDXU33WGMXAADPNEKOIZETAWSKYKAWNHESQQ2MTLSCC';
 
 const rawEvent = (ledger, n) => ({
   id: `00201662329593528${String(ledger).slice(-2)}-000000000${n}`,
@@ -63,7 +73,7 @@ test('buildFilters passes topic filters through', () => {
 
 test('first poll with no stored cursor starts from a ledger, not a cursor', async () => {
   const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
-  const poller = new EventPoller({ contractIds: ['CA'], startLedger: 4695000 }, {
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
     client, cursors: new MemoryCursorStore(), sleep: async () => {},
   });
   await take(poller.stream(), 1);
@@ -74,7 +84,7 @@ test('first poll with no stored cursor starts from a ledger, not a cursor', asyn
 test('a start ledger below the retention window is clamped to oldestLedger', async () => {
   const client = fakeClient([{ events: [rawEvent(4576358, 0)], cursor: 'cur-1' }]);
   const logs = [];
-  const poller = new EventPoller({ contractIds: ['CA'], startLedger: 1 }, {
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 1 }, {
     client, cursors: new MemoryCursorStore(), sleep: async () => {}, log: (m) => logs.push(m),
   });
   await take(poller.stream(), 1);
@@ -87,7 +97,7 @@ test('subsequent polls use the cursor and drop the ledger range', async () => {
     { events: [rawEvent(4695317, 0)], cursor: 'cur-1' },
     { events: [rawEvent(4695318, 1)], cursor: 'cur-2' },
   ]);
-  const poller = new EventPoller({ contractIds: ['CA'], startLedger: 4695000 }, {
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
     client, cursors: new MemoryCursorStore(), sleep: async () => {},
   });
   await take(poller.stream(), 2);
@@ -99,7 +109,7 @@ test('a restart resumes from the persisted cursor instead of the start ledger', 
   const cursors = new MemoryCursorStore();
   await cursors.save('resume-key', { cursor: 'saved-cursor', ledger: 4695317, updatedAt: '' });
   const client = fakeClient([{ events: [rawEvent(4695318, 0)], cursor: 'cur-2' }]);
-  const poller = new EventPoller({ contractIds: ['CA'], startLedger: 4000000 }, {
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4000000 }, {
     client, cursors, cursorKey: 'resume-key', sleep: async () => {},
   });
   await take(poller.stream(), 1);
@@ -113,7 +123,7 @@ test('the cursor is persisted after each page', async () => {
     { events: [rawEvent(4695317, 0)], cursor: 'cur-1' },
     { events: [rawEvent(4695318, 1)], cursor: 'cur-2' },
   ]);
-  const poller = new EventPoller({ contractIds: ['CA'], startLedger: 4695000 }, {
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
     client, cursors, cursorKey: 'k', sleep: async () => {},
   });
   await take(poller.stream(), 2);
@@ -128,7 +138,7 @@ test('empty pages are not yielded but still advance the cursor', async () => {
     { events: [], cursor: 'cur-empty' },
     { events: [rawEvent(4695320, 0)], cursor: 'cur-2' },
   ]);
-  const poller = new EventPoller({ contractIds: ['CA'], startLedger: 4695000, pageSize: 5 }, {
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000, pageSize: 5 }, {
     client, cursors, cursorKey: 'k', sleep: async () => {},
   });
   const batches = await take(poller.stream(), 1);
@@ -139,7 +149,7 @@ test('empty pages are not yielded but still advance the cursor', async () => {
 
 test('a short page marks the stream as caught up', async () => {
   const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
-  const poller = new EventPoller({ contractIds: ['CA'], startLedger: 4695000, pageSize: 200 }, {
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000, pageSize: 200 }, {
     client, cursors: new MemoryCursorStore(), sleep: async () => {},
   });
   const [batch] = await take(poller.stream(), 1);
@@ -150,7 +160,7 @@ test('a short page marks the stream as caught up', async () => {
 test('a full page means more history is pending', async () => {
   const events = Array.from({ length: 2 }, (_, i) => rawEvent(4695317 + i, i));
   const client = fakeClient([{ events, cursor: 'cur-1' }]);
-  const poller = new EventPoller({ contractIds: ['CA'], startLedger: 4695000, pageSize: 2 }, {
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000, pageSize: 2 }, {
     client, cursors: new MemoryCursorStore(), sleep: async () => {},
   });
   const [batch] = await take(poller.stream(), 1);
@@ -165,7 +175,7 @@ test('a cursor that fell out of retention restarts from oldestLedger', async () 
     { events: [rawEvent(4576358, 0)], cursor: 'cur-fresh' },
   ]);
   const logs = [];
-  const poller = new EventPoller({ contractIds: ['CA'] }, {
+  const poller = new EventPoller({ contractIds: [SAC] }, {
     client, cursors, cursorKey: 'k', sleep: async () => {}, log: (m) => logs.push(m),
   });
   const [batch] = await take(poller.stream(), 1);
@@ -177,7 +187,7 @@ test('a cursor that fell out of retention restarts from oldestLedger', async () 
 
 test('errors that are not retention problems propagate', async () => {
   const client = fakeClient([new Error('invalid contract id encoding')]);
-  const poller = new EventPoller({ contractIds: ['nope'], startLedger: 4695000 }, {
+  const poller = new EventPoller({ contractIds: [OTHER], startLedger: 4695000 }, {
     client, cursors: new MemoryCursorStore(), sleep: async () => {},
   });
   await assert.rejects(() => take(poller.stream(), 1), /invalid contract id encoding/);
@@ -196,7 +206,7 @@ for (const [name, error] of [
     const cursors = new MemoryCursorStore();
     await cursors.save('k', { cursor: 'saved', ledger: 4695317, updatedAt: '' });
     const client = fakeClient([error, { events: [rawEvent(4576358, 0)], cursor: 'cur-fresh' }]);
-    const poller = new EventPoller({ contractIds: ['CA'] }, {
+    const poller = new EventPoller({ contractIds: [SAC] }, {
       client, cursors, cursorKey: 'k', sleep: async () => {},
     });
 
@@ -216,7 +226,7 @@ test('a retention miss carrying the JSON-RPC invalid-request code still recovers
     }),
     { events: [rawEvent(4576358, 0)], cursor: 'cur-fresh' },
   ]);
-  const poller = new EventPoller({ contractIds: ['CA'] }, {
+  const poller = new EventPoller({ contractIds: [SAC] }, {
     client, cursors, cursorKey: 'k', sleep: async () => {},
   });
 
@@ -228,7 +238,7 @@ test('a retention miss carrying the JSON-RPC invalid-request code still recovers
 test('an abort signal stops the stream', async () => {
   const controller = new AbortController();
   const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'c' }]);
-  const poller = new EventPoller({ contractIds: ['CA'], startLedger: 4695000 }, {
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
     client, cursors: new MemoryCursorStore(), sleep: async () => {}, signal: controller.signal,
   });
   let count = 0;
@@ -237,4 +247,157 @@ test('an abort signal stops the stream', async () => {
     controller.abort();
   }
   assert.equal(count, 1);
+});
+
+// ── #8 validate contract ids before the first RPC call ────────────────────────
+
+test('a malformed contract id is rejected before any network call', () => {
+  const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
+  // An account id is the mistake worth naming: same alphabet, wrong prefix.
+  assert.throws(
+    () => new EventPoller({ contractIds: ['GBIBH5UV4Q5L7VVJIHWYBTCSUDHJQXQC2V6Y5LOW4D26XNU5NREMIKE4'] }, { client }),
+    (error) => {
+      assert.equal(error.name, 'InvalidContractIdError');
+      assert.match(error.message, /Account ids start with 'G'/);
+      return true;
+    },
+  );
+  assert.equal(client.requests.length, 0, 'must fail before reaching the RPC');
+});
+
+test('contract id validation catches every malformed id, not just the first', () => {
+  const client = fakeClient([]);
+  assert.throws(
+    () => new EventPoller({ contractIds: ['nope', 'C0000', 'also-bad'] }, { client }),
+    (error) => {
+      assert.deepEqual(error.invalid, ['nope', 'C0000', 'also-bad']);
+      return true;
+    },
+  );
+});
+
+test('a well-formed contract id and an empty list are both accepted', () => {
+  const client = fakeClient([]);
+  const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+  assert.doesNotThrow(() => new EventPoller({ contractIds: [SAC] }, { client }));
+  // Empty means "every contract on the network", which is documented behaviour.
+  assert.doesNotThrow(() => new EventPoller({ contractIds: [] }, { client }));
+});
+
+// ── #10 report ingestion lag in PollerProgress ───────────────────────────────
+
+test('progress reports lag in ledgers and an estimated wall-clock lag', async () => {
+  const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+  const [batch] = await take(poller.stream(), 1);
+
+  assert.equal(batch.progress.lagLedgers, 4697317 - 4695317);
+  assert.equal(batch.progress.lagSeconds, (4697317 - 4695317) * APPROX_LEDGER_SECONDS);
+});
+
+test('ingestionLag is the single definition every consumer shares', () => {
+  assert.deepEqual(ingestionLag(100, 160), { lagLedgers: 60, lagSeconds: 300 });
+  assert.deepEqual(ingestionLag(160, 160), { lagLedgers: 0, lagSeconds: 0 });
+});
+
+test('lag never goes negative when the node reports a stale latestLedger', () => {
+  // The page we were just served can be ahead of the node's own latestLedger.
+  assert.deepEqual(ingestionLag(200, 160), { lagLedgers: 0, lagSeconds: 0 });
+});
+
+// ── #19 warn when a page hits the RPC ceiling ────────────────────────────────
+
+test('a page at the RPC ceiling logs a distinct warning naming the ledger', async () => {
+  const events = Array.from({ length: MAX_PAGE_SIZE }, (_, i) => rawEvent(4695317, i));
+  const client = fakeClient([{ events, cursor: 'cur-1' }]);
+  const logs = [];
+  const poller = new EventPoller(
+    { contractIds: [SAC], startLedger: 4695000, pageSize: MAX_PAGE_SIZE },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {}, log: (m) => logs.push(m) },
+  );
+  await take(poller.stream(), 1);
+
+  const warning = logs.find((l) => l.includes('RPC ceiling'));
+  assert.ok(warning, `expected a ceiling warning, got: ${logs.join(' | ')}`);
+  assert.match(warning, /10000 events at ledger 4695317/);
+});
+
+test('a full page below the ceiling is not a ceiling warning', async () => {
+  // Merely "not caught up" — the ordinary case, and must stay quiet.
+  const events = Array.from({ length: 2 }, (_, i) => rawEvent(4695317 + i, i));
+  const client = fakeClient([{ events, cursor: 'cur-1' }]);
+  const logs = [];
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000, pageSize: 2 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {}, log: (m) => logs.push(m),
+  });
+  const [batch] = await take(poller.stream(), 1);
+
+  assert.equal(batch.progress.caughtUp, false);
+  assert.equal(logs.find((l) => l.includes('RPC ceiling')), undefined);
+});
+
+// ── #11 dedupe within a batch before yielding ────────────────────────────────
+
+test('a replayed batch emits each event exactly once', async () => {
+  const first = [rawEvent(4695317, 0), rawEvent(4695318, 1)];
+  // The same page served twice, which is what at-least-once delivery does
+  // after a crash mid-write.
+  const client = fakeClient([
+    { events: first, cursor: 'cur-1' },
+    { events: [...first, rawEvent(4695319, 2)], cursor: 'cur-2' },
+  ]);
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000, pageSize: 200 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+
+  const batches = await take(poller.stream(), 2);
+  const ids = batches.flatMap((b) => b.events.map((e) => e.id));
+  assert.equal(new Set(ids).size, ids.length, `duplicate ids emitted: ${ids.join(', ')}`);
+  assert.equal(ids.length, 3);
+  assert.equal(batches[1].events.length, 1, 'only the genuinely new event survives');
+});
+
+test('duplicates within a single page are dropped too', async () => {
+  const dupe = rawEvent(4695317, 0);
+  const client = fakeClient([{ events: [dupe, dupe, rawEvent(4695318, 1)], cursor: 'cur-1' }]);
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+
+  const [batch] = await take(poller.stream(), 1);
+  assert.equal(batch.events.length, 2);
+});
+
+test('a page that is entirely duplicates is not yielded but still advances', async () => {
+  const first = [rawEvent(4695317, 0)];
+  const client = fakeClient([
+    { events: first, cursor: 'cur-1' },
+    { events: first, cursor: 'cur-2' },
+    { events: [rawEvent(4695320, 3)], cursor: 'cur-3' },
+  ]);
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+
+  const batches = await take(poller.stream(), 2);
+  assert.deepEqual(batches.map((b) => b.events.length), [1, 1]);
+  assert.equal(batches[1].events[0].ledger, 4695320, 'the all-duplicate page was skipped');
+});
+
+test('caughtUp still reflects what the RPC returned, not what survived dedup', async () => {
+  // A full page of repeats means there IS more history to walk, even though
+  // nothing new came out of it.
+  const events = Array.from({ length: 2 }, (_, i) => rawEvent(4695317 + i, i));
+  const client = fakeClient([
+    { events, cursor: 'cur-1' },
+    { events, cursor: 'cur-2' },
+  ]);
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000, pageSize: 2 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+
+  const [batch] = await take(poller.stream(), 1);
+  assert.equal(batch.progress.caughtUp, false);
 });

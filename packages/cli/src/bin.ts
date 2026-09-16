@@ -130,12 +130,19 @@ async function main(argv: string[]): Promise<number> {
     case 'stats': {
       const store = new SqliteEventStore({ path: config.dbPath });
       try {
-        const [stats, contracts, streams] = await Promise.all([
+        const [stats, contracts, topics, streams] = await Promise.all([
           store.getStats(),
           store.listContracts(10),
+          store.countByTopic(10),
           store.listStreamStates(),
         ]);
-        process.stdout.write(`${JSON.stringify({ ...stats, streams, topContracts: contracts }, null, 2)}\n`);
+        process.stdout.write(
+          `${JSON.stringify(
+            { ...stats, streams, topContracts: contracts, topTopics: topics },
+            null,
+            2,
+          )}\n`,
+        );
       } finally {
         await store.close();
       }

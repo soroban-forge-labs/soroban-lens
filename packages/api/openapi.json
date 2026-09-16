@@ -4,7 +4,7 @@
     "title": "soroban-lens Query API",
     "version": "0.1.0",
     "summary": "Read-only HTTP API over indexed Soroban contract events.",
-    "description": "Serves events indexed from a Soroban RPC node. Read-only and unauthenticated in v0.1.\n\nPagination is keyset-based: pass the `nextCursor` from a response back as `cursor`. Pages stay stable while the indexer writes new events behind them, which offset pagination cannot promise.\n\nDecoded integer values are JSON **strings**, not numbers. Soroban `i128`/`u128` amounts routinely exceed `Number.MAX_SAFE_INTEGER`, so treating them as numbers loses precision on large transfers. Decoded `bytes` are lower-case hex strings.",
+    "description": "Serves events indexed from a Soroban RPC node. Read-only and unauthenticated in v0.1.\n\nPagination is keyset-based: pass the `nextCursor` from a response back as `cursor`. Pages stay stable while the indexer writes new events behind them, which offset pagination cannot promise.\n\nDecoded integer values are JSON **strings**, not numbers. Soroban `i128`/`u128` amounts routinely exceed `Number.MAX_SAFE_INTEGER`, so treating them as numbers loses precision on large transfers. Decoded `bytes` are lower-case hex strings.\n\nEvery route below also accepts `HEAD`, which returns the same status and headers as `GET` with an empty body \u2014 including the `Content-Length` the body would have had. The `head` operations are not listed separately.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
@@ -176,6 +176,12 @@
             "$ref": "#/components/parameters/TxHash"
           },
           {
+            "$ref": "#/components/parameters/TransactionIndex"
+          },
+          {
+            "$ref": "#/components/parameters/OperationIndex"
+          },
+          {
             "$ref": "#/components/parameters/SuccessfulOnly"
           }
         ],
@@ -192,6 +198,46 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          }
+        }
+      }
+    },
+    "/contracts/{contractId}/stats": {
+      "get": {
+        "tags": [
+          "contracts"
+        ],
+        "summary": "Event count, ledger range and last-seen time for one contract",
+        "description": "The same summary GET /contracts returns for every contract, for a single one, so a caller does not have to fetch them all and filter client-side. Returns 404 when the contract has no indexed events.",
+        "operationId": "getContractStats",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContractId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Contract summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "description": "No indexed events for this contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -290,6 +336,12 @@
           },
           {
             "$ref": "#/components/parameters/TxHash"
+          },
+          {
+            "$ref": "#/components/parameters/TransactionIndex"
+          },
+          {
+            "$ref": "#/components/parameters/OperationIndex"
           },
           {
             "$ref": "#/components/parameters/SuccessfulOnly"
@@ -472,6 +524,28 @@
         "schema": {
           "type": "boolean"
         }
+      },
+      "TransactionIndex": {
+        "name": "transactionIndex",
+        "in": "query",
+        "description": "Position of the transaction within its ledger. Combine with txHash to pin down one transaction's events exactly.",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "example": 4
+      },
+      "OperationIndex": {
+        "name": "operationIndex",
+        "in": "query",
+        "description": "Position of the operation within its transaction.",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "example": 0
       }
     },
     "responses": {

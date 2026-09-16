@@ -242,3 +242,166 @@ test('an empty database still answers rather than erroring', async () => {
     assert.deepEqual(events.body, { events: [], nextCursor: null, total: 0 });
   }, { seed: false });
 });
+
+// ── #31 query by transaction and operation index ─────────────────────────────
+
+test('GET /events?txHash=…&operationIndex=0 filters to that operation', async () => {
+  await withServer(async ({ get }) => {
+    const sample = fixture.events.find((e) => e.operationIndex === 0);
+    const { res, body } = await get(
+      `/events?txHash=${sample.txHash}&operationIndex=0&limit=1000`,
+    );
+    assert.equal(res.status, 200);
+    assert.ok(body.events.length > 0);
+    assert.ok(body.events.every((e) => e.txHash === sample.txHash && e.operationIndex === 0));
+  });
+});
+
+test('transactionIndex filters independently of txHash', async () => {
+  await withServer(async ({ get }) => {
+    const wanted = fixture.events[0].transactionIndex;
+    const { res, body } = await get(`/events?transactionIndex=${wanted}&limit=1000`);
+    assert.equal(res.status, 200);
+    assert.ok(body.events.length > 0);
+    assert.ok(body.events.every((e) => e.transactionIndex === wanted));
+  });
+});
+
+test('index 0 filters rather than being dropped as falsy', async () => {
+  await withServer(async ({ get }) => {
+    const { body: all } = await get('/events?limit=1000');
+    const { body: zero } = await get('/events?operationIndex=0&limit=1000');
+    const expected = fixture.events.filter((e) => e.operationIndex === 0).length;
+    assert.equal(zero.total, expected);
+    assert.ok(zero.total <= all.total);
+    assert.ok(zero.events.every((e) => e.operationIndex === 0));
+  });
+});
+
+test('a negative index is rejected rather than returning an empty page', async () => {
+  await withServer(async ({ get }) => {
+    for (const name of ['transactionIndex', 'operationIndex']) {
+      const { res, body } = await get(`/events?${name}=-1`);
+      assert.equal(res.status, 400, name);
+      assert.equal(body.error.parameter, name);
+    }
+  });
+});
+
+test('a non-numeric index is rejected', async () => {
+  await withServer(async ({ get }) => {
+    const { res } = await get('/events?operationIndex=first');
+    assert.equal(res.status, 400);
+  });
+});
+
+// ── #49 /contracts/{id}/stats ────────────────────────────────────────────────
+
+test('GET /contracts/{id}/stats returns that contract summary', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(`/contracts/${SAC}/stats`);
+    assert.equal(res.status, 200);
+    assert.equal(body.contractId, SAC);
+
+    // It must agree with the entry /contracts already returns.
+    const { body: all } = await get('/contracts?limit=1000');
+    const fromList = all.contracts.find((c) => c.contractId === SAC);
+    assert.deepEqual(body, fromList);
+  });
+});
+
+test('the summary matches the events actually indexed for that contract', async () => {
+  await withServer(async ({ get }) => {
+    const { body } = await get(`/contracts/${SAC}/stats`);
+    const mine = fixture.events.filter((e) => e.contractId === SAC);
+    assert.equal(body.eventCount, mine.length);
+    assert.equal(body.firstLedger, Math.min(...mine.map((e) => e.ledger)));
+    assert.equal(body.lastLedger, Math.max(...mine.map((e) => e.ledger)));
+  });
+});
+
+test('a contract with no indexed events is a 404, not an empty summary', async () => {
+  await withServer(async ({ get }) => {
+    const absent = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB';
+    const { res, body } = await get(`/contracts/${absent}/stats`);
+    assert.equal(res.status, 404);
+    assert.match(body.error.message, /LENS_CONTRACT_IDS/);
+  });
+});
+
+test('a malformed contract id on the stats route is a 400', async () => {
+  await withServer(async ({ get }) => {
+    const { res } = await get('/contracts/not-a-contract/stats');
+    assert.equal(res.status, 400);
+  });
+});
+
+// ── #51 HEAD support ─────────────────────────────────────────────────────────
+
+test('HEAD works on every GET route and returns no body', async () => {
+  await withServer(async ({ base }) => {
+    const paths = [
+      '/health',
+      '/stats',
+      '/status',
+      '/contracts',
+      `/contracts/${SAC}/events`,
+      `/contracts/${SAC}/topics`,
+      `/contracts/${SAC}/stats`,
+      '/events',
+      '/openapi.json',
+    ];
+    for (const path of paths) {
+      const res = await fetch(base + path, { method: 'HEAD' });
+      assert.equal(res.status, 200, `HEAD ${path}`);
+      assert.equal(await res.text(), '', `HEAD ${path} must have no body`);
+    }
+  });
+});
+
+test('HEAD returns the headers GET would have sent', async () => {
+  await withServer(async ({ base }) => {
+    for (const path of ['/health', '/events?limit=5']) {
+      const head = await fetch(base + path, { method: 'HEAD' });
+      const get = await fetch(base + path);
+      const body = await get.text();
+
+      assert.equal(head.status, get.status, path);
+      assert.equal(head.headers.get('content-type'), get.headers.get('content-type'), path);
+      // RFC 9110: the same Content-Length as the GET, so a client can size a
+      // request from it. Zero here would be a silent lie.
+      assert.equal(head.headers.get('content-length'), get.headers.get('content-length'), path);
+      assert.equal(Number(head.headers.get('content-length')), Buffer.byteLength(body), path);
+    }
+  });
+});
+
+test('HEAD on a missing resource is still a 404, not a 200', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/events/no-such-event`, { method: 'HEAD' });
+    assert.equal(res.status, 404);
+    assert.equal(await res.text(), '');
+  });
+});
+
+test('HEAD on an unknown route is a 404', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/nope`, { method: 'HEAD' });
+    assert.equal(res.status, 404);
+  });
+});
+
+test('a 405 advertises both GET and HEAD in Allow', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/health`, { method: 'POST' });
+    assert.equal(res.status, 405);
+    assert.equal(res.headers.get('allow'), 'GET, HEAD');
+  });
+});
+
+test('CORS advertises HEAD alongside GET', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/health`);
+    assert.match(res.headers.get('access-control-allow-methods'), /HEAD/);
+  });
+});

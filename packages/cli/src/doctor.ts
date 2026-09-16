@@ -1,6 +1,6 @@
 import { access, constants, mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { LensRpcClient } from '@soroban-lens/ingest';
+import { LensRpcClient, isContractId, CONTRACT_ID_HINT } from '@soroban-lens/ingest';
 import { SqliteEventStore, LATEST_SCHEMA_VERSION } from '@soroban-lens/store';
 import type { LensConfig } from './config.js';
 
@@ -138,7 +138,6 @@ async function checkRpc(config: LensConfig): Promise<CheckResult> {
 }
 
 /** Contract ids are StrKey: 'C' followed by 55 base32 characters. */
-const CONTRACT_ID = /^C[A-Z2-7]{55}$/;
 
 function checkContractIds(contractIds: string[]): CheckResult {
   if (contractIds.length === 0) {
@@ -150,13 +149,13 @@ function checkContractIds(contractIds: string[]): CheckResult {
     };
   }
 
-  const invalid = contractIds.filter((id) => !CONTRACT_ID.test(id));
+  const invalid = contractIds.filter((id) => !isContractId(id));
   if (invalid.length > 0) {
     return {
       name: 'Contract IDs',
       status: 'fail',
       detail: `not contract StrKeys: ${invalid.join(', ')}`,
-      fix: "A contract id is 'C' followed by 55 characters (A-Z, 2-7). Account ids start with 'G' and are not contracts.",
+      fix: CONTRACT_ID_HINT,
     };
   }
 
