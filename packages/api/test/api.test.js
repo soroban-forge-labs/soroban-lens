@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { once } from 'node:events';
-import { SqliteEventStore } from '@soroban-lens/store';
+import { SqliteEventStore, LATEST_SCHEMA_VERSION } from '@soroban-lens/store';
 import { createApiServer } from '../dist/index.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
@@ -35,7 +35,7 @@ test('GET /health reports a writable store', async () => {
     assert.equal(res.status, 200);
     assert.equal(body.status, 'ok');
     assert.equal(body.events, fixture.events.length);
-    assert.equal(body.schemaVersion, 1);
+    assert.equal(body.schemaVersion, LATEST_SCHEMA_VERSION);
     assert.equal(typeof body.uptimeSeconds, 'number');
   });
 });

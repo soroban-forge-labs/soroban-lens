@@ -5,7 +5,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SqliteEventStore, LATEST_SCHEMA_VERSION, MAX_QUERY_LIMIT, normaliseLimit } from '../dist/index.js';
+import {
+  SqliteEventStore,
+  LATEST_SCHEMA_VERSION,
+  MAX_QUERY_LIMIT,
+  MIGRATIONS,
+  normaliseLimit,
+} from '../dist/index.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -235,7 +241,7 @@ test('healthCheck reports schema and event count', async () => {
   const store = new SqliteEventStore({ path: ':memory:' });
   const health = await store.healthCheck();
   assert.equal(health.ok, true);
-  assert.match(health.detail, /schema v1/);
+  assert.match(health.detail, new RegExp(`schema v${LATEST_SCHEMA_VERSION}`));
   await store.close();
 });
 
@@ -439,4 +445,65 @@ test('an index that matches nothing returns an empty page, not everything', asyn
   assert.equal(page.total, 0);
   assert.deepEqual(page.events, []);
   await store.close();
+});
+
+// ── #36 index indexed_at ─────────────────────────────────────────────────────
+
+test('the indexed_at index exists in a migration and the planner uses it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+  await store.close();
+
+  const db = new DatabaseSync(path);
+  const indexes = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'")
+    .all()
+    .map((r) => r.name);
+  assert.ok(indexes.includes('idx_events_indexed_at'), `indexes: ${indexes.join(', ')}`);
+
+  // The bar the issue sets: a query ordering by indexed_at must actually use it,
+  // not merely have an index sitting there unused.
+  const plan = db
+    .prepare('EXPLAIN QUERY PLAN SELECT id FROM events ORDER BY indexed_at DESC LIMIT 10')
+    .all()
+    .map((r) => r.detail)
+    .join(' | ');
+  assert.match(plan, /idx_events_indexed_at/, `planner chose: ${plan}`);
+  assert.ok(!/SCAN events(?! USING)/.test(plan), `still a full scan: ${plan}`);
+
+  db.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('migrating an existing v1 database adds the index without touching rows', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+
+  // Build a database that stopped at v1, exactly as a deployed one would be.
+  const v1 = new DatabaseSync(path);
+  v1.exec(`CREATE TABLE schema_migrations (
+    version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
+  v1.exec(MIGRATIONS[0].up);
+  v1.prepare('INSERT INTO schema_migrations VALUES (?, ?, ?)').run(1, MIGRATIONS[0].name, '');
+  v1.close();
+
+  // Opening it runs only the pending migration.
+  const store = new SqliteEventStore({ path });
+  const inserted = await store.insertEvents(fixture.events);
+  const stats = await store.getStats();
+  assert.equal(stats.schemaVersion, LATEST_SCHEMA_VERSION);
+  assert.equal(inserted, fixture.events.length);
+  await store.close();
+
+  const db = new DatabaseSync(path);
+  const names = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'")
+    .all()
+    .map((r) => r.name);
+  db.close();
+  assert.ok(names.includes('idx_events_indexed_at'));
+
+  await rm(dir, { recursive: true, force: true });
 });

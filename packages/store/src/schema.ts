@@ -69,6 +69,18 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 2,
+    name: 'index-indexed-at',
+    up: `
+      -- "What did we ingest in the last hour" is the first question anyone asks
+      -- of a stalled indexer, and it was a full table scan: indexed_at was
+      -- written on every row and indexed by nothing.
+      --
+      -- DESC because every use of this column is recent-first.
+      CREATE INDEX idx_events_indexed_at ON events (indexed_at DESC);
+    `,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.reduce(
