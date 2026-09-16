@@ -3,7 +3,7 @@
 #   cp .env.example .env    # edit LENS_CONTRACT_IDS if you like
 #   docker compose up
 #
-# Then open http://localhost:5173.
+# Then open http://localhost:5173 in your browser.
 
 name: soroban-lens
 
