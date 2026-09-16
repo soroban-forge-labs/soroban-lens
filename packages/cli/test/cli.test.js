@@ -153,3 +153,29 @@ test('StoreBackedCursors keeps resume state in the events database', async () =>
   assert.equal(await cursors.load('k'), null, 'a cleared cursor must read back as absent');
   await store.close();
 });
+
+// ── #6 retry tuning ──────────────────────────────────────────────────────────
+
+test('retry tuning falls back to the documented defaults', () => {
+  const config = resolveConfig({}, {});
+  assert.deepEqual(config.retry, { attempts: 5, baseDelayMs: 250, maxDelayMs: 30_000 });
+});
+
+test('retry tuning comes from the environment and flags beat it', () => {
+  const env = {
+    LENS_RETRY_ATTEMPTS: '9',
+    LENS_RETRY_BASE_DELAY_MS: '100',
+    LENS_RETRY_MAX_DELAY_MS: '5000',
+  };
+  assert.deepEqual(resolveConfig({}, env).retry, {
+    attempts: 9,
+    baseDelayMs: 100,
+    maxDelayMs: 5000,
+  });
+  assert.equal(resolveConfig({ retryAttempts: 2 }, env).retry.attempts, 2);
+});
+
+test('a non-numeric retry value falls back rather than becoming NaN', () => {
+  const config = resolveConfig({}, { LENS_RETRY_ATTEMPTS: 'lots' });
+  assert.equal(config.retry.attempts, 5);
+});

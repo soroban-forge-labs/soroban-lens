@@ -10,6 +10,8 @@ export interface LensConfig {
   startLedger: number | undefined;
   pageSize: number;
   pollIntervalMs: number;
+  /** Retry tuning passed straight to the ingest client. */
+  retry: { attempts: number; baseDelayMs: number; maxDelayMs: number };
 }
 
 export interface ConfigOverrides {
@@ -22,6 +24,9 @@ export interface ConfigOverrides {
   startLedger?: number | undefined;
   pageSize?: number | undefined;
   pollInterval?: number | undefined;
+  retryAttempts?: number | undefined;
+  retryBaseDelay?: number | undefined;
+  retryMaxDelay?: number | undefined;
 }
 
 /**
@@ -50,6 +55,11 @@ export function resolveConfig(
     startLedger: overrides.startLedger ?? optionalNumber(env.LENS_START_LEDGER),
     pageSize: overrides.pageSize ?? numberOr(env.LENS_PAGE_SIZE, 200),
     pollIntervalMs: overrides.pollInterval ?? numberOr(env.LENS_POLL_INTERVAL_MS, 2000),
+    retry: {
+      attempts: overrides.retryAttempts ?? numberOr(env.LENS_RETRY_ATTEMPTS, 5),
+      baseDelayMs: overrides.retryBaseDelay ?? numberOr(env.LENS_RETRY_BASE_DELAY_MS, 250),
+      maxDelayMs: overrides.retryMaxDelay ?? numberOr(env.LENS_RETRY_MAX_DELAY_MS, 30_000),
+    },
   };
 }
 

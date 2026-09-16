@@ -61,3 +61,23 @@ test('more than four --topic segments is rejected with the reason', async () => 
   assert.equal(code, 2);
   assert.match(stderr, /at most 4 --topic segments/);
 });
+// ── #6 retry tuning ──────────────────────────────────────────────────────────
+
+test('the retry flags and their env vars are documented in the help text', async () => {
+  const { stdout } = await cli(['--help']);
+  for (const flag of ['--retry-attempts', '--retry-base-delay', '--retry-max-delay']) {
+    assert.ok(stdout.includes(flag), `help is missing ${flag}`);
+  }
+  assert.ok(stdout.includes('LENS_RETRY_ATTEMPTS'), 'help is missing LENS_RETRY_ATTEMPTS');
+});
+
+test('a non-numeric retry value is ignored rather than becoming NaN', async () => {
+  // It must not reach the client as NaN attempts, which would loop or throw.
+  // An unresolvable host makes this fail at the RPC, not at argument parsing.
+  const { code, stderr } = await cli(
+    ['-c', SAC, '--no-resume', '--once', '--retry-attempts', 'lots'],
+    { LENS_RPC_URL: 'https://rpc.invalid.soroban-lens-test' },
+  );
+  assert.notEqual(code, 2, `expected a runtime failure, not an argument error: ${stderr}`);
+  assert.ok(!stderr.includes('NaN'), `NaN leaked into the retry path: ${stderr}`);
+});

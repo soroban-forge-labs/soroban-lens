@@ -37,6 +37,12 @@ function parseTopicFlags(flags: string[] | undefined): string[][] | undefined {
   return [flags];
 }
 
+/** A CLI/env number, dropped rather than passed through as NaN. */
+function numeric<K extends string>(key: K, raw: string | undefined): Partial<Record<K, number>> {
+  if (raw === undefined || raw.trim() === '') return {};
+  const value = Number(raw);
+  return Number.isFinite(value) ? ({ [key]: value } as Record<K, number>) : {};
+}
 
 const USAGE = `
 soroban-lens-ingest — stream Soroban contract events as NDJSON
@@ -56,6 +62,9 @@ Options:
                            '*' to match any value in that position. Repeatable,
                            positional, at most 4 — the RPC matches a prefix of
                            at most 4 segments, though events may carry more.
+      --retry-attempts <n> Total RPC attempts including the first (default: 5).
+      --retry-base-delay <ms>  First retry delay (default: 250).
+      --retry-max-delay <ms>   Ceiling on any one retry delay (default: 30000).
       --cursor-dir <path>  Where to persist resume state (default: ./data).
       --no-resume          Ignore and do not write any stored cursor.
       --once               Exit once caught up to the current tip.
@@ -64,6 +73,7 @@ Options:
 
 Environment:
   LENS_NETWORK, LENS_RPC_URL, LENS_CONTRACT_IDS (comma separated), LENS_DATA_DIR
+  LENS_RETRY_ATTEMPTS, LENS_RETRY_BASE_DELAY_MS, LENS_RETRY_MAX_DELAY_MS
 
 Examples:
   # Testnet native XLM contract, 20 events, then exit
@@ -83,6 +93,9 @@ async function main(argv: string[]): Promise<number> {
       'poll-interval': { type: 'string' },
       type: { type: 'string' },
       topic: { type: 'string', multiple: true },
+      'retry-attempts': { type: 'string' },
+      'retry-base-delay': { type: 'string' },
+      'retry-max-delay': { type: 'string' },
       'cursor-dir': { type: 'string' },
       'no-resume': { type: 'boolean' },
       once: { type: 'boolean' },
@@ -134,9 +147,16 @@ async function main(argv: string[]): Promise<number> {
     return 2;
   }
 
+  const retry = {
+    ...numeric('attempts', values['retry-attempts'] ?? process.env.LENS_RETRY_ATTEMPTS),
+    ...numeric('baseDelayMs', values['retry-base-delay'] ?? process.env.LENS_RETRY_BASE_DELAY_MS),
+    ...numeric('maxDelayMs', values['retry-max-delay'] ?? process.env.LENS_RETRY_MAX_DELAY_MS),
+  };
+
   const client = new LensRpcClient({
     rpcUrl: network.rpcUrl,
     retry: {
+      ...retry,
       onRetry: (attempt, delay, error) =>
         process.stderr.write(
           `[ingest] retry ${attempt} in ${delay}ms: ${error instanceof Error ? error.message : String(error)}\n`,

@@ -65,6 +65,7 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
   const client = new LensRpcClient({
     rpcUrl: config.network.rpcUrl,
     retry: {
+      ...config.retry,
       onRetry: (attempt, delay, error) =>
         log(`rpc retry ${attempt} in ${delay}ms: ${error instanceof Error ? error.message : String(error)}`),
     },
