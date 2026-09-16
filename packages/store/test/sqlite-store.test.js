@@ -1439,3 +1439,86 @@ test('rebuildSearchIndex actually clears stale rows, not just adds', async () =>
   await store.close();
   await rm(dir, { recursive: true, force: true });
 });
+
+// ── #37 snapshot export and import ───────────────────────────────────────────
+
+test('a snapshot restores to an identical event set', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-snap-'));
+  const snapshotPath = join(dir, 'snapshot.ndjson');
+  const store = await seeded();
+
+  const exported = await store.exportSnapshot(snapshotPath);
+  assert.equal(exported, fixture.events.length);
+
+  const target = new SqliteEventStore({ path: ':memory:' });
+  const imported = await target.importSnapshot(snapshotPath);
+  assert.equal(imported, fixture.events.length);
+
+  const original = await store.queryEvents({ limit: MAX_QUERY_LIMIT, order: 'asc' });
+  const restored = await target.queryEvents({ limit: MAX_QUERY_LIMIT, order: 'asc' });
+  assert.deepEqual(restored.events, original.events);
+
+  await store.close();
+  await target.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('a snapshot taken while inserts are still landing is internally consistent', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-snap-'));
+  const dbPath = join(dir, 'lens.db');
+  const snapshotPath = join(dir, 'snapshot.ndjson');
+  const store = new SqliteEventStore({ path: dbPath });
+
+  // Half the fixture before the snapshot, the rest inserted concurrently —
+  // VACUUM INTO's own consistency guarantee is what this exercises, not a
+  // race this test could reliably win or lose either way.
+  const half = Math.floor(fixture.events.length / 2);
+  await store.insertEvents(fixture.events.slice(0, half));
+
+  const [exported] = await Promise.all([
+    store.exportSnapshot(snapshotPath),
+    store.insertEvents(fixture.events.slice(half)),
+  ]);
+
+  // Whatever count VACUUM INTO's snapshot captured, it must be a real,
+  // internally consistent prefix — never more than the fixture, and the
+  // exported file itself must parse as valid NDJSON with that many events.
+  assert.ok(exported >= half && exported <= fixture.events.length);
+  const lines = readFileSync(snapshotPath, 'utf8').trim().split('\n');
+  assert.equal(lines.length, exported);
+  for (const line of lines) assert.doesNotThrow(() => JSON.parse(line));
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('importSnapshot is idempotent — importing the same file twice does not duplicate rows', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-snap-'));
+  const snapshotPath = join(dir, 'snapshot.ndjson');
+  const source = await seeded();
+  await source.exportSnapshot(snapshotPath);
+  await source.close();
+
+  const target = new SqliteEventStore({ path: ':memory:' });
+  const first = await target.importSnapshot(snapshotPath);
+  const second = await target.importSnapshot(snapshotPath);
+  assert.equal(first, fixture.events.length);
+  assert.equal(second, 0, 're-importing must insert nothing new');
+  assert.equal((await target.getStats()).eventCount, fixture.events.length);
+
+  await target.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('an empty database exports an empty, valid snapshot', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-snap-'));
+  const snapshotPath = join(dir, 'snapshot.ndjson');
+  const store = new SqliteEventStore({ path: ':memory:' });
+
+  const exported = await store.exportSnapshot(snapshotPath);
+  assert.equal(exported, 0);
+  assert.equal(readFileSync(snapshotPath, 'utf8'), '');
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});

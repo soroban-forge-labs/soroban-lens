@@ -46,6 +46,24 @@ export interface EventStore {
   rebuildSearchIndex(): Promise<void>;
 
   /**
+   * Write every event as NDJSON (one decoded LensEvent per line) to
+   * `destPath` — a format that outlives this backend, unlike a raw copy of
+   * the database file. Consistent even while the indexer is writing:
+   * internally takes a point-in-time snapshot before reading from it.
+   * @returns how many events were written.
+   */
+  exportSnapshot(destPath: string): Promise<number>;
+
+  /**
+   * Read an NDJSON snapshot written by exportSnapshot() (or `lens seed`'s
+   * fixture format is not this — see the CLI) and insert every event.
+   * Idempotent the same way insertEvents() is: importing the same snapshot
+   * twice does not duplicate rows.
+   * @returns how many rows were newly inserted.
+   */
+  importSnapshot(srcPath: string): Promise<number>;
+
+  /**
    * Force a WAL checkpoint. A continuously-writing indexer with a long-lived
    * reader (the API, kept open by an in-flight request) can grow `-wal`
    * without bound between natural checkpoints, which looks like a disk leak.

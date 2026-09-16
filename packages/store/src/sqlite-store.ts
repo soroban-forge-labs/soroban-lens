@@ -1,6 +1,11 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { mkdirSync, statSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { mkdirSync, statSync, createWriteStream } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
+import { createReadStream } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { dirname, join } from 'node:path';
 import { decodeEvent, topicKey, extractAddresses } from './decode.js';
 import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
@@ -695,6 +700,59 @@ export class SqliteEventStore implements EventStore {
       this.#db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  async exportSnapshot(destPath: string): Promise<number> {
+    // VACUUM INTO takes a consistent, point-in-time copy even while another
+    // connection (the indexer) is mid-write — it is SQLite's own supported
+    // mechanism for exactly this, which is why the issue names it directly.
+    // Copying the live file instead risks capturing a torn WAL checkpoint.
+    const tempPath =
+      this.#path === ':memory:'
+        ? join(tmpdir(), `lens-snapshot-${randomUUID()}.db`)
+        : `${this.#path}.snapshot-${randomUUID()}`;
+    this.#db.prepare('VACUUM INTO ?').run(tempPath);
+
+    const snapshot = new DatabaseSync(tempPath);
+    try {
+      const rows = snapshot.prepare('SELECT * FROM events ORDER BY id ASC').all() as unknown as EventRow[];
+      const out = createWriteStream(destPath, { encoding: 'utf8' });
+      try {
+        for (const row of rows) out.write(`${JSON.stringify(rowToEvent(row))}
+`);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          out.end((error: unknown) => (error ? reject(error) : resolve()));
+        });
+      }
+      return rows.length;
+    } finally {
+      snapshot.close();
+      await rm(tempPath, { force: true });
+    }
+  }
+
+  async importSnapshot(srcPath: string): Promise<number> {
+    const lines = createInterface({ input: createReadStream(srcPath, { encoding: 'utf8' }) });
+    const BATCH_SIZE = 500;
+    let batch: LensEvent[] = [];
+    let inserted = 0;
+
+    const flush = async (): Promise<void> => {
+      if (batch.length === 0) return;
+      inserted += await this.insertDecoded(batch);
+      batch = [];
+    };
+
+    for await (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed === '') continue; // NDJSON: a blank line is not a record
+      batch.push(JSON.parse(trimmed) as LensEvent);
+      if (batch.length >= BATCH_SIZE) await flush();
+    }
+    await flush();
+
+    return inserted;
   }
 
   async checkpoint(mode: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE' = 'TRUNCATE'): Promise<void> {
