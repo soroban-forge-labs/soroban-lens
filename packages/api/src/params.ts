@@ -67,6 +67,23 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     throw ApiError.badRequest('"txHash" must be a 64-character hex string.', 'txHash');
   }
 
+  // Both are ledger-relative positions, so negatives are meaningless rather
+  // than merely unusual — reject instead of returning a guaranteed empty page.
+  const transactionIndex = intParam(params, 'transactionIndex');
+  if (transactionIndex !== undefined && transactionIndex < 0) {
+    throw ApiError.badRequest(
+      `"transactionIndex" must not be negative, got ${transactionIndex}.`,
+      'transactionIndex',
+    );
+  }
+  const operationIndex = intParam(params, 'operationIndex');
+  if (operationIndex !== undefined && operationIndex < 0) {
+    throw ApiError.badRequest(
+      `"operationIndex" must not be negative, got ${operationIndex}.`,
+      'operationIndex',
+    );
+  }
+
   const successfulOnly = boolParam(params, 'successfulOnly');
   const topics = parseTopics(params);
   const cursor = params.get('cursor');
@@ -77,6 +94,8 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     ...(fromLedger !== undefined ? { fromLedger } : {}),
     ...(toLedger !== undefined ? { toLedger } : {}),
     ...(txHash !== undefined ? { txHash } : {}),
+    ...(transactionIndex !== undefined ? { transactionIndex } : {}),
+    ...(operationIndex !== undefined ? { operationIndex } : {}),
     ...(cursor ? { cursor } : {}),
     ...(successfulOnly !== undefined ? { successfulOnly } : {}),
     ...(topics ? { topics } : {}),

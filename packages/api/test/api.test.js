@@ -242,3 +242,55 @@ test('an empty database still answers rather than erroring', async () => {
     assert.deepEqual(events.body, { events: [], nextCursor: null, total: 0 });
   }, { seed: false });
 });
+
+// ── #31 query by transaction and operation index ─────────────────────────────
+
+test('GET /events?txHash=…&operationIndex=0 filters to that operation', async () => {
+  await withServer(async ({ get }) => {
+    const sample = fixture.events.find((e) => e.operationIndex === 0);
+    const { res, body } = await get(
+      `/events?txHash=${sample.txHash}&operationIndex=0&limit=1000`,
+    );
+    assert.equal(res.status, 200);
+    assert.ok(body.events.length > 0);
+    assert.ok(body.events.every((e) => e.txHash === sample.txHash && e.operationIndex === 0));
+  });
+});
+
+test('transactionIndex filters independently of txHash', async () => {
+  await withServer(async ({ get }) => {
+    const wanted = fixture.events[0].transactionIndex;
+    const { res, body } = await get(`/events?transactionIndex=${wanted}&limit=1000`);
+    assert.equal(res.status, 200);
+    assert.ok(body.events.length > 0);
+    assert.ok(body.events.every((e) => e.transactionIndex === wanted));
+  });
+});
+
+test('index 0 filters rather than being dropped as falsy', async () => {
+  await withServer(async ({ get }) => {
+    const { body: all } = await get('/events?limit=1000');
+    const { body: zero } = await get('/events?operationIndex=0&limit=1000');
+    const expected = fixture.events.filter((e) => e.operationIndex === 0).length;
+    assert.equal(zero.total, expected);
+    assert.ok(zero.total <= all.total);
+    assert.ok(zero.events.every((e) => e.operationIndex === 0));
+  });
+});
+
+test('a negative index is rejected rather than returning an empty page', async () => {
+  await withServer(async ({ get }) => {
+    for (const name of ['transactionIndex', 'operationIndex']) {
+      const { res, body } = await get(`/events?${name}=-1`);
+      assert.equal(res.status, 400, name);
+      assert.equal(body.error.parameter, name);
+    }
+  });
+});
+
+test('a non-numeric index is rejected', async () => {
+  await withServer(async ({ get }) => {
+    const { res } = await get('/events?operationIndex=first');
+    assert.equal(res.status, 400);
+  });
+});

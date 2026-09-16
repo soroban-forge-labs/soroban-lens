@@ -393,3 +393,50 @@ test('countByTopic is empty on an empty database rather than erroring', async ()
   assert.deepEqual(await store.countByTopic(), []);
   await store.close();
 });
+
+// ── #31 query by transaction and operation index ─────────────────────────────
+
+test('filtering by transaction index narrows to one transaction in a ledger', async () => {
+  const store = await seeded();
+  const sample = fixture.events[0];
+  const page = await store.queryEvents({
+    transactionIndex: sample.transactionIndex,
+    limit: MAX_QUERY_LIMIT,
+  });
+  assert.ok(page.events.length > 0);
+  assert.ok(page.events.every((e) => e.transactionIndex === sample.transactionIndex));
+  await store.close();
+});
+
+test('txHash and operationIndex together pin down a single operation', async () => {
+  const store = await seeded();
+  const sample = fixture.events.find((e) => e.operationIndex === 0);
+  const page = await store.queryEvents({
+    txHash: sample.txHash,
+    operationIndex: 0,
+    limit: MAX_QUERY_LIMIT,
+  });
+  assert.ok(page.events.length > 0);
+  assert.ok(page.events.every((e) => e.txHash === sample.txHash && e.operationIndex === 0));
+  await store.close();
+});
+
+test('index 0 is a real filter, not treated as absent', async () => {
+  const store = await seeded();
+  const all = await store.queryEvents({ limit: MAX_QUERY_LIMIT });
+  const atZero = await store.queryEvents({ operationIndex: 0, limit: MAX_QUERY_LIMIT });
+  // The classic falsy-zero bug: if 0 were dropped, this would return everything.
+  assert.ok(atZero.events.every((e) => e.operationIndex === 0));
+  const expected = fixture.events.filter((e) => e.operationIndex === 0).length;
+  assert.equal(atZero.total, expected);
+  assert.ok(expected < all.total || all.total === expected);
+  await store.close();
+});
+
+test('an index that matches nothing returns an empty page, not everything', async () => {
+  const store = await seeded();
+  const page = await store.queryEvents({ transactionIndex: 99999, limit: 10 });
+  assert.equal(page.total, 0);
+  assert.deepEqual(page.events, []);
+  await store.close();
+});

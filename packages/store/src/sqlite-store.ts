@@ -443,6 +443,17 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
     conditions.push('tx_hash = ?');
     values.push(query.txHash);
   }
+  // Compared against undefined, not truthiness: index 0 is the first
+  // transaction in a ledger and the first operation in a transaction, so it is
+  // the single most likely value anyone filters on.
+  if (query.transactionIndex !== undefined) {
+    conditions.push('transaction_index = ?');
+    values.push(query.transactionIndex);
+  }
+  if (query.operationIndex !== undefined) {
+    conditions.push('operation_index = ?');
+    values.push(query.operationIndex);
+  }
   if (query.fromLedger !== undefined) {
     conditions.push('ledger >= ?');
     values.push(query.fromLedger);

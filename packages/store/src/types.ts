@@ -76,6 +76,13 @@ export interface EventQuery {
   /** Inclusive upper bound on ledger sequence. */
   toLedger?: number | undefined;
   txHash?: string | undefined;
+  /**
+   * Position of the transaction within its ledger. Paired with `txHash` or a
+   * ledger bound it pins down one transaction's events exactly.
+   */
+  transactionIndex?: number | undefined;
+  /** Position of the operation within its transaction. */
+  operationIndex?: number | undefined;
   /** Restrict to successful contract calls. Omitted means "both". */
   successfulOnly?: boolean | undefined;
   /** 1..1000. Defaults to 50. */
