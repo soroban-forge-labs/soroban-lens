@@ -154,16 +154,16 @@ export function App(): React.JSX.Element {
 
   const exportCsv = useCallback(() => {
     if (events.length === 0) return;
-    const headers = ['id', 'ledger', 'ledger_closed_at', 'contract_id', 'tx_hash', 'in_successful_tx', 'topics', 'data'];
+    const headers = ['id', 'ledger', 'ledger_closed_at', 'contract_id', 'tx_hash', 'in_successful_call', 'topics', 'value'];
     const rows = events.map((e) => [
       e.id,
       e.ledger,
       e.ledgerClosedAt,
       e.contractId,
       e.txHash,
-      e.inSuccessfulTx,
-      `"${e.topics.map((t) => t.decodedJson ?? t.rawXdr).join(' | ').replace(/"/g, '""')}"`,
-      `"${(e.data.decodedJson ?? e.data.rawXdr).replace(/"/g, '""')}"`,
+      e.inSuccessfulContractCall,
+      `"${e.topics.map((t) => JSON.stringify(t.value)).join(' | ').replace(/"/g, '""')}"`,
+      `"${JSON.stringify(e.value.value).replace(/"/g, '""')}"`,
     ]);
     const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
