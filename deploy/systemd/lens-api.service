@@ -1,0 +1,27 @@
+[Unit]
+Description=Soroban Lens REST & WebSocket API Service
+Documentation=https://github.com/soroban-forge-labs/soroban-lens
+After=network.target
+
+[Service]
+Type=simple
+User=soroban-lens
+Group=soroban-lens
+WorkingDirectory=/opt/soroban-lens
+Environment=NODE_ENV=production
+Environment=PORT=8765
+Environment=DATABASE_PATH=/var/lib/soroban-lens/lens.db
+EnvironmentFile=-/etc/soroban-lens/api.env
+ExecStart=/usr/bin/node packages/api/dist/index.js
+Restart=always
+RestartSec=5s
+LimitNOFILE=65536
+
+# Sandboxing & Security
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
