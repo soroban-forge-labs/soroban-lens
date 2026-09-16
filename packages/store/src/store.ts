@@ -85,6 +85,21 @@ export interface EventStore {
    */
   pruneBefore(ledger: number): Promise<number>;
 
+  /**
+   * Re-run the decoder over stored rows and rewrite their decoded columns in
+   * place, from the raw XDR that was always kept for exactly this.
+   *
+   * `decodeEvent` never throws — a bad event is stored with `decodeError` set
+   * rather than dropped — so this is how a decoder fix actually reaches
+   * already-indexed rows, without re-indexing from the network.
+   *
+   * @param all Re-decode every row, not only ones with `decodeError` set.
+   *   For a decoder change that fixes the *shape* of previously-successful
+   *   output rather than an outright failure.
+   * @returns how many rows were rewritten.
+   */
+  redecode(all?: boolean): Promise<number>;
+
   close(): Promise<void>;
 }
 

@@ -380,6 +380,84 @@ export class SqliteEventStore implements EventStore {
     return before;
   }
 
+  async redecode(all = false): Promise<number> {
+    const rows = this.#db
+      .prepare(
+        `SELECT id, contract_id, type, ledger, ledger_closed_at, tx_hash,
+                transaction_index, operation_index, in_successful_call,
+                topics_xdr_json, value_xdr, indexed_at
+         FROM events
+         ${all ? '' : 'WHERE decode_error IS NOT NULL'}`,
+      )
+      .all() as {
+      id: string;
+      contract_id: string;
+      type: 'contract' | 'system';
+      ledger: number;
+      ledger_closed_at: string;
+      tx_hash: string;
+      transaction_index: number;
+      operation_index: number;
+      in_successful_call: number;
+      topics_xdr_json: string;
+      value_xdr: string;
+      indexed_at: string;
+    }[];
+
+    if (rows.length === 0) return 0;
+
+    const update = this.#db.prepare(`
+      UPDATE events SET
+        topics_json = ?, topics_xdr_json = ?, topic_count = ?,
+        topic0 = ?, topic1 = ?, topic2 = ?, topic3 = ?,
+        value_type = ?, value_json = ?, value_xdr = ?, decode_error = ?
+      WHERE id = ?
+    `);
+
+    this.#db.exec('BEGIN');
+    try {
+      for (const row of rows) {
+        const raw: RawEventInput = {
+          id: row.id,
+          contractId: row.contract_id,
+          type: row.type,
+          ledger: row.ledger,
+          ledgerClosedAt: row.ledger_closed_at,
+          txHash: row.tx_hash,
+          transactionIndex: row.transaction_index,
+          operationIndex: row.operation_index,
+          inSuccessfulContractCall: row.in_successful_call === 1,
+          topic: JSON.parse(row.topics_xdr_json) as string[],
+          value: row.value_xdr,
+        };
+        // Re-decode with the current decoder, from the raw XDR every row
+        // keeps for exactly this — indexedAt is left untouched, since it
+        // records when the event was first ingested, not when it was decoded.
+        const redecoded = decodeEvent(raw, new Date(row.indexed_at));
+        update.run(
+          JSON.stringify(redecoded.topics),
+          JSON.stringify(redecoded.topicsXdr),
+          redecoded.topics.length,
+          topicKey(redecoded.topics[0]),
+          topicKey(redecoded.topics[1]),
+          topicKey(redecoded.topics[2]),
+          topicKey(redecoded.topics[3]),
+          redecoded.value.type,
+          JSON.stringify(redecoded.value),
+          redecoded.valueXdr,
+          redecoded.decodeError ?? null,
+          row.id,
+        );
+      }
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+
+    return rows.length;
+  }
+
   async close(): Promise<void> {
     this.#db.close();
   }

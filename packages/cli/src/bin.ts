@@ -24,6 +24,7 @@ Usage:
   lens seed   [--fixture <path>]     Load a captured getEvents response into the database.
   lens stats  [options]              Print database statistics.
   lens prune --before-ledger <n>     Delete events below a ledger and reclaim disk space.
+  lens redecode [--all]              Re-run the decoder over previously-failed rows.
   lens completion [bash|zsh|fish]    Generate shell auto-completion script.
 
 
@@ -45,6 +46,7 @@ Options:
       --max-events <n>    index: stop after this many events.
       --fixture <path>    seed: file to load (default fixtures/testnet-events.json).
       --before-ledger <n> prune: delete events with ledger below this.
+      --all               redecode: re-run over every row, not only failures.
   -h, --help              Show this help.
 
 Examples:
@@ -73,6 +75,7 @@ async function main(argv: string[]): Promise<number> {
       'retry-base-delay': { type: 'string' },
       'retry-max-delay': { type: 'string' },
       once: { type: 'boolean' },
+      all: { type: 'boolean' },
       'max-events': { type: 'string' },
       fixture: { type: 'string' },
       'before-ledger': { type: 'string' },
@@ -193,6 +196,19 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'redecode': {
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        const rewritten = await store.redecode(values.all ?? false);
+        process.stderr.write(
+          `[lens] redecoded ${rewritten} row(s)${values.all ? ' (--all)' : ' with a stored decode error'}\n`,
+        );
+      } finally {
+        await store.close();
+      }
+      return 0;
+    }
+
     case 'completion': {
       const shell = rest[0] || 'bash';
       process.stdout.write(`${generateCompletion(shell)}\n`);
@@ -212,7 +228,7 @@ function generateCompletion(shell: string): string {
   local cur prev commands options
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="doctor index seed stats prune completion"
+  commands="doctor index seed stats prune redecode completion"
   options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --poll-interval --once --max-events --fixture --before-ledger -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
@@ -247,6 +263,7 @@ _lens() {
     'seed:Load testnet events fixture'
     'stats:Print database statistics'
     'prune:Delete events below a ledger'
+    'redecode:Re-run the decoder over failed rows'
     'completion:Generate shell autocompletions'
   )
   _arguments '1: :->command' '*: :->args'
@@ -263,6 +280,7 @@ complete -c lens -n "__fish_use_subcommand" -a index -d "Run the indexer pipelin
 complete -c lens -n "__fish_use_subcommand" -a seed -d "Load testnet events fixture"
 complete -c lens -n "__fish_use_subcommand" -a stats -d "Print database statistics"
 complete -c lens -n "__fish_use_subcommand" -a prune -d "Delete events below a ledger"
+complete -c lens -n "__fish_use_subcommand" -a redecode -d "Re-run the decoder over failed rows"
 complete -c lens -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c lens -l network -s n -x -a "testnet mainnet futurenet"
 complete -c lens -l help -s h -d "Show help"`;

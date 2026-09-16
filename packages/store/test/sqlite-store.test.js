@@ -699,3 +699,66 @@ test('pruneBefore does not touch stream_state — the cursor is independent of w
   assert.deepEqual(state, { key: 'k', cursor: 'abc', ledger: 4695317, updatedAt: '2026-01-01T00:00:00Z' });
   await store.close();
 });
+
+// ── #25 re-decode rows that failed to decode ─────────────────────────────────
+
+test('redecode repairs a row whose decode_error was wrong, without touching the raw XDR', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents([fixture.events[0]]);
+
+  // Simulate a row a previous, buggier decoder got wrong: the raw XDR was
+  // always fine, but the derived columns say otherwise. This is exactly what
+  // "the decoder is fixed" looks like from the row's point of view — the
+  // fault was in decodeEvent, not in the bytes.
+  const db = new DatabaseSync(path);
+  db.exec(
+    `UPDATE events SET decode_error = 'simulated old bug', value_type = 'undecodable',
+     value_json = '{"type":"undecodable","value":"corrupted"}', topic0 = NULL
+     WHERE id = '${fixture.events[0].id}'`,
+  );
+  db.close();
+
+  const before = await store.getEvent(fixture.events[0].id);
+  assert.equal(before.decodeError, 'simulated old bug');
+
+  const rewritten = await store.redecode();
+  assert.equal(rewritten, 1);
+
+  const after = await store.getEvent(fixture.events[0].id);
+  assert.equal(after.decodeError, undefined);
+  assert.equal(after.value.type, 'i128'); // the fixture event's real decoded shape
+  assert.equal(after.topicsXdr[0], fixture.events[0].topic[0], 'raw XDR was never touched');
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('redecode without --all only touches rows with a stored decode_error', async () => {
+  const store = await seeded();
+  const before = await store.queryEvents({ limit: MAX_QUERY_LIMIT });
+  const rewritten = await store.redecode();
+  assert.equal(rewritten, 0, 'the fixture has no failed rows to begin with');
+  const after = await store.queryEvents({ limit: MAX_QUERY_LIMIT });
+  assert.deepEqual(after, before);
+  await store.close();
+});
+
+test('redecode(true) re-runs over every row, including ones that already decoded cleanly', async () => {
+  const store = await seeded();
+  const rewritten = await store.redecode(true);
+  assert.equal(rewritten, fixture.events.length);
+  // Idempotent: decoding the same valid XDR twice produces the same result.
+  const page = await store.queryEvents({ limit: MAX_QUERY_LIMIT });
+  assert.equal(page.total, fixture.events.length);
+  assert.ok(page.events.every((e) => e.decodeError === undefined));
+  await store.close();
+});
+
+test('redecode on an empty database does nothing', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  assert.equal(await store.redecode(), 0);
+  assert.equal(await store.redecode(true), 0);
+  await store.close();
+});
