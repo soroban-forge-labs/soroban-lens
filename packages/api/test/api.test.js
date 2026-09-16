@@ -335,3 +335,73 @@ test('a malformed contract id on the stats route is a 400', async () => {
     assert.equal(res.status, 400);
   });
 });
+
+// ── #51 HEAD support ─────────────────────────────────────────────────────────
+
+test('HEAD works on every GET route and returns no body', async () => {
+  await withServer(async ({ base }) => {
+    const paths = [
+      '/health',
+      '/stats',
+      '/status',
+      '/contracts',
+      `/contracts/${SAC}/events`,
+      `/contracts/${SAC}/topics`,
+      `/contracts/${SAC}/stats`,
+      '/events',
+      '/openapi.json',
+    ];
+    for (const path of paths) {
+      const res = await fetch(base + path, { method: 'HEAD' });
+      assert.equal(res.status, 200, `HEAD ${path}`);
+      assert.equal(await res.text(), '', `HEAD ${path} must have no body`);
+    }
+  });
+});
+
+test('HEAD returns the headers GET would have sent', async () => {
+  await withServer(async ({ base }) => {
+    for (const path of ['/health', '/events?limit=5']) {
+      const head = await fetch(base + path, { method: 'HEAD' });
+      const get = await fetch(base + path);
+      const body = await get.text();
+
+      assert.equal(head.status, get.status, path);
+      assert.equal(head.headers.get('content-type'), get.headers.get('content-type'), path);
+      // RFC 9110: the same Content-Length as the GET, so a client can size a
+      // request from it. Zero here would be a silent lie.
+      assert.equal(head.headers.get('content-length'), get.headers.get('content-length'), path);
+      assert.equal(Number(head.headers.get('content-length')), Buffer.byteLength(body), path);
+    }
+  });
+});
+
+test('HEAD on a missing resource is still a 404, not a 200', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/events/no-such-event`, { method: 'HEAD' });
+    assert.equal(res.status, 404);
+    assert.equal(await res.text(), '');
+  });
+});
+
+test('HEAD on an unknown route is a 404', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/nope`, { method: 'HEAD' });
+    assert.equal(res.status, 404);
+  });
+});
+
+test('a 405 advertises both GET and HEAD in Allow', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/health`, { method: 'POST' });
+    assert.equal(res.status, 405);
+    assert.equal(res.headers.get('allow'), 'GET, HEAD');
+  });
+});
+
+test('CORS advertises HEAD alongside GET', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/health`);
+    assert.match(res.headers.get('access-control-allow-methods'), /HEAD/);
+  });
+});

@@ -13,13 +13,16 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly parameter: string | undefined;
+  /** Methods to advertise in `Allow`, which RFC 9110 requires on a 405. */
+  readonly allow: string | undefined;
 
-  constructor(status: number, code: string, message: string, parameter?: string) {
+  constructor(status: number, code: string, message: string, parameter?: string, allow?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.parameter = parameter;
+    this.allow = allow;
   }
 
   static badRequest(message: string, parameter?: string): ApiError {
