@@ -36,6 +36,32 @@ function boolParam(params: URLSearchParams, name: string): boolean | undefined {
 }
 
 /**
+ * An ISO-8601 timestamp, or epoch seconds, as epoch seconds.
+ *
+ * Both forms are accepted because both are natural: a UI has a Date, a shell
+ * script has `date +%s`. A bare integer is unambiguous — no ISO-8601 timestamp
+ * is all digits — so accepting it costs nothing.
+ */
+function timeParam(params: URLSearchParams, name: string): number | undefined {
+  const raw = params.get(name);
+  if (raw === null || raw.trim() === '') return undefined;
+  const value = raw.trim();
+
+  if (/^-?\d+$/.test(value)) return Number(value);
+
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    throw ApiError.badRequest(
+      `"${name}" must be an ISO-8601 timestamp or epoch seconds, got "${value}".`,
+      name,
+    );
+  }
+  // Floor, not round: an inclusive lower bound must not skip an event that
+  // closed in the same second.
+  return Math.floor(parsed / 1000);
+}
+
+/**
  * Translate query-string parameters into an `EventQuery`.
  *
  * Unparseable or out-of-range values are rejected rather than clamped silently.
@@ -60,6 +86,15 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
       `"fromLedger" (${fromLedger}) must not be greater than "toLedger" (${toLedger}).`,
       'fromLedger',
     );
+  }
+
+  // ISO-8601 in, epoch seconds out. Callers think in timestamps; the column is
+  // an integer, and doing the conversion here keeps that an implementation
+  // detail rather than something every client has to know.
+  const fromTime = timeParam(params, 'fromTime');
+  const toTime = timeParam(params, 'toTime');
+  if (fromTime !== undefined && toTime !== undefined && fromTime > toTime) {
+    throw ApiError.badRequest('"fromTime" must not be after "toTime".', 'fromTime');
   }
 
   const txHash = params.get('txHash') ?? undefined;
@@ -93,6 +128,8 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     ...(order !== undefined ? { order: order as 'asc' | 'desc' } : {}),
     ...(fromLedger !== undefined ? { fromLedger } : {}),
     ...(toLedger !== undefined ? { toLedger } : {}),
+    ...(fromTime !== undefined ? { fromTime } : {}),
+    ...(toTime !== undefined ? { toTime } : {}),
     ...(txHash !== undefined ? { txHash } : {}),
     ...(transactionIndex !== undefined ? { transactionIndex } : {}),
     ...(operationIndex !== undefined ? { operationIndex } : {}),

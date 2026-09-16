@@ -405,3 +405,60 @@ test('CORS advertises HEAD alongside GET', async () => {
     assert.match(res.headers.get('access-control-allow-methods'), /HEAD/);
   });
 });
+
+// ── #24 time-bounded queries ─────────────────────────────────────────────────
+
+test('GET /events accepts ISO-8601 time bounds', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(
+      '/events?fromTime=2026-09-15T19:22:55Z&toTime=2026-09-15T19:23:00Z&limit=1000',
+    );
+    assert.equal(res.status, 200);
+    assert.ok(body.events.length > 0);
+    for (const event of body.events) {
+      const at = Date.parse(event.ledgerClosedAt);
+      assert.ok(at >= Date.parse('2026-09-15T19:22:55Z'));
+      assert.ok(at <= Date.parse('2026-09-15T19:23:00Z'));
+    }
+  });
+});
+
+test('epoch seconds and ISO-8601 select the same events', async () => {
+  await withServer(async ({ get }) => {
+    const iso = '2026-09-15T19:22:55Z';
+    const seconds = Math.floor(Date.parse(iso) / 1000);
+    const { body: a } = await get(`/events?fromTime=${encodeURIComponent(iso)}&limit=1000`);
+    const { body: b } = await get(`/events?fromTime=${seconds}&limit=1000`);
+    assert.equal(a.total, b.total);
+    assert.deepEqual(a.events.map((e) => e.id), b.events.map((e) => e.id));
+  });
+});
+
+test('an unparseable timestamp is a 400 naming the parameter', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?fromTime=last%20tuesday');
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'fromTime');
+    assert.match(body.error.message, /ISO-8601/);
+  });
+});
+
+test('fromTime after toTime is rejected rather than returning nothing', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(
+      '/events?fromTime=2026-09-16T00:00:00Z&toTime=2026-09-15T00:00:00Z',
+    );
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'fromTime');
+  });
+});
+
+test('time bounds combine with a contract route', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get(
+      `/contracts/${SAC}/events?fromTime=2026-09-15T00:00:00Z&limit=1000`,
+    );
+    assert.equal(res.status, 200);
+    assert.ok(body.events.every((e) => e.contractId === SAC));
+  });
+});

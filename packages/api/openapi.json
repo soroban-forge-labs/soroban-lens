@@ -173,6 +173,12 @@
             "$ref": "#/components/parameters/ToLedger"
           },
           {
+            "$ref": "#/components/parameters/FromTime"
+          },
+          {
+            "$ref": "#/components/parameters/ToTime"
+          },
+          {
             "$ref": "#/components/parameters/TxHash"
           },
           {
@@ -333,6 +339,12 @@
           },
           {
             "$ref": "#/components/parameters/ToLedger"
+          },
+          {
+            "$ref": "#/components/parameters/FromTime"
+          },
+          {
+            "$ref": "#/components/parameters/ToTime"
           },
           {
             "$ref": "#/components/parameters/TxHash"
@@ -546,6 +558,26 @@
           "minimum": 0
         },
         "example": 0
+      },
+      "FromTime": {
+        "name": "fromTime",
+        "in": "query",
+        "description": "Inclusive lower bound on ledger close time. An ISO-8601 timestamp, or epoch seconds.",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "2026-09-15T19:00:00Z"
+      },
+      "ToTime": {
+        "name": "toTime",
+        "in": "query",
+        "description": "Inclusive upper bound on ledger close time. An ISO-8601 timestamp, or epoch seconds.",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "example": "2026-09-15T20:00:00Z"
       }
     },
     "responses": {

@@ -507,3 +507,70 @@ test('migrating an existing v1 database adds the index without touching rows', a
 
   await rm(dir, { recursive: true, force: true });
 });
+
+// ── #24 time-bounded queries backed by closed_at_unix ────────────────────────
+
+const unix = (iso) => Math.floor(Date.parse(iso) / 1000);
+
+test('fromTime and toTime bound a query by ledger close time', async () => {
+  const store = await seeded();
+  const from = unix('2026-09-15T19:22:55Z');
+  const to = unix('2026-09-15T19:23:00Z');
+  const page = await store.queryEvents({ fromTime: from, toTime: to, limit: MAX_QUERY_LIMIT });
+
+  assert.ok(page.events.length > 0);
+  for (const event of page.events) {
+    const at = unix(event.ledgerClosedAt);
+    assert.ok(at >= from && at <= to, `${event.ledgerClosedAt} is outside the window`);
+  }
+  await store.close();
+});
+
+test('time bounds are inclusive on both ends', async () => {
+  const store = await seeded();
+  const all = await store.queryEvents({ limit: MAX_QUERY_LIMIT });
+  const exact = unix(all.events[0].ledgerClosedAt);
+
+  // A single-second window must still contain the event that closed in it.
+  const page = await store.queryEvents({ fromTime: exact, toTime: exact, limit: MAX_QUERY_LIMIT });
+  assert.ok(page.events.some((e) => e.id === all.events[0].id));
+  await store.close();
+});
+
+test('time bounds combine with contract and topic filters', async () => {
+  const store = await seeded();
+  const page = await store.queryEvents({
+    contractId: SAC,
+    fromTime: unix('2026-09-15T00:00:00Z'),
+    limit: MAX_QUERY_LIMIT,
+  });
+  assert.ok(page.events.length > 0);
+  assert.ok(page.events.every((e) => e.contractId === SAC));
+  await store.close();
+});
+
+test('a window before anything indexed returns nothing, not everything', async () => {
+  const store = await seeded();
+  const page = await store.queryEvents({ toTime: unix('2020-01-01T00:00:00Z'), limit: 10 });
+  assert.equal(page.total, 0);
+  await store.close();
+});
+
+test('time-bounded queries use the closed_at_unix index', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+  await store.close();
+
+  const db = new DatabaseSync(path);
+  const plan = db
+    .prepare('EXPLAIN QUERY PLAN SELECT * FROM events WHERE closed_at_unix >= ? AND closed_at_unix <= ?')
+    .all(0, 9_999_999_999)
+    .map((r) => r.detail)
+    .join(' | ');
+  db.close();
+  assert.match(plan, /idx_events_closed_at_unix/, `planner chose: ${plan}`);
+
+  await rm(dir, { recursive: true, force: true });
+});

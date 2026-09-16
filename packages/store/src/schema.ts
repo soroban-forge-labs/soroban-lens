@@ -81,6 +81,17 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_events_indexed_at ON events (indexed_at DESC);
     `,
   },
+  {
+    version: 3,
+    name: 'index-closed-at-unix',
+    up: `
+      -- closed_at_unix was populated on every insert and read by nothing.
+      -- Backing fromTime/toTime with it means time bounds are an integer
+      -- comparison on an indexed column rather than string maths on
+      -- ledger_closed_at.
+      CREATE INDEX idx_events_closed_at_unix ON events (closed_at_unix, id DESC);
+    `,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.reduce(

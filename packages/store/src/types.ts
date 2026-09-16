@@ -75,6 +75,13 @@ export interface EventQuery {
   fromLedger?: number | undefined;
   /** Inclusive upper bound on ledger sequence. */
   toLedger?: number | undefined;
+  /**
+   * Inclusive lower bound on ledger close time, as seconds since the epoch.
+   * Backed by the indexed `closed_at_unix` column.
+   */
+  fromTime?: number | undefined;
+  /** Inclusive upper bound on ledger close time, as seconds since the epoch. */
+  toTime?: number | undefined;
   txHash?: string | undefined;
   /**
    * Position of the transaction within its ledger. Paired with `txHash` or a
