@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteEventStore, LATEST_SCHEMA_VERSION, MAX_QUERY_LIMIT, normaliseLimit } from '../dist/index.js';
@@ -230,12 +231,68 @@ test('stream state survives a round trip and upserts on the same key', async () 
   await store.close();
 });
 
-test('healthCheck reports a writable database', async () => {
+test('healthCheck reports schema and event count', async () => {
   const store = new SqliteEventStore({ path: ':memory:' });
   const health = await store.healthCheck();
   assert.equal(health.ok, true);
-  assert.match(health.detail, /writable, schema v1/);
+  assert.match(health.detail, /schema v1/);
   await store.close();
+});
+
+test('healthCheck does not take the write lock, so the API can serve it on every request', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const writer = new SqliteEventStore({ path });
+  await writer.insertEvents(fixture.events);
+  const reader = new SqliteEventStore({ path, migrateOnOpen: false });
+
+  // Hold the write lock the way a running indexer does mid-batch.
+  const indexer = new DatabaseSync(path);
+  indexer.exec('BEGIN IMMEDIATE');
+  indexer.exec('CREATE TABLE _lock_holder (id INTEGER)');
+
+  const startedAt = Date.now();
+  const health = await reader.healthCheck();
+  const elapsedMs = Date.now() - startedAt;
+
+  indexer.exec('ROLLBACK');
+  indexer.close();
+
+  assert.equal(health.ok, true, health.detail);
+  // busy_timeout is 5s, so anything needing the write lock would have parked
+  // on it. Returning promptly is the proof that this path is read-only.
+  assert.ok(elapsedMs < 1000, `healthCheck blocked for ${elapsedMs}ms — it took the write lock`);
+
+  await reader.close();
+  await writer.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('writeProbe reports writability and leaves no trace', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+
+  const before = await store.getStats();
+  const probe = await store.writeProbe();
+  const after = await store.getStats();
+
+  assert.equal(probe.ok, true, probe.detail);
+  assert.match(probe.detail, /writable/);
+  assert.deepEqual(after, before);
+
+  // Rolled back, not merely dropped — no DDL a concurrent reader could observe.
+  const inspector = new DatabaseSync(path);
+  const tables = inspector
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+    .all()
+    .map((r) => r.name);
+  inspector.close();
+  assert.ok(!tables.includes('_lens_write_probe'), `probe table leaked: ${tables.join(', ')}`);
+
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
 });
 
 test('data persists across reopening a file-backed database', async () => {

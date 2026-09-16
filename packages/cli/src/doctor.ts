@@ -77,7 +77,9 @@ async function checkDatabase(dbPath: string): Promise<CheckResult> {
   try {
     await mkdir(dirname(dbPath), { recursive: true });
     const store = new SqliteEventStore({ path: dbPath });
-    const health = await store.healthCheck();
+    // writeProbe, not healthCheck: doctor's whole job is catching a database
+    // that reads fine but cannot be written to before the indexer starts.
+    const health = await store.writeProbe();
     const stats = await store.getStats();
     await store.close();
 

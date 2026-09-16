@@ -258,22 +258,41 @@ export class SqliteEventStore implements EventStore {
     return rows.map((r) => ({ key: r.key, cursor: r.cursor, ledger: r.ledger, updatedAt: r.updated_at }));
   }
 
+  /** Read-only. Serves the API's `/health`, so it must not take the write lock. */
   async healthCheck(): Promise<{ ok: boolean; detail: string }> {
     try {
-      // A real write, not just a read: a read-only mount or a full disk only
-      // shows up on write, which is exactly the failure `lens doctor` exists
-      // to catch before the indexer starts.
-      this.#db.exec('CREATE TABLE IF NOT EXISTS _lens_write_probe (id INTEGER PRIMARY KEY)');
-      this.#db.exec('INSERT INTO _lens_write_probe (id) VALUES (1) ON CONFLICT DO NOTHING');
-      this.#db.exec('DROP TABLE _lens_write_probe');
       const { schemaVersion, eventCount } = await this.getStats();
       return {
         ok: schemaVersion === LATEST_SCHEMA_VERSION,
         detail:
           schemaVersion === LATEST_SCHEMA_VERSION
-            ? `writable, schema v${schemaVersion}, ${eventCount} event(s)`
+            ? `schema v${schemaVersion}, ${eventCount} event(s)`
             : `schema is v${schemaVersion}, expected v${LATEST_SCHEMA_VERSION} — run migrate()`,
       };
+    } catch (error) {
+      return { ok: false, detail: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * Writes, to prove the database is writable — a read-only mount or a full
+   * disk only shows up on write. Preflight only; `lens doctor` calls this.
+   *
+   * The probe writes inside a transaction it always rolls back, so it takes the
+   * write lock briefly but leaves no trace in the file and never runs DDL that
+   * a concurrent reader could observe half-applied.
+   */
+  async writeProbe(): Promise<{ ok: boolean; detail: string }> {
+    try {
+      this.#db.exec('BEGIN IMMEDIATE');
+      try {
+        this.#db.exec('CREATE TABLE _lens_write_probe (id INTEGER PRIMARY KEY)');
+        this.#db.exec('INSERT INTO _lens_write_probe (id) VALUES (1)');
+      } finally {
+        this.#db.exec('ROLLBACK');
+      }
+      const health = await this.healthCheck();
+      return { ok: health.ok, detail: `writable, ${health.detail}` };
     } catch (error) {
       return { ok: false, detail: error instanceof Error ? error.message : String(error) };
     }
