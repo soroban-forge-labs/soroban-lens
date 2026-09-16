@@ -2,7 +2,7 @@
   "name": "soroban-lens",
   "version": "0.1.0",
   "private": true,
-  "description": "Event indexer and explorer for Soroban smart contracts on Stellar.",
+  "description": "Event indexer and explorer for Soroban smart contracts on Stellar blockchain.",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {

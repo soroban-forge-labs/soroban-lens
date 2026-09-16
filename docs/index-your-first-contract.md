@@ -1,7 +1,7 @@
 # Index your first contract in five minutes
 
 From nothing to your contract's events on screen. Docker path first; the
-Node-only path is at the bottom.
+Node-only path is at the bottom. Updated: 2026-09-16
 
 ## What you need
 

@@ -1,6 +1,6 @@
 # Contributing to soroban-lens
 
-The repo is deliberately split so that **five people can work at once without
+The repo is deliberately split so that **multiple people can work at once without
 tripping over each other**. Most of the rules below exist to protect that.
 
 ## Module ownership map

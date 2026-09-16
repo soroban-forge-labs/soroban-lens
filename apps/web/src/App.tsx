@@ -8,7 +8,7 @@ import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { usePersistentState, usePolling, useDebounced } from './hooks.js';
 
 /** Testnet Stellar Asset Contract for native XLM — always emitting events. */
-const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC'; // XLM SAC
 const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;

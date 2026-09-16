@@ -3,7 +3,7 @@ import { Component, type ReactNode, type ErrorInfo } from 'react';
 interface ErrorBoundaryProps {
   children: ReactNode;
   fallback?: ReactNode | ((error: Error, reset: () => void) => ReactNode);
-  title?: string;
+  title?: string; // Optional error title
   onReset?: () => void;
 }
 

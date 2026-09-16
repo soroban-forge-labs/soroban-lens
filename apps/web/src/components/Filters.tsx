@@ -1,5 +1,6 @@
 import type { TopicCount } from '../types.js';
 
+// Filter state interface for event filtering
 export interface FilterState {
   contractId: string;
   topic: string;

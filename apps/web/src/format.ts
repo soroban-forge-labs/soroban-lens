@@ -2,6 +2,7 @@ import type { DecodedValue } from './types.js';
 
 /** Shorten a contract id or hash for table display: "CDLZFC3S…U2HHGCYSC". */
 export function truncate(value: string, head = 8, tail = 8): string {
+  // Show full string if it's short enough, otherwise truncate with ellipsis
   return value.length <= head + tail + 1 ? value : `${value.slice(0, head)}…${value.slice(-tail)}`;
 }
 
