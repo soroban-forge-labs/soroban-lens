@@ -44,6 +44,25 @@ body {
   clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 
+.error-boundary-card {
+  padding: 16px;
+  margin: 12px 0;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius);
+}
+.error-boundary-header h3 {
+  margin: 0 0 6px;
+  color: var(--error);
+  font-size: 15px;
+}
+.error-boundary-msg {
+  margin: 0 0 12px;
+  color: var(--warn-text);
+  font-size: 13px;
+}
+
+
 /* ---------- status bar ---------- */
 
 .status-bar {
