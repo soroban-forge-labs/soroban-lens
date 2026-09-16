@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, chmod } from 'node:fs/promises';
+import { mkdtemp, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteEventStore } from '@soroban-lens/store';
@@ -233,4 +233,35 @@ test('doctor reports header names without their values', async () => {
   assert.ok(!text.includes(secret), 'doctor leaked a header value into its report');
   assert.match(text, /RPC headers/);
   assert.match(text, /Authorization: <redacted>/);
+});
+
+// ── #21 lens prune ───────────────────────────────────────────────────────────
+
+test('prune removes rows below the ledger and shrinks the database', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-prune-'));
+  const dbPath = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path: dbPath });
+  const many = Array.from({ length: 8000 }, (_, i) => ({
+    id: `p-${String(i).padStart(6, '0')}`,
+    type: 'contract',
+    ledger: 1000 + i,
+    ledgerClosedAt: '2026-01-01T00:00:00Z',
+    contractId: SAC,
+    topic: ['AAAADwAAAAh0cmFuc2Zlcg=='],
+    value: 'AAAACgAAAAAAAAAAAAAAAAAAAGQ=',
+    txHash: 'a'.repeat(64),
+    transactionIndex: 0,
+    operationIndex: 0,
+    inSuccessfulContractCall: true,
+  }));
+  await store.insertEvents(many);
+  const before = await store.getStats();
+  const removed = await store.pruneBefore(8900);
+  const after = await store.getStats();
+  await store.close();
+
+  assert.equal(removed, 7900);
+  assert.equal(after.eventCount, 100);
+  assert.ok(after.sizeBytes < before.sizeBytes);
+  await rm(dir, { recursive: true, force: true });
 });

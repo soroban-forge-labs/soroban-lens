@@ -342,6 +342,44 @@ export class SqliteEventStore implements EventStore {
     }
   }
 
+  async pruneBefore(ledger: number): Promise<number> {
+    // A separate count-then-delete rather than reading `changes` off the
+    // DELETE: `changes` after a DELETE is exact too, but a second statement
+    // that only counts what will go lets us log or reject a huge prune before
+    // it happens if we ever want to; today it just returns the number.
+    const before = (this.#db.prepare('SELECT COUNT(*) AS n FROM events WHERE ledger < ?').get(ledger) as {
+      n: number;
+    }).n;
+    if (before === 0) return 0;
+
+    this.#db.exec('BEGIN');
+    try {
+      this.#db.prepare('DELETE FROM events WHERE ledger < ?').run(ledger);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+
+    // VACUUM cannot run inside a transaction and reclaims the space the
+    // deleted rows held — without it the file never shrinks, which defeats
+    // the entire point of pruning for disk usage. It takes an exclusive lock
+    // and rewrites the whole file, so it is deliberately synchronous with the
+    // delete rather than deferred: a caller running `lens prune` wants the
+    // file smaller when the command returns, not eventually.
+    //
+    // In WAL mode VACUUM writes its result through the WAL rather than
+    // truncating the main file directly — the file on disk does not actually
+    // shrink until a checkpoint flushes and truncates that WAL, so both run
+    // together here.
+    if (this.#path !== ':memory:') {
+      this.#db.exec('VACUUM');
+      this.#db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    }
+
+    return before;
+  }
+
   async close(): Promise<void> {
     this.#db.close();
   }

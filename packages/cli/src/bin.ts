@@ -23,6 +23,7 @@ Usage:
   lens index  [options]              Run the indexer (ingest -> decode -> store).
   lens seed   [--fixture <path>]     Load a captured getEvents response into the database.
   lens stats  [options]              Print database statistics.
+  lens prune --before-ledger <n>     Delete events below a ledger and reclaim disk space.
   lens completion [bash|zsh|fish]    Generate shell auto-completion script.
 
 
@@ -43,6 +44,7 @@ Options:
       --once              index: stop once caught up to the network tip.
       --max-events <n>    index: stop after this many events.
       --fixture <path>    seed: file to load (default fixtures/testnet-events.json).
+      --before-ledger <n> prune: delete events with ledger below this.
   -h, --help              Show this help.
 
 Examples:
@@ -73,6 +75,7 @@ async function main(argv: string[]): Promise<number> {
       once: { type: 'boolean' },
       'max-events': { type: 'string' },
       fixture: { type: 'string' },
+      'before-ledger': { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: false,
@@ -164,6 +167,32 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'prune': {
+      const raw = values['before-ledger'];
+      if (raw === undefined) {
+        process.stderr.write('error: prune requires --before-ledger <n>\n');
+        return 2;
+      }
+      const beforeLedger = Number(raw);
+      if (!Number.isFinite(beforeLedger) || beforeLedger < 0) {
+        process.stderr.write(`error: --before-ledger must be a non-negative number, got "${raw}"\n`);
+        return 2;
+      }
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        const before = await store.getStats();
+        const removed = await store.pruneBefore(beforeLedger);
+        const after = await store.getStats();
+        process.stderr.write(
+          `[lens] pruned ${removed} event(s) below ledger ${beforeLedger} ` +
+            `(${before.sizeBytes ?? '?'} -> ${after.sizeBytes ?? '?'} bytes)\n`,
+        );
+      } finally {
+        await store.close();
+      }
+      return 0;
+    }
+
     case 'completion': {
       const shell = rest[0] || 'bash';
       process.stdout.write(`${generateCompletion(shell)}\n`);
@@ -183,8 +212,8 @@ function generateCompletion(shell: string): string {
   local cur prev commands options
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="doctor index seed stats completion"
-  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --poll-interval --once --max-events --fixture -h --help"
+  commands="doctor index seed stats prune completion"
+  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --poll-interval --once --max-events --fixture --before-ledger -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -217,6 +246,7 @@ _lens() {
     'index:Run the indexer pipeline'
     'seed:Load testnet events fixture'
     'stats:Print database statistics'
+    'prune:Delete events below a ledger'
     'completion:Generate shell autocompletions'
   )
   _arguments '1: :->command' '*: :->args'
@@ -232,6 +262,7 @@ complete -c lens -n "__fish_use_subcommand" -a doctor -d "Preflight checks"
 complete -c lens -n "__fish_use_subcommand" -a index -d "Run the indexer pipeline"
 complete -c lens -n "__fish_use_subcommand" -a seed -d "Load testnet events fixture"
 complete -c lens -n "__fish_use_subcommand" -a stats -d "Print database statistics"
+complete -c lens -n "__fish_use_subcommand" -a prune -d "Delete events below a ledger"
 complete -c lens -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c lens -l network -s n -x -a "testnet mainnet futurenet"
 complete -c lens -l help -s h -d "Show help"`;

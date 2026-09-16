@@ -641,3 +641,61 @@ test('a store built with no log option stays silent, unchanged from before this 
   const store = new SqliteEventStore({ path: ':memory:' });
   await store.close();
 });
+
+// ── #21 prune command and retention policy ───────────────────────────────────
+
+test('pruneBefore removes rows below the threshold and leaves the rest', async () => {
+  const store = await seeded();
+  const removed = await store.pruneBefore(4695319);
+  const remaining = await store.queryEvents({ limit: MAX_QUERY_LIMIT });
+
+  assert.ok(removed > 0);
+  assert.ok(remaining.events.every((e) => e.ledger >= 4695319));
+  assert.equal(remaining.total, fixture.events.filter((e) => e.ledger >= 4695319).length);
+  await store.close();
+});
+
+test('pruneBefore returns 0 and touches nothing when there is nothing below the threshold', async () => {
+  const store = await seeded();
+  const before = await store.getStats();
+  const removed = await store.pruneBefore(0);
+  const after = await store.getStats();
+
+  assert.equal(removed, 0);
+  assert.equal(after.eventCount, before.eventCount);
+  await store.close();
+});
+
+test('pruneBefore reduces the file size on disk', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+
+  // The 60-event fixture fits in SQLite's minimum single page (4096 bytes),
+  // so shrinking is only observable with enough rows to span several pages.
+  const many = Array.from({ length: 5000 }, (_, i) => ({
+    ...fixture.events[i % fixture.events.length],
+    id: `synthetic-${String(i).padStart(6, '0')}`,
+    ledger: 4695317 + i,
+    txHash: 'a'.repeat(64),
+  }));
+  await store.insertEvents(many);
+  const before = await store.getStats();
+
+  const removed = await store.pruneBefore(4695317 + 4900); // keep the last 100
+  const after = await store.getStats();
+
+  assert.equal(removed, 4900);
+  assert.ok(after.sizeBytes < before.sizeBytes, `expected shrink: ${before.sizeBytes} -> ${after.sizeBytes}`);
+  await store.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('pruneBefore does not touch stream_state — the cursor is independent of what rows remain', async () => {
+  const store = await seeded();
+  await store.saveStreamState({ key: 'k', cursor: 'abc', ledger: 4695317, updatedAt: '2026-01-01T00:00:00Z' });
+  await store.pruneBefore(4695324);
+  const state = await store.loadStreamState('k');
+  assert.deepEqual(state, { key: 'k', cursor: 'abc', ledger: 4695317, updatedAt: '2026-01-01T00:00:00Z' });
+  await store.close();
+});

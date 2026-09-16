@@ -76,6 +76,15 @@ export interface EventStore {
    */
   writeProbe(): Promise<{ ok: boolean; detail: string }>;
 
+  /**
+   * Delete every event with `ledger < before`, returning the row count removed.
+   *
+   * Does not touch `stream_state`: pruning is about disk, not about where the
+   * indexer resumes from, and the two must stay independent — a pruned
+   * database is still a valid place to keep polling forward from.
+   */
+  pruneBefore(ledger: number): Promise<number>;
+
   close(): Promise<void>;
 }
 
