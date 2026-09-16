@@ -1,3 +1,7 @@
+const BUCKETS = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30];
+type RpcMethod = 'getHealth' | 'getLatestLedger' | 'getEvents';
+type Histogram = { count: number; sum: number; buckets: number[] };
+
 /** Process-local metrics; event counts include at-least-once replay. */
 export class IngestMetrics {
   #events = 0;
@@ -5,6 +9,19 @@ export class IngestMetrics {
   #ledger = 0;
   #latest = 0;
   #ready = false;
+  #durations = new Map<RpcMethod, Histogram>();
+
+  rpcDuration(method: RpcMethod, seconds: number): void {
+    const h = this.#durations.get(method) ?? {
+      count: 0, sum: 0, buckets: BUCKETS.map(() => 0),
+    };
+    h.count++;
+    h.sum += seconds;
+    BUCKETS.forEach((bound, i) => {
+      if (seconds <= bound) h.buckets[i] = (h.buckets[i] ?? 0) + 1;
+    });
+    this.#durations.set(method, h);
+  }
 
   eventsIngested(count: number): void { this.#events += count; }
   cursorRestarted(): void { this.#restarts++; }
@@ -31,6 +48,15 @@ export class IngestMetrics {
       '# HELP lens_metrics_ready Whether a page has been acknowledged.',
       '# TYPE lens_metrics_ready gauge',
       `lens_metrics_ready ${Number(this.#ready)}`,
+      '# HELP lens_rpc_request_duration_seconds RPC attempt duration excluding retry waits.',
+      '# TYPE lens_rpc_request_duration_seconds histogram',
+      ...[...this.#durations].sort(([a], [b]) => a.localeCompare(b)).flatMap(([method, h]) => [
+        ...BUCKETS.map((bound, i) =>
+          `lens_rpc_request_duration_seconds_bucket{method="${method}",le="${bound}"} ${h.buckets[i]}`),
+        `lens_rpc_request_duration_seconds_bucket{method="${method}",le="+Inf"} ${h.count}`,
+        `lens_rpc_request_duration_seconds_sum{method="${method}"} ${h.sum}`,
+        `lens_rpc_request_duration_seconds_count{method="${method}"} ${h.count}`,
+      ]),
       '',
     ].join('\n');
   }
