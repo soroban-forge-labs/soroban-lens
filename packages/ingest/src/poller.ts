@@ -48,7 +48,6 @@ export class EventPoller {
     this.#sleep = deps.sleep ?? defaultSleep;
     this.#signal = deps.signal;
     this.#log = deps.log ?? (() => {});
-    this.#options = options;
   }
 
   get cursorKey(): string {

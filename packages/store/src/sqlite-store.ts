@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { decodeEvent, topicKey } from './decode.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
-import { DEFAULT_QUERY_LIMIT, normaliseLimit, type EventStore } from './store.js';
+import { normaliseLimit, type EventStore } from './store.js';
 import type {
   ContractSummary,
   DecodedValue,
@@ -132,7 +132,7 @@ export class SqliteEventStore implements EventStore {
   async queryEvents(query: EventQuery): Promise<EventPage> {
     const limit = normaliseLimit(query.limit);
     const order = query.order === 'asc' ? 'ASC' : 'DESC';
-    const { where, params } = buildWhere(query);
+    const where = buildWhere(query);
 
     const totalRow = this.#db
       .prepare(`SELECT COUNT(*) AS n FROM events ${where.clause}`)
@@ -152,7 +152,6 @@ export class SqliteEventStore implements EventStore {
 
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
-    void params;
 
     return {
       events: page.map(rowToEvent),
@@ -404,10 +403,7 @@ function rowToEvent(row: EventRow): LensEvent {
 }
 
 /** Build the WHERE clause for a query. All conditions are ANDed. */
-function buildWhere(query: EventQuery): {
-  where: { clause: string; values: SqlParam[] };
-  params: EventQuery;
-} {
+function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
   const conditions: string[] = [];
   const values: SqlParam[] = [];
 
@@ -444,11 +440,8 @@ function buildWhere(query: EventQuery): {
   });
 
   return {
-    where: {
-      clause: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '',
-      values,
-    },
-    params: { ...query, limit: query.limit ?? DEFAULT_QUERY_LIMIT },
+    clause: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '',
+    values,
   };
 }
 
