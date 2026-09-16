@@ -33,5 +33,12 @@ export {
   InvalidContractIdError,
 } from './contract-id.js';
 
-export { withRetry, backoffDelay, sleep, RetryExhaustedError } from './retry.js';
+export {
+  withRetry,
+  backoffDelay,
+  sleep,
+  retryAfterMs,
+  MAX_RETRY_AFTER_MS,
+  RetryExhaustedError,
+} from './retry.js';
 export type { RetryOptions } from './retry.js';
