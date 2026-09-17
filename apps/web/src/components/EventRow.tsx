@@ -1,15 +1,16 @@
 import { useState } from 'react';
 import type { LensEvent } from '../types.js';
-import { prettyJson, relativeTime, summarise, topicPath, truncate } from '../format.js';
+import { explorerUrl, prettyJson, relativeTime, summarise, topicPath, truncate } from '../format.js';
 
 interface Props {
   event: LensEvent;
   showContract: boolean;
   onTopicClick: (topic: string) => void;
+  network: string;
 }
 
 /** One table row, expanding in place to show the full decoded payload. */
-export function EventRow({ event, showContract, onTopicClick }: Props): React.JSX.Element {
+export function EventRow({ event, showContract, onTopicClick, network }: Props): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const firstTopic = event.topics[0];
   const topicLabel = firstTopic ? summarise(firstTopic) : '—';
@@ -53,7 +54,11 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
           <span className="type-tag">{event.value.type}</span>
           <span className="mono">{summarise(event.value)}</span>
         </td>
-        <td className="col-tx mono" title={event.txHash}>{truncate(event.txHash, 6, 6)}</td>
+        <td className="col-tx mono" title={event.txHash}>
+          <a href={explorerUrl(network, 'tx', event.txHash)} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+            {truncate(event.txHash, 6, 6)}
+          </a>
+        </td>
       </tr>
 
       {expanded && (
@@ -70,7 +75,7 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
 
               <dl className="detail-meta">
                 <div><dt>Event id</dt><dd className="mono">{event.id}</dd></div>
-                <div><dt>Contract</dt><dd className="mono">{event.contractId}</dd></div>
+                <div><dt>Contract</dt><dd className="mono"><a href={explorerUrl(network, 'contract', event.contractId)} target="_blank" rel="noreferrer">{event.contractId}</a></dd></div>
                 <div><dt>Ledger</dt><dd className="mono">{event.ledger}</dd></div>
                 <div><dt>Closed at</dt><dd className="mono">{event.ledgerClosedAt}</dd></div>
                 <div><dt>Transaction</dt><dd className="mono">{event.txHash}</dd></div>

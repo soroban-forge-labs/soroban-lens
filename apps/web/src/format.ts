@@ -6,6 +6,13 @@ export function truncate(value: string, head = 8, tail = 8): string {
   return value.length <= head + tail + 1 ? value : `${value.slice(0, head)}…${value.slice(-tail)}`;
 }
 
+/** Return a public Stellar Expert URL, or undefined for an unknown network. */
+export function explorerUrl(network: string, kind: 'tx' | 'contract', id: string): string | undefined {
+  const segments: Record<string, string> = { testnet: 'testnet', mainnet: 'public', futurenet: 'futurenet' };
+  const segment = segments[network.toLowerCase()];
+  return segment && id ? `https://stellar.expert/explorer/${segment}/${kind}/${encodeURIComponent(id)}` : undefined;
+}
+
 /**
  * One-line summary of a decoded value, for the collapsed table row.
  * Structured values are summarised by shape rather than dumped, so a row stays

@@ -244,6 +244,7 @@ export function App(): React.JSX.Element {
           showContract={showContract}
           loading={loading}
           onTopicClick={(topic) => setFilters({ ...filters, topic })}
+          network={selected.label}
           emptyMessage={
             health && health.events === 0
               ? 'Nothing indexed yet. Start the indexer, or load the fixture with `npm run seed`.'
