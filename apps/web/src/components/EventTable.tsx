@@ -8,10 +8,11 @@ interface Props {
   onTopicClick: (topic: string) => void;
   loading: boolean;
   emptyMessage: string;
+  network: string;
 }
 
 export function EventTable({
-  events, showContract, onTopicClick, loading, emptyMessage,
+  events, showContract, onTopicClick, loading, emptyMessage, network,
 }: Props): React.JSX.Element {
   if (events.length === 0) {
     return (
@@ -40,6 +41,7 @@ export function EventTable({
             event={event}
             showContract={showContract}
             onTopicClick={onTopicClick}
+            network={network}
           />
         ))}
       </tbody>
