@@ -12,6 +12,7 @@ import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
 import { normaliseLimit, type EventStore } from './store.js';
 import type {
+  ContractSpecRecord,
   ContractSummary,
   DecodedValue,
   EventPage,
@@ -449,6 +450,46 @@ export class SqliteEventStore implements EventStore {
       schemaVersion: version.v,
       ...this.#sizes(),
     };
+  }
+
+  async saveContractSpec(record: ContractSpecRecord): Promise<void> {
+    this.#db
+      .prepare(
+        `INSERT INTO contract_specs (contract_id, source, wasm_hash, entries_xdr, event_count, error, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(contract_id) DO UPDATE SET source = excluded.source,
+                                                wasm_hash = excluded.wasm_hash,
+                                                entries_xdr = excluded.entries_xdr,
+                                                event_count = excluded.event_count,
+                                                error = excluded.error,
+                                                fetched_at = excluded.fetched_at`,
+      )
+      .run(
+        record.contractId,
+        record.source,
+        record.wasmHash ?? null,
+        JSON.stringify(record.entriesXdr),
+        record.eventCount,
+        record.error ?? null,
+        record.fetchedAt,
+      );
+  }
+
+  async getContractSpec(contractId: string): Promise<ContractSpecRecord | null> {
+    const row = this.#db.prepare('SELECT * FROM contract_specs WHERE contract_id = ?').get(contractId) as
+      | SpecRow
+      | undefined;
+    return row ? { ...specSummary(row), entriesXdr: JSON.parse(row.entries_xdr) as string[] } : null;
+  }
+
+  async listContractSpecs(): Promise<Omit<ContractSpecRecord, 'entriesXdr'>[]> {
+    const rows = this.#db
+      .prepare(
+        `SELECT contract_id, source, wasm_hash, event_count, error, fetched_at
+         FROM contract_specs ORDER BY contract_id`,
+      )
+      .all() as Omit<SpecRow, 'entries_xdr'>[];
+    return rows.map(specSummary);
   }
 
   async saveStreamState(state: StreamState): Promise<void> {
@@ -1042,4 +1083,25 @@ function fileSize(path: string): number | null {
   } catch {
     return null;
   }
+}
+
+interface SpecRow {
+  contract_id: string;
+  source: ContractSpecRecord['source'];
+  wasm_hash: string | null;
+  entries_xdr: string;
+  event_count: number;
+  error: string | null;
+  fetched_at: string;
+}
+
+function specSummary(row: Omit<SpecRow, 'entries_xdr'>): Omit<ContractSpecRecord, 'entriesXdr'> {
+  return {
+    contractId: row.contract_id,
+    source: row.source,
+    ...(row.wasm_hash !== null ? { wasmHash: row.wasm_hash } : {}),
+    eventCount: row.event_count,
+    ...(row.error !== null ? { error: row.error } : {}),
+    fetchedAt: row.fetched_at,
+  };
 }

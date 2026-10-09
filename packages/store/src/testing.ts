@@ -220,6 +220,28 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] contract specs round-trip, upsert, and list without their entries`, async () => {
+    const store = await createStore();
+    const id = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+    assert.equal(await store.getContractSpec(id), null);
+    await store.saveContractSpec({
+      contractId: id, source: 'none', entriesXdr: [], eventCount: 0,
+      error: 'contract instance not found', fetchedAt: '2026-01-01T00:00:00Z',
+    });
+    await store.saveContractSpec({
+      contractId: id, source: 'wasm', wasmHash: 'ab'.repeat(32), entriesXdr: ['AAAA', 'BBBB'],
+      eventCount: 2, fetchedAt: '2026-01-02T00:00:00Z',
+    });
+    const loaded = await store.getContractSpec(id);
+    assert.equal(loaded?.source, 'wasm', 'the second save must overwrite, not add a row');
+    assert.deepEqual(loaded?.entriesXdr, ['AAAA', 'BBBB']);
+    assert.equal(loaded?.error, undefined, 'a successful refresh clears the old error');
+    const all = await store.listContractSpecs();
+    assert.equal(all.length, 1);
+    assert.ok(!('entriesXdr' in all[0]!), 'the listing must not carry the (large) entries');
+    await store.close();
+  });
+
   test(`[${name}] checkIntegrity reports nothing on a freshly-inserted store`, async () => {
     const store = await seeded();
     assert.deepEqual(await store.checkIntegrity(), []);

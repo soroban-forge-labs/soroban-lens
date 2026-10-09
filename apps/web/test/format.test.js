@@ -99,3 +99,30 @@ test('relativeTime falls back to the raw value it cannot parse', () => {
 test('prettyJson indents for the expanded row', () => {
   assert.equal(prettyJson({ a: 1 }), '{\n  "a": 1\n}');
 });
+
+test('summariseTyped shows the data fields by name, not the topics', async () => {
+  const { summariseTyped } = await import('../.test-build/format.js');
+  const typed = {
+    name: 'transfer',
+    source: 'stellar-asset',
+    fields: [
+      { name: 'from', type: 'Address', location: 'topic', value: 'GBYRNL77SLMBVGJLFYVWB762E7ZJJVSGEDOU626FPOCGOMPG776JQHHT' },
+      { name: 'amount', type: 'i128', location: 'data', value: '11000000' },
+    ],
+  };
+  assert.equal(summariseTyped(typed), 'amount=11000000');
+});
+
+test('summariseTyped falls back to topic fields when there is no data, and stays one line', async () => {
+  const { summariseTyped } = await import('../.test-build/format.js');
+  assert.equal(
+    summariseTyped({ name: 'x', source: 'wasm', fields: [{ name: 'user', type: 'Address', location: 'topic', value: 'GABC' }] }),
+    'user=GABC',
+  );
+  const long = summariseTyped({
+    name: 'x', source: 'wasm',
+    fields: Array.from({ length: 10 }, (_, i) => ({ name: `field${i}`, type: 'u32', location: 'data', value: 123456 })),
+  });
+  assert.ok(long.length <= 80);
+  assert.ok(long.endsWith('…'));
+});

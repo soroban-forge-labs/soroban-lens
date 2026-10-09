@@ -24,6 +24,7 @@ curl "localhost:8080/contracts/CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2
 | `GET /contracts` | Indexed contracts, most recently active first. |
 | `GET /contracts/{id}/events` | Events for one contract. |
 | `GET /contracts/{id}/topics` | Distinct first-topic values, ranked by frequency. |
+| `GET /contracts/{id}/spec` | Where the contract's spec came from and which events it declares. `404` before any lookup. |
 | `GET /events` | Events across all contracts. |
 | `GET /events/{id}` | One event by RPC event id. |
 | `GET /openapi.json` | The spec below, served from disk. |
@@ -31,6 +32,13 @@ curl "localhost:8080/contracts/CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2
 Query parameters on the two event-list routes: `limit` (1–1000, default 50),
 `cursor`, `order` (`asc`/`desc`), `topic` (repeatable), `fromLedger`,
 `toLedger`, `txHash`, `successfulOnly`.
+
+Every event-returning route adds a `typed` field to events whose contract has
+a spec and whose shape matches one of its declared events — the event's name
+and its named, typed fields. It sits next to the generic `topics`/`value`,
+never in place of them, and is simply absent otherwise. Typed views are
+computed at read time from the stored raw XDR, so a spec fetched today applies
+to events indexed last week.
 
 ## OpenAPI
 

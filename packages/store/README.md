@@ -78,6 +78,27 @@ stored with `decodeError` set and its raw XDR intact, so it can be re-decoded
 after a decoder fix without re-indexing from the network — which matters,
 because the network will not have it any more.
 
+## Typed decoding (#33)
+
+`ContractTypedDecoder` reads an event through its contract's SEP-48 event
+spec: `{ name: 'transfer', fields: [{ name: 'amount', type: 'i128', location:
+'data', value: '100' }, …] }`. Matching is the SDK's `Spec.parseEvent`; what
+this adds is each field's declared type, which parseEvent does not return.
+
+Specs are stored per contract (`contract_specs`, migration 6) as raw base64
+`ScSpecEntry` XDR, and the typed view is computed at read time, never written
+into the event row. Same reasoning as keeping raw event XDR: a better decoder
+applies to old rows with no migration and no re-fetch.
+
+Stellar Asset Contracts have no Wasm, so `STELLAR_ASSET_SPEC_ENTRIES` writes
+their spec out by hand. Declaration order matters there: the pre-protocol-23
+`mint`/`clawback` carried an extra admin topic, and a spec matches on a
+*minimum* topic count, so the legacy four-topic shapes come first.
+
+`SpecCache` holds parsed decoders per contract with a TTL, misses included —
+most contracts have no spec, and asking the store again for every row would
+cost more than the decode.
+
 ## Schema notes
 
 `events` keeps the full decoded topic array in `topics_json`, *plus* scalar

@@ -61,6 +61,56 @@ export interface LensEvent {
   indexedAt: string;
 }
 
+/** One named, typed field of a spec-decoded event (#33). */
+export interface TypedField {
+  /** Parameter name as declared in the contract's event spec. */
+  name: string;
+  /** Declared type, as the contract author wrote it: `i128`, `Address`, `Option<u64>`, a UDT's name. */
+  type: string;
+  /** Whether the value was carried in a topic (indexed) or in the event data. */
+  location: 'topic' | 'data';
+  /** JSON-safe value, with the same conventions as `DecodedValue.value`. */
+  value: JsonValue;
+}
+
+/**
+ * An event read through its contract's spec: `transfer { from, to, amount }`
+ * rather than a symbol, two addresses and an i128. Additional to the generic
+ * decoding, never a replacement for it.
+ */
+export interface TypedEvent {
+  /** The matched event's declared name. */
+  name: string;
+  /** Where the spec came from: the contract's own Wasm, or the built-in Stellar Asset Contract spec. */
+  source: 'wasm' | 'stellar-asset';
+  fields: TypedField[];
+}
+
+/**
+ * What is known about one contract's spec. Stored per contract so the indexer
+ * fetches it once rather than per event, and so a contract with no spec is
+ * remembered as such instead of being asked about again on every batch.
+ */
+export interface ContractSpecRecord {
+  contractId: string;
+  /**
+   * `wasm` — entries read from the contract's own Wasm.
+   * `stellar-asset` — a Stellar Asset Contract; the built-in spec applies and no entries are stored.
+   * `none` — looked up and nothing usable found; `error` says why.
+   */
+  source: 'wasm' | 'stellar-asset' | 'none';
+  /** Hex hash of the Wasm the entries were read from, so an upgrade is detectable. */
+  wasmHash?: string | undefined;
+  /** Base64 XDR `ScSpecEntry` values. Empty unless `source` is `wasm`. */
+  entriesXdr: string[];
+  /** How many SEP-48 events the spec declares — zero means nothing will ever match. */
+  eventCount: number;
+  /** Why the lookup produced nothing, when `source` is `none`. */
+  error?: string | undefined;
+  /** ISO 8601. */
+  fetchedAt: string;
+}
+
 /** Filter for `EventStore.queryEvents`. All fields are ANDed. */
 export interface EventQuery {
   contractId?: string | undefined;

@@ -14,6 +14,9 @@ export type {
   ContractSummary,
   StreamState,
   StoreStats,
+  ContractSpecRecord,
+  TypedEvent,
+  TypedField,
 } from './types.js';
 
 export type { EventStore } from './store.js';
@@ -29,6 +32,13 @@ export { SqliteEventStore, INDEXED_TOPIC_DEPTH } from './sqlite-store.js';
 export type { SqliteStoreOptions } from './sqlite-store.js';
 
 export { decodeEvent, decodeScVal, toJsonSafe, scValTypeName, topicKey, extractAddresses } from './decode.js';
+export {
+  ContractTypedDecoder,
+  SpecCache,
+  STELLAR_ASSET_SPEC_ENTRIES,
+  specEntriesFromWasm,
+  typeName,
+} from './spec.js';
 export { compressXdrColumn, decompressXdrColumn, encodeXdrColumn } from './xdr-compression.js';
 export { runEventStoreSuite } from './testing.js';
 export type { EventStoreSuiteOptions } from './testing.js';

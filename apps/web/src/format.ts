@@ -1,4 +1,4 @@
-import type { DecodedValue } from './types.js';
+import type { DecodedValue, TypedEvent } from './types.js';
 
 /** Shorten a contract id or hash for table display: "CDLZFC3S…U2HHGCYSC". */
 export function truncate(value: string, head = 8, tail = 8): string {
@@ -18,6 +18,21 @@ export function summarise(decoded: DecodedValue): string {
   if (typeof value === 'object') return `${type}{${Object.keys(value).length}}`;
   const text = String(value);
   return text.length > 60 ? `${text.slice(0, 57)}…` : text;
+}
+
+/**
+ * One-line summary of a typed event's data fields, for the collapsed row:
+ * "amount=11000000". Topic fields are left out — the topic column already
+ * shows the event, and the data is what a reader scans the column for.
+ * Falls back to every field when the event carries no data fields at all.
+ */
+export function summariseTyped(typed: TypedEvent): string {
+  const data = typed.fields.filter((f) => f.location === 'data');
+  const fields = data.length > 0 ? data : typed.fields;
+  const text = fields
+    .map((f) => `${f.name}=${summarise({ type: f.type, value: f.value })}`)
+    .join(', ');
+  return text.length > 80 ? `${text.slice(0, 77)}…` : text;
 }
 
 /** Topic list rendered as a compact path: "transfer / GABC…XYZ". */

@@ -269,6 +269,49 @@
         }
       }
     },
+    "/contracts/{contractId}/spec": {
+      "get": {
+        "tags": [
+          "contracts"
+        ],
+        "summary": "What typed decoding knows about a contract",
+        "description": "Where the contract's spec came from \u2014 its own Wasm, or the built-in Stellar Asset Contract spec \u2014 and which SEP-48 events it declares. Events from a contract with a spec carry a `typed` view alongside the generic decoding. Returns 404 when no lookup has been made yet; a lookup that found nothing is a 200 with `source: \"none\"` and the reason in `error`.",
+        "operationId": "getContractSpec",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContractId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Spec summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractSpec"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "description": "No spec lookup has been made for this contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/contracts/{contractId}/topics": {
       "get": {
         "tags": [
@@ -826,6 +869,9 @@
             "type": "string",
             "description": "Original base64 XDR value."
           },
+          "typed": {
+            "$ref": "#/components/schemas/TypedEvent"
+          },
           "decodeError": {
             "type": "string",
             "description": "Present only when decoding failed. The raw XDR fields remain valid."
@@ -833,6 +879,157 @@
           "indexedAt": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "TypedEvent": {
+        "type": "object",
+        "description": "The event read through its contract's spec (SEP-48): a declared name and named, typed fields. Present only when the contract has a spec and the event matches one of its declared events; the generic `topics`/`value` decoding is always present regardless.",
+        "required": [
+          "name",
+          "source",
+          "fields"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "examples": [
+              "transfer"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "wasm",
+              "stellar-asset"
+            ],
+            "description": "`wasm`: the contract's own spec. `stellar-asset`: the built-in Stellar Asset Contract spec (CAP-46-6, CAP-67)."
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "type",
+                "location",
+                "value"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "examples": [
+                    "amount"
+                  ]
+                },
+                "type": {
+                  "type": "string",
+                  "description": "Declared type, as written in the contract: `i128`, `Address`, `Option<u64>`, `Vec<Address>`, or a user-defined type's name.",
+                  "examples": [
+                    "i128",
+                    "Address"
+                  ]
+                },
+                "location": {
+                  "type": "string",
+                  "enum": [
+                    "topic",
+                    "data"
+                  ],
+                  "description": "Carried in a topic (indexed) or in the event data."
+                },
+                "value": {
+                  "description": "JSON-safe value, with the same conventions as DecodedValue: large integers are decimal strings, bytes are hex."
+                }
+              }
+            }
+          }
+        },
+        "examples": [
+          {
+            "name": "transfer",
+            "source": "stellar-asset",
+            "fields": [
+              {
+                "name": "from",
+                "type": "Address",
+                "location": "topic",
+                "value": "GBYRNL77SLMBVGJLFYVWB762E7ZJJVSGEDOU626FPOCGOMPG776JQHHT"
+              },
+              {
+                "name": "to",
+                "type": "Address",
+                "location": "topic",
+                "value": "GDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB5GSA"
+              },
+              {
+                "name": "sep0011_asset",
+                "type": "String",
+                "location": "topic",
+                "value": "native"
+              },
+              {
+                "name": "amount",
+                "type": "i128",
+                "location": "data",
+                "value": "11000000"
+              }
+            ]
+          }
+        ]
+      },
+      "ContractSpec": {
+        "type": "object",
+        "required": [
+          "contractId",
+          "source",
+          "eventCount",
+          "fetchedAt",
+          "events"
+        ],
+        "properties": {
+          "contractId": {
+            "$ref": "#/components/schemas/ContractIdString"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "wasm",
+              "stellar-asset",
+              "none"
+            ]
+          },
+          "wasmHash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "SHA-256 of the Wasm the spec was read from."
+          },
+          "eventCount": {
+            "type": "integer",
+            "description": "Event declarations in the spec. Zero means no event will ever have a typed view \u2014 typically a contract built before soroban-sdk 23."
+          },
+          "error": {
+            "type": "string",
+            "description": "Why nothing usable was found, when `source` is `none`."
+          },
+          "fetchedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Declared event names, without duplicates.",
+            "examples": [
+              [
+                "transfer",
+                "approve",
+                "mint",
+                "burn"
+              ]
+            ]
           }
         }
       },

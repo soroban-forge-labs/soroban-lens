@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "@soroban-lens/ingest": "*",
-    "@soroban-lens/store": "*"
+    "@soroban-lens/store": "*",
+    "@stellar/stellar-sdk": "^17.1.0"
   },
   "devDependencies": { "typescript": "^7.0.2", "@types/node": "^26.5.1" }
 }

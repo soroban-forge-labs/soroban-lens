@@ -995,3 +995,69 @@ test('a request_failed (5xx) log record carries the same id as the error body', 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ── #33 typed decoding ────────────────────────────────────────────────────────
+
+const specFixture = JSON.parse(
+  readFileSync(new URL('../../../fixtures/testnet-specs.json', import.meta.url), 'utf8'),
+).specs;
+
+async function withSpecs(run) {
+  await withServer(async (ctx) => {
+    for (const record of specFixture) await ctx.store.saveContractSpec(record);
+    await run(ctx);
+  });
+}
+
+test('events from a contract with a spec carry a typed view next to the generic decoding', async () => {
+  await withSpecs(async ({ get }) => {
+    const { body } = await get(`/contracts/${SAC}/events?topic=transfer&limit=1`);
+    const [event] = body.events;
+    assert.equal(event.typed.name, 'transfer');
+    assert.equal(event.typed.source, 'stellar-asset');
+    assert.deepEqual(event.typed.fields.map((f) => f.name), ['from', 'to', 'sep0011_asset', 'amount']);
+    assert.equal(event.topics[0].value, 'transfer', 'the generic view is still there, untouched');
+  });
+});
+
+test('the typed view is on every event-returning route', async () => {
+  await withSpecs(async ({ get }) => {
+    const { body: page } = await get('/events?limit=100');
+    const typedEvent = page.events.find((e) => e.typed);
+    assert.ok(typedEvent);
+    const { body: single } = await get(`/events/${typedEvent.id}`);
+    assert.deepEqual(single.typed, typedEvent.typed);
+    const { body: batch } = await get(`/events?ids=${typedEvent.id}`);
+    assert.deepEqual(batch.events[0].typed, typedEvent.typed);
+  });
+});
+
+test('events from a contract with no spec have no typed field at all', async () => {
+  await withServer(async ({ get }) => {
+    const { body } = await get('/events?limit=100');
+    assert.ok(body.events.every((e) => !('typed' in e)));
+  });
+});
+
+test('GET /contracts/{id}/spec summarises the spec, and 404s before any lookup', async () => {
+  await withServer(async ({ get, store }) => {
+    const missing = await get(`/contracts/${SAC}/spec`);
+    assert.equal(missing.res.status, 404);
+    assert.match(missing.body.error.message, /lens spec fetch/);
+
+    await store.saveContractSpec(specFixture.find((s) => s.contractId === SAC));
+    const { res, body } = await get(`/contracts/${SAC}/spec`);
+    assert.equal(res.status, 200);
+    assert.equal(body.source, 'stellar-asset');
+    assert.ok(body.events.includes('transfer'));
+    assert.ok(!('entriesXdr' in body), 'raw entries are not part of the public response');
+  });
+});
+
+test('the OpenAPI spec documents the typed view and the spec route', async () => {
+  await withServer(async ({ get }) => {
+    const { body } = await get('/openapi.json');
+    assert.ok(body.paths['/contracts/{contractId}/spec']);
+    assert.equal(body.components.schemas.Event.properties.typed.$ref, '#/components/schemas/TypedEvent');
+  });
+});

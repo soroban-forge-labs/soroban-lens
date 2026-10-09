@@ -103,6 +103,39 @@ events.
 
 ---
 
+## Typed events
+
+Generic decoding shows you a symbol, two addresses and an `i128`. If the
+contract publishes a spec, soroban-lens shows you this instead:
+
+```
+transfer   from: Address   = GDVFO2G5…NOJB5GSA   (topic)
+           to: Address     = GD72MJ66…MAMJOS4    (topic)
+           amount: i128    = 10000000            (data)
+```
+
+The indexer looks up each contract's spec once — from its Wasm on-chain, read
+from the SEP-48 event declarations that soroban-sdk 23+ embeds — and the API
+attaches a `typed` view to every event it can match. Stellar Asset Contracts
+have no Wasm, so their CAP-46-6 / CAP-67 events (`transfer`, `mint`, `burn`,
+`approve`, `fee`, …) use a spec built in to soroban-lens.
+
+It is an additional view, never a replacement. The generic `topics`/`value`
+decoding is always there, and a contract with no spec, or an event its spec
+does not declare, simply has no `typed` field. Against the committed testnet
+fixture, 40 of 60 real events get a typed view.
+
+```bash
+lens spec                          # which contracts have a spec, and why not
+lens spec fetch -c C...            # look one up now, or refresh after an upgrade
+lens spec import -c C... out.wasm  # a local build, for a contract not on this network
+```
+
+`GET /contracts/{id}/spec` reports the same thing over HTTP. See
+[docs/typed-events.md](./docs/typed-events.md).
+
+---
+
 ## The five modules
 
 Each has its own directory, README, tests, and a documented interface. See
@@ -153,6 +186,7 @@ Every option is documented in [`.env.example`](./.env.example). The essentials:
 | `LENS_DB_PATH` | `./data/lens.db` | SQLite file |
 | `LENS_API_PORT` | `8080` | |
 | `LENS_WEB_PORT` | `5173` | |
+| `LENS_FETCH_SPECS` | `true` | Look up contract specs for [typed events](#typed-events) |
 
 ---
 

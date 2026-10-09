@@ -9,6 +9,7 @@ import type { CursorStore, CursorState } from '@soroban-lens/ingest';
 import { SqliteEventStore } from '@soroban-lens/store';
 import type { EventStore } from '@soroban-lens/store';
 import type { LensConfig } from './config.js';
+import { SpecFetcher, rpcSpecSource } from './specs.js';
 
 export const INDEXER_HEARTBEAT_FILE = join(tmpdir(), 'lens-indexer-heartbeat');
 
@@ -102,6 +103,11 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
     },
   );
 
+  const specs = config.fetchSpecs
+    ? new SpecFetcher(store, rpcSpecSource(config.network.rpcUrl, config.rpcHeaders), { log })
+    : undefined;
+  specs?.enqueue(config.contractIds);
+
   let inserted = 0;
   let seen = 0;
   let lastLedger = 0;
@@ -123,6 +129,9 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       } catch {}
 
       const added = await store.insertEvents(batch.events);
+      // Watching every contract, the configured list is empty, so specs are
+      // looked up as contracts first appear. Already-seen ids are a Set hit.
+      specs?.enqueue(batch.events.map((e) => e.contractId));
       inserted += added;
       seen += batch.events.length;
       lastLedger = batch.progress.ledger;
@@ -146,6 +155,10 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       }
     }
   } finally {
+    // A lookup still queued is cheap to redo next run; one in flight is
+    // allowed to finish so it never writes to a closed store.
+    specs?.stop();
+    await specs?.idle();
     try {
       if (metricsServer) await closeMetricsServer(metricsServer);
     } finally {

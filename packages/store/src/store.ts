@@ -1,4 +1,5 @@
 import type {
+  ContractSpecRecord,
   TopicCount,
   ContractSummary,
   EventPage,
@@ -98,6 +99,18 @@ export interface EventStore {
   countByTopic(limit?: number): Promise<TopicCount[]>;
 
   getStats(): Promise<StoreStats>;
+
+  /**
+   * Record what a spec lookup found for one contract (#33), replacing any
+   * earlier record — a refresh after a Wasm upgrade overwrites, not appends.
+   */
+  saveContractSpec(record: ContractSpecRecord): Promise<void>;
+
+  /** The stored spec record for a contract, or `null` if it was never looked up. */
+  getContractSpec(contractId: string): Promise<ContractSpecRecord | null>;
+
+  /** Every stored spec record, without the entries themselves, ordered by contract id. */
+  listContractSpecs(): Promise<Omit<ContractSpecRecord, 'entriesXdr'>[]>;
 
   saveStreamState(state: StreamState): Promise<void>;
   loadStreamState(key: string): Promise<StreamState | null>;

@@ -14,6 +14,11 @@ export interface LensConfig {
   rpcHeaders: Record<string, string>;
   /** Retry tuning passed straight to the ingest client. */
   retry: { attempts: number; baseDelayMs: number; maxDelayMs: number };
+  /**
+   * Look up each indexed contract's spec for typed decoding (#33). On by
+   * default; off for an air-gapped RPC proxy that only forwards getEvents.
+   */
+  fetchSpecs: boolean;
 }
 
 export interface ConfigOverrides {
@@ -64,6 +69,7 @@ export function resolveConfig(
       baseDelayMs: overrides.retryBaseDelay ?? numberOr(env.LENS_RETRY_BASE_DELAY_MS, 250),
       maxDelayMs: overrides.retryMaxDelay ?? numberOr(env.LENS_RETRY_MAX_DELAY_MS, 30_000),
     },
+    fetchSpecs: !/^(0|false|no|off)$/i.test((env.LENS_FETCH_SPECS ?? '').trim()),
   };
 }
 

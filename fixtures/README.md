@@ -56,6 +56,22 @@ Stellar Asset Contract for native XLM — verified with
 `Asset.native().contractId(Networks.TESTNET)`. It is the default demo contract
 throughout this repo because it is always emitting events.
 
+## `testnet-specs.json`
+
+The contract specs of all 20 contracts in `testnet-events.json`, looked up on
+testnet on **2026-10-09** with `lens spec fetch` — the same code path the
+indexer uses. 7 are Wasm contracts that declare SEP-48 events, 6 are Stellar
+Asset Contracts (built-in spec, no entries), and 7 are Wasm built before
+soroban-sdk 23, with a spec but no events.
+
+Trimmed for size, which the `_source` block records: function and error-enum
+entries are dropped, since typed decoding reads only event and type
+definitions, and contracts that declare no events keep their record but not
+their entries. `lens seed` loads it, so a seeded instance shows typed events
+offline. One fixture event (`CBF2LTEN…`'s `new_block_event`) is emitted
+without being declared in its contract's spec — kept deliberately, as the case
+that must fall back to the generic view.
+
 ## Refreshing
 
 RPC nodes retain roughly 7 days of history (120 960 ledgers), so these ledgers

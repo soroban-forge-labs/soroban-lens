@@ -196,6 +196,31 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS events_fts;
     `,
   },
+  {
+    version: 6,
+    name: 'contract-specs',
+    up: `
+      -- One row per contract whose spec has been looked up (#33), including
+      -- lookups that found nothing: source = 'none' with the reason in error,
+      -- so an indexer watching every contract does not re-ask the RPC about
+      -- the same spec-less contract on every batch.
+      --
+      -- entries_xdr is a JSON array of base64 ScSpecEntry values, kept raw
+      -- for the same reason the events table keeps raw XDR: the typed view
+      -- is computed at read time, so a better decoder applies to old rows
+      -- with no migration and no re-fetch.
+      CREATE TABLE contract_specs (
+        contract_id  TEXT    PRIMARY KEY,
+        source       TEXT    NOT NULL CHECK (source IN ('wasm', 'stellar-asset', 'none')),
+        wasm_hash    TEXT,
+        entries_xdr  TEXT    NOT NULL DEFAULT '[]',
+        event_count  INTEGER NOT NULL DEFAULT 0,
+        error        TEXT,
+        fetched_at   TEXT    NOT NULL
+      ) WITHOUT ROWID;
+    `,
+    down: `DROP TABLE IF EXISTS contract_specs;`,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.reduce(

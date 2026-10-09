@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { LensEvent } from '../types.js';
-import { prettyJson, relativeTime, summarise, topicPath, truncate } from '../format.js';
+import { prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
 
 interface Props {
   event: LensEvent;
@@ -50,8 +50,19 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
           )}
         </td>
         <td className="col-value">
-          <span className="type-tag">{event.value.type}</span>
-          <span className="mono">{summarise(event.value)}</span>
+          {event.typed ? (
+            <>
+              <span className="type-tag type-tag-typed" title="Decoded with the contract's spec">
+                {event.typed.name}
+              </span>
+              <span className="mono">{summariseTyped(event.typed)}</span>
+            </>
+          ) : (
+            <>
+              <span className="type-tag">{event.value.type}</span>
+              <span className="mono">{summarise(event.value)}</span>
+            </>
+          )}
         </td>
         <td className="col-tx mono" title={event.txHash}>{truncate(event.txHash, 6, 6)}</td>
       </tr>
@@ -76,6 +87,35 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
                 <div><dt>Transaction</dt><dd className="mono">{event.txHash}</dd></div>
                 <div><dt>Position</dt><dd className="mono">tx {event.transactionIndex} / op {event.operationIndex}</dd></div>
               </dl>
+
+              {event.typed && (
+                <section>
+                  <h4>
+                    <span className="typed-name">{event.typed.name}</span>{' '}
+                    <span className="muted small typed-source">
+                      {event.typed.source === 'stellar-asset'
+                        ? 'decoded with the built-in Stellar Asset Contract spec'
+                        : "decoded with the contract's own spec"}
+                    </span>
+                  </h4>
+                  <table className="typed-fields">
+                    <tbody>
+                      {event.typed.fields.map((field) => (
+                        <tr key={field.name}>
+                          <th scope="row" className="mono">{field.name}</th>
+                          <td>
+                            <span className="type-tag">{field.type}</span>
+                            {field.location === 'topic' && (
+                              <span className="type-tag" title="Carried in a topic, so it can be filtered on">topic</span>
+                            )}
+                          </td>
+                          <td><code>{prettyJson(field.value)}</code></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </section>
+              )}
 
               <section>
                 <h4>Topics</h4>
