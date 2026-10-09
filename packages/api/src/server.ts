@@ -8,6 +8,8 @@ import {
   MAX_QUERY_LIMIT,
   DEFAULT_MAX_QUERY_LIMIT,
   LATEST_SCHEMA_VERSION,
+  ContractTypedDecoder,
+  SpecCache,
   type EventStore,
   type Logger,
 } from '@soroban-lens/store';
@@ -35,6 +37,8 @@ type Handler = (ctx: {
   query: URLSearchParams;
   store: EventStore;
   options: ApiServerOptions;
+  /** Parsed contract specs, for the typed view of each event (#33). */
+  specs: SpecCache;
 }) => Promise<{ status?: number; body: unknown; contentType?: string }>;
 
 /** Matches "/contracts/{id}/events" and friends. */
@@ -128,10 +132,10 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/contracts\/([^/]+)\/events$/,
-    handler: async ({ params, query, store }) => {
+    handler: async ({ params, query, store, specs }) => {
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
       const page = await store.queryEvents({ ...parseEventQuery(query), contractId });
-      return { body: page };
+      return { body: { ...page, events: await specs.annotate(page.events) } };
     },
   },
   {
@@ -155,6 +159,31 @@ const routes: Route[] = [
     },
   },
   {
+    // What typed decoding knows about a contract (#33): where its spec came
+    // from and which events it declares. 404 when it was never looked up,
+    // which is different from a lookup that found nothing (source "none").
+    method: 'GET',
+    pattern: /^\/contracts\/([^/]+)\/spec$/,
+    handler: async ({ params, store }) => {
+      const contractId = assertContractId(decodeURIComponent(params[0] as string));
+      const record = await store.getContractSpec(contractId);
+      if (!record) {
+        throw ApiError.notFound(
+          `No spec has been looked up for contract "${contractId}". ` +
+            'The indexer fetches specs for contracts it indexes; `lens spec fetch -c <id>` does it on demand.',
+        );
+      }
+      let events: string[] = [];
+      try {
+        events = ContractTypedDecoder.fromRecord(record)?.eventNames() ?? [];
+      } catch {
+        // Unparseable stored entries: report the record, with no events.
+      }
+      const { entriesXdr: _entries, ...summary } = record;
+      return { body: { ...summary, events } };
+    },
+  },
+  {
     method: 'GET',
     pattern: /^\/contracts\/([^/]+)\/topics$/,
     handler: async ({ params, query, store }) => {
@@ -166,7 +195,7 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/events$/,
-    handler: async ({ query, store }) => {
+    handler: async ({ query, store, specs }) => {
       // ?ids= is a batch lookup, not a filter: it resolves a known list in one
       // round trip rather than N. It short-circuits the filter path entirely,
       // since mixing "these exact events" with "events matching X" has no
@@ -176,24 +205,26 @@ const routes: Route[] = [
         const found = await Promise.all(ids.map((id) => store.getEvent(id)));
         return {
           body: {
-            events: found.filter((e): e is NonNullable<typeof e> => e !== null),
+            events: await specs.annotate(found.filter((e): e is NonNullable<typeof e> => e !== null)),
             // Reported rather than silently dropped, so a caller can tell
             // "not indexed" from "I typo'd the id".
             missing: ids.filter((_, i) => found[i] === null),
           },
         };
       }
-      return { body: await store.queryEvents(parseEventQuery(query)) };
+      const page = await store.queryEvents(parseEventQuery(query));
+      return { body: { ...page, events: await specs.annotate(page.events) } };
     },
   },
   {
     method: 'GET',
     pattern: /^\/events\/([^/]+)$/,
-    handler: async ({ params, store }) => {
+    handler: async ({ params, store, specs }) => {
       const id = decodeURIComponent(params[0] as string);
       const event = await store.getEvent(id);
       if (!event) throw ApiError.notFound(`No indexed event with id "${id}".`);
-      return { body: event };
+      const [annotated] = await specs.annotate([event]);
+      return { body: annotated };
     },
   },
   {
@@ -279,6 +310,9 @@ export function createApiServer(options: ApiServerOptions): Server {
   const { store } = options;
   const log = options.log ?? { debug() {}, info() {}, warn() {}, error() {} };
   const corsOrigin = options.corsOrigin ?? '*';
+  // One per server: specs are per database, and the TTL is what lets a spec
+  // the indexer fetches after startup show up without restarting the API.
+  const specs = new SpecCache((contractId) => store.getContractSpec(contractId));
 
   return createHttpServer((req: IncomingMessage, res: ServerResponse) => {
     void handle(req, res);
@@ -342,6 +376,7 @@ export function createApiServer(options: ApiServerOptions): Server {
         query: url.searchParams,
         store,
         options,
+        specs,
       });
 
       send(res, result.status ?? 200, result.body, result.contentType, isHead, req.headers['accept-encoding']);

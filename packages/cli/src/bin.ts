@@ -10,10 +10,17 @@
 import { parseArgs } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import { SqliteEventStore } from '@soroban-lens/store';
-import type { RawEventInput } from '@soroban-lens/store';
+import type { ContractSpecRecord, RawEventInput } from '@soroban-lens/store';
 import { resolveConfig } from './config.js';
 import { formatReport, runDoctor } from './doctor.js';
 import { runIndexer } from './indexer.js';
+import { assertContractIds } from '@soroban-lens/ingest';
+import {
+  describeSpecRecord,
+  lookupContractSpec,
+  recordFromWasmFile,
+  rpcSpecSource,
+} from './specs.js';
 
 const USAGE = `
 lens — soroban-lens operator CLI
@@ -21,7 +28,8 @@ lens — soroban-lens operator CLI
 Usage:
   lens doctor [options]              Preflight: Node, data dir, database, RPC, contract ids.
   lens index  [options]              Run the indexer (ingest -> decode -> store).
-  lens seed   [--fixture <path>]     Load a captured getEvents response into the database.
+  lens seed   [--fixture <path>]     Load a captured getEvents response (and, by default, its
+                                     contracts' specs) into the database.
   lens stats  [options]              Print database statistics.
   lens prune --before-ledger <n>     Delete events below a ledger and reclaim disk space.
   lens redecode [--all]              Re-run the decoder over previously-failed rows.
@@ -29,6 +37,9 @@ Usage:
   lens migrate --down --to <n>       Roll back migrations above version <n>.
   lens export <path>                 Write every event as NDJSON, backend-portable.
   lens import <path>                 Load an NDJSON snapshot written by 'lens export'.
+  lens spec [list]                   Show which contracts have a spec for typed decoding.
+  lens spec fetch -c <id>            Look a contract's spec up on-chain now (refreshes it).
+  lens spec import -c <id> <wasm>    Use a local Wasm build's spec for a contract.
   lens completion [bash|zsh|fish]    Generate shell auto-completion script.
 
 
@@ -152,6 +163,15 @@ async function main(argv: string[]): Promise<number> {
         process.stderr.write(
           `[lens] seeded ${config.dbPath} from ${path}: ${inserted} new of ${events.length}\n`,
         );
+        // The default fixture comes with the specs of its contracts, captured
+        // the same day, so a seeded instance shows typed events (#33) with no
+        // network. A custom --fixture has no matching spec file to assume.
+        if (values.fixture === undefined) {
+          const specsPath = 'fixtures/testnet-specs.json';
+          const { specs } = JSON.parse(await readFile(specsPath, 'utf8')) as { specs: ContractSpecRecord[] };
+          for (const record of specs) await store.saveContractSpec(record);
+          process.stderr.write(`[lens] seeded ${specs.length} contract spec(s) from ${specsPath}\n`);
+        }
       } finally {
         await store.close();
       }
@@ -307,6 +327,58 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'spec': {
+      const sub = positionals[0] ?? 'list';
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        if (sub === 'list') {
+          const records = await store.listContractSpecs();
+          if (records.length === 0) {
+            process.stdout.write('no specs stored yet — `lens index` fetches them, or run `lens spec fetch -c <id>`\n');
+          }
+          for (const record of records) process.stdout.write(`${describeSpecRecord(record)}\n`);
+          return 0;
+        }
+        if (sub !== 'fetch' && sub !== 'import') {
+          process.stderr.write(`error: unknown spec subcommand "${sub}" (list | fetch | import)\n`);
+          return 2;
+        }
+        if (config.contractIds.length === 0) {
+          process.stderr.write(`error: lens spec ${sub} needs at least one -c <contract id>\n`);
+          return 2;
+        }
+        assertContractIds(config.contractIds);
+
+        if (sub === 'import') {
+          const wasmPath = positionals[1];
+          if (!wasmPath || config.contractIds.length !== 1) {
+            process.stderr.write('error: lens spec import takes exactly one -c <id> and a .wasm path\n');
+            return 2;
+          }
+          const record = await recordFromWasmFile(config.contractIds[0]!, wasmPath);
+          await store.saveContractSpec(record);
+          process.stdout.write(`${describeSpecRecord(record)}\n`);
+          return record.source === 'none' ? 1 : 0;
+        }
+
+        const source = rpcSpecSource(config.network.rpcUrl, config.rpcHeaders);
+        let failed = 0;
+        for (const id of config.contractIds) {
+          try {
+            const record = await lookupContractSpec(source, id);
+            await store.saveContractSpec(record);
+            process.stdout.write(`${describeSpecRecord(record)}\n`);
+          } catch (error) {
+            failed++;
+            process.stderr.write(`[lens] ${id}: lookup failed: ${error instanceof Error ? error.message : String(error)}\n`);
+          }
+        }
+        return failed > 0 ? 1 : 0;
+      } finally {
+        await store.close();
+      }
+    }
+
     case 'completion': {
       const shell = positionals[0] || 'bash';
       process.stdout.write(`${generateCompletion(shell)}\n`);
@@ -326,7 +398,7 @@ function generateCompletion(shell: string): string {
   local cur prev commands options
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="doctor index seed stats prune redecode verify migrate export import completion"
+  commands="doctor index seed stats prune redecode verify migrate export import spec completion"
   options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --poll-interval --once --max-events --fixture --before-ledger -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
@@ -366,6 +438,7 @@ _lens() {
     'migrate:Roll migrations forward or back'
     'export:Write an NDJSON snapshot'
     'import:Load an NDJSON snapshot'
+    'spec:Contract specs for typed decoding'
     'completion:Generate shell autocompletions'
   )
   _arguments '1: :->command' '*: :->args'
@@ -387,6 +460,7 @@ complete -c lens -n "__fish_use_subcommand" -a verify -d "Check stored-row invar
 complete -c lens -n "__fish_use_subcommand" -a migrate -d "Roll migrations forward or back"
 complete -c lens -n "__fish_use_subcommand" -a export -d "Write an NDJSON snapshot"
 complete -c lens -n "__fish_use_subcommand" -a import -d "Load an NDJSON snapshot"
+complete -c lens -n "__fish_use_subcommand" -a spec -d "Contract specs for typed decoding"
 complete -c lens -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c lens -l network -s n -x -a "testnet mainnet futurenet"
 complete -c lens -l help -s h -d "Show help"`;

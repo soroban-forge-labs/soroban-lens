@@ -13,6 +13,22 @@ export interface DecodedValue {
   value: unknown;
 }
 
+/** One named, typed field of a spec-decoded event (#33). */
+export interface TypedField {
+  name: string;
+  /** Declared type: "i128", "Address", "Option<u64>", a user-defined type's name. */
+  type: string;
+  location: 'topic' | 'data';
+  value: unknown;
+}
+
+/** The event read through its contract's spec. Absent when there is no spec or no match. */
+export interface TypedEvent {
+  name: string;
+  source: 'wasm' | 'stellar-asset';
+  fields: TypedField[];
+}
+
 export interface LensEvent {
   id: string;
   contractId: string;
@@ -29,6 +45,7 @@ export interface LensEvent {
   valueXdr: string;
   decodeError?: string;
   indexedAt: string;
+  typed?: TypedEvent;
 }
 
 export interface EventPage {

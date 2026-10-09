@@ -5,3 +5,12 @@ export { runDoctor, formatReport } from './doctor.js';
 export type { CheckResult, CheckStatus } from './doctor.js';
 export { runIndexer, StoreBackedCursors } from './indexer.js';
 export type { IndexerOptions, IndexerResult } from './indexer.js';
+export {
+  SpecFetcher,
+  lookupContractSpec,
+  recordFromWasm,
+  recordFromWasmFile,
+  describeSpecRecord,
+  rpcSpecSource,
+} from './specs.js';
+export type { SpecSource } from './specs.js';

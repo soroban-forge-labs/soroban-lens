@@ -22,6 +22,7 @@ lens doctor    # preflight: Node, data dir, database, RPC, contract ids
 lens index     # run the pipeline: ingest -> decode -> store
 lens seed      # load the committed testnet fixture
 lens stats     # what is in the database
+lens spec      # contract specs for typed events: list | fetch | import
 ```
 
 Run them from the repo with `npm run doctor`, `npm run index`, `npm run seed`.
