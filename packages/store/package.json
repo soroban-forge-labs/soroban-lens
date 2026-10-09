@@ -19,6 +19,6 @@
     "bench:address-index": "npm run build && node bench/address-index.bench.js",
     "bench:fts-search": "npm run build && node bench/fts-search.bench.js"
   },
-  "dependencies": { "@stellar/stellar-sdk": "^17.1.0" },
-  "devDependencies": { "typescript": "^7.0.2", "@types/node": "^26.5.1" }
+  "dependencies": { "@stellar/stellar-sdk": "^17.2.1" },
+  "devDependencies": { "typescript": "^7.0.2", "@types/node": "^26.6.4" }
 }
