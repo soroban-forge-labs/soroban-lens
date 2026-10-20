@@ -223,6 +223,13 @@ body {
 }
 .topic-chip:hover { border-color: var(--accent); color: var(--accent); }
 
+/* Outbound explorer links inherit whatever colour their cell already uses, and
+   the dotted underline is the only signal that they leave the app — a table
+   full of solid blue links would be much harder to scan. */
+.explorer-link { color: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }
+.explorer-link:hover { color: var(--accent); text-decoration-style: solid; }
+.explorer-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 .type-tag {
   display: inline-block; margin-right: 6px; padding: 0 6px;
   font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
