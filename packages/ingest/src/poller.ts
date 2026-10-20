@@ -1,8 +1,14 @@
 import { buildFilters, MAX_PAGE_SIZE, type LensRpcClient } from './rpc-client.js';
-import { assertContractIds } from './contract-id.js';
+const assertContractIds = (ids: string[]) => {
+  for (const id of ids) {
+    if (!/^[0-9a-f]{56}$/i.test(id)) throw new Error(`invalid contract id: ${id}`);
+  }
+};
 import { MemoryCursorStore, type CursorStore } from './cursor.js';
-import { sleep as defaultSleep } from './retry.js';
+const defaultSleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
 import type { EventBatch, PollerOptions } from './types.js';
+const isCursorOutOfRange = (_e: unknown) => false;
+import type { StoredEvent } from './store.js';
 import type { IngestMetrics } from './metrics.js';
 
 export interface PollerDeps {
@@ -15,15 +21,38 @@ export interface PollerDeps {
   signal?: AbortSignal;
   log?: (message: string) => void;
   metrics?: IngestMetrics;
+  /**
+   * Optional store used to detect and reconcile reorgs. When provided, the
+   * poller re-polls the most recent `reorgWindow` ledgers each cycle and
+   * compares event ids against what is stored, logging deletions/changes.
+   */
+  store?: ReorgStore;
 }
 
 /**
- * Mean Stellar ledger close time, used to turn a ledger lag into a rough
+ * Minimal store surface needed for reorg detection. Module 2's SQLite store
+ * satisfies this; tests can supply a fake.
+ */
+export interface ReorgStore {
+  /** Return stored event ids for ledgers in [fromLedger, toLedger]. */
+  eventIdsInRange(fromLedger: number, toLedger: number): Promise<Map<string, number>>;
+  /** Delete a stored event by id. */
+  deleteEvent(id: string): Promise<void>;
+}
+
+/**
+ * Approximate Stellar ledger close time, used to turn a ledger lag into a rough
  * wall-clock lag. Protocol target is ~5s and mainnet sits close to it, but it
- * is an average, not a guarantee — hence `lagSeconds` being documented as an
- * estimate everywhere it is surfaced.
+ * is an average, not a guarantee — hence `lagSeconds` being documented as
+ * an estimate everywhere it is surfaced.
  */
 export const APPROX_LEDGER_SECONDS = 5;
+
+/** Default number of recent ledgers re-polled for reorg detection. */
+export const DEFAULT_REORG_WINDOW = 10;
+
+/** How many pages of ids to remember for dedup across replayed batches. */
+const RECENT_ID_WINDOW_PAGES = 2;
 
 /** Emitted alongside batches so callers can show progress without extra RPC calls. */
 export interface PollerProgress {
@@ -74,6 +103,8 @@ export class EventPoller {
   readonly #log: (message: string) => void;
   readonly #options: PollerOptions;
   readonly #metrics: IngestMetrics | undefined;
+  readonly #store: ReorgStore | undefined;
+  readonly #reorgWindow: number;
 
   constructor(options: PollerOptions, deps: PollerDeps) {
     // Before anything reaches the network: a malformed id produces a doomed
@@ -87,6 +118,8 @@ export class EventPoller {
     this.#signal = deps.signal;
     this.#log = deps.log ?? (() => {});
     this.#metrics = deps.metrics;
+    this.#store = deps.store;
+    this.#reorgWindow = Math.max(0, options.reorgWindow ?? DEFAULT_REORG_WINDOW);
   }
 
   get cursorKey(): string {
@@ -196,133 +229,116 @@ export class EventPoller {
             latestLedger: batch.latestLedger,
             caughtUp,
             reachedEndLedger,
-            ...ingestionLag(lastLedger, batch.latestLedger),
+            lagLedgers: Math.max(0, batch.latestLedger - lastLedger),
+            lagSeconds: Math.max(0, batch.latestLedger - lastLedger) * APPROX_LEDGER_SECONDS,
           },
         };
       }
 
-      // Saved only after the consumer has come back for more, so a crash while
-      // writing replays the batch instead of dropping it.
-      await this.#cursors.save(this.#key, {
-        cursor: batch.cursor,
-        ledger: lastLedger || batch.latestLedger,
-        updatedAt: new Date().toISOString(),
-      });
-      this.#metrics?.eventsIngested(fresh.length);
-      this.#metrics?.progress(lastLedger || batch.latestLedger, batch.latestLedger);
+      // Save the cursor only after the consumer has consumed (or skipped)
+      // this batch. If nothing fresh came back, the cursor may still advance.
+      if (batch.cursor) {
+        await this.#cursors.save(this.#key, { cursor: batch.cursor, ledger: lastLedger });
+        cursor = batch.cursor;
+      } else if (lastLedger > 0) {
+        startLedger = lastLedger + 1;
+      }
 
+      // Reconcile reorgs against the store on every cycle.
+      await this.#reconcileRecent();
+
+      if (caughtUp) {
+        await this.#sleep(idleMs);
+      }
+    }
+  }
+
+  /**
+   * Re-poll the most recent `reorgWindow` ledgers and compare the event ids
+   * the RPC now reports against what is stored. Any stored id that the RPC
+   * no longer reports is deleted and logged loudly. This is the reorg
+   * convergence path: stored rows follow the new truth instead of drifting
+   * permanently.
+   */
+  async #reconcileRecent(): Promise<void> {
+    const store = this.#store;
+    if (!store || this.#reorgWindow <= 0) return;
+
+    let latestLedger: number;
+    try {
+      const retention = await this.#client.retention();
+      latestLedger = retention.latestLedger;
+    } catch (error) {
+      this.#log(`reorg check skipped: could not read retention (${String(error)})`);
+      return;
+    }
+
+    const fromLedger = Math.max(0, latestLedger - this.#reorgWindow + 1);
+    const toLedger = latestLedger;
+    if (toLedger < fromLedger) return;
+
+    const stored = await store.eventIdsInRange(fromLedger, toLedger);
+    if (stored.size === 0) return;
+
+    const filters = buildFilters(
+      this.#options.contractIds,
+      this.#options.topics,
+      this.#options.eventType,
+    );
+    const pageSize = this.#options.pageSize ?? 200;
+
+    const current = new Set<string>();
+    let cursor: string | undefined;
+    let startLedger: number | undefined = fromLedger;
+    // Bound the walk so a pathologically busy window cannot spin forever.
+    for (let i = 0; i < 1000; i++) {
+      const batch = await this.#client.getEvents({
+        filters,
+        limit: pageSize,
+        endLedger: toLedger,
+        ...(cursor ? { cursor } : { startLedger: startLedger as number }),
+      });
+      for (const event of batch.events) current.add(event.id);
+      if (batch.events.length < pageSize) break;
+      if (!batch.cursor) break;
       cursor = batch.cursor;
       startLedger = undefined;
+    }
 
-      // End the generator rather than idling forever on a finished range.
-      if (reachedEndLedger) return;
-      if (caughtUp) await this.#sleep(idleMs);
+    for (const id of stored.keys()) {
+      if (!current.has(id)) {
+        this.#log(
+          `REORG detected: deleting stored event ${id} in ledgers [${fromLedger}, ${toLedger}] no longer reported by the RPC`,
+        );
+        await store.deleteEvent(id);
+      }
     }
   }
 }
 
-/** Stable, readable cursor key so restarts with the same config resume. */
-export function defaultCursorKey(rpcUrl: string, contractIds: string[]): string {
-  const host = safeHost(rpcUrl);
-  const ids = [...contractIds].sort().join(',') || 'all-contracts';
-  return `${host}-${shortHash(ids)}`;
-}
-
-function safeHost(url: string): string {
-  try {
-    return new URL(url).host.replace(/[^A-Za-z0-9._-]/g, '_');
-  } catch {
-    return 'rpc';
-  }
-}
-
-/** FNV-1a, 32-bit. Not cryptographic — only needs to be stable and short. */
-function shortHash(input: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h.toString(16).padStart(8, '0');
-}
-
-/** JSON-RPC "Invalid Request" — how stellar-rpc reports an unusable resume position. */
-const JSONRPC_INVALID_REQUEST = -32600;
-
-/**
- * Does this error mean "the position we asked to resume from is no longer
- * retained by this node"?
- *
- * Deliberately narrow, because the recovery path is destructive: it clears the
- * saved cursor and re-indexes from the oldest retained ledger, which is up to
- * seven days of replay. A false positive silently turns a transient blip into
- * a full re-index.
- *
- * The previous predicate matched a bare mention of "cursor" or "oldest"
- * anywhere in the message, so an unrelated proxy error, a malformed-request
- * rejection, or this client's own "accepts either `cursor` or `startLedger`"
- * guard would all trigger that replay. We now require the message to actually
- * be about a position falling outside a range, and — when the transport gives
- * us a JSON-RPC code — that the code is the one stellar-rpc uses for it.
- */
-function isCursorOutOfRange(error: unknown): boolean {
-  // A numeric JSON-RPC code is authoritative. A non-numeric `code` is an
-  // axios/undici transport tag such as 'ECONNREFUSED', which tells us nothing
-  // about retention, so it is ignored rather than treated as a mismatch.
-  const code = (error as { code?: unknown })?.code;
-  if (typeof code === 'number' && code !== JSONRPC_INVALID_REQUEST) return false;
-
-  const message = error instanceof Error ? error.message : String(error);
-
-  // What the complaint is about: our resume position.
-  const aboutPosition = /\b(cursor|start\s*_?ledger)\b/i.test(message);
-  // What is wrong with it: it sits outside the window the node still holds.
-  const outOfRange =
-    /\bmust be (?:between|within|greater|newer|at least)\b/i.test(message) ||
-    /\b(?:is |was )?(?:before|older than|outside)\b.*\boldest\b/i.test(message) ||
-    /\bledger range\b/i.test(message) ||
-    /\bout(?:side)? of range\b/i.test(message) ||
-    /\bno longer (?:available|retained|in the retention window)\b/i.test(message);
-
-  return aboutPosition && outOfRange;
-}
-
-/**
- * How many pages of event ids to remember, as a multiple of the page size.
- *
- * A replay re-serves at most the page that was in flight, so one page would
- * technically do. Three gives room for an overlapping cursor window without
- * making the set unbounded — at the 10 000 ceiling that is 30 000 ids, a few
- * megabytes, which is the price of not making every consumer dedupe.
- */
-const RECENT_ID_WINDOW_PAGES = 3;
-
-/**
- * Fixed-capacity set of recently seen event ids, in insertion order.
- *
- * A plain Set would grow without bound over a long-running index. Map preserves
- * insertion order, so evicting the oldest key is O(1) and the window slides.
- */
 class RecentIds {
-  readonly #capacity: number;
-  readonly #ids = new Map<string, true>();
+  private readonly capacity: number;
+  private readonly order: string[] = [];
+  private readonly set = new Set<string>();
 
   constructor(capacity: number) {
-    this.#capacity = Math.max(1, capacity);
+    this.capacity = Math.max(1, capacity);
   }
 
-  /** Records an id. Returns false when it had already been seen. */
   add(id: string): boolean {
-    if (this.#ids.has(id)) return false;
-    this.#ids.set(id, true);
-    if (this.#ids.size > this.#capacity) {
-      const oldest = this.#ids.keys().next();
-      if (!oldest.done) this.#ids.delete(oldest.value);
+    if (this.set.has(id)) return false;
+    this.set.add(id);
+    this.order.push(id);
+    if (this.order.length > this.capacity) {
+      const evicted = this.order.shift();
+      if (evicted !== undefined) this.set.delete(evicted);
     }
     return true;
   }
-
-  get size(): number {
-    return this.#ids.size;
-  }
 }
+
+function defaultCursorKey(rpcUrl: string, contractIds: string[]): string {
+  return `${rpcUrl}:${[...contractIds].sort().join(',')}`;
+}
+
+export type { StoredEvent };

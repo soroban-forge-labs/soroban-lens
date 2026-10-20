@@ -50,7 +50,18 @@ export {
   MAX_RETRY_AFTER_MS,
   RetryExhaustedError,
 } from './retry.js';
-export type { RetryOptions } from './retry.js';
 
 export { IngestMetrics } from './metrics.js';
 export { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';
+
+export {
+  Reconciler,
+  DEFAULT_RECONCILE_WINDOW,
+  resolveReconcileWindow,
+  diffEvents,
+} from './reconciler.js';
+
+export type { ReconcileResult, ReconcileDiff } from './reconciler.js';
+
+export { DEFAULT_REORG_WINDOW, resolveReorgWindow } from './reorg.js';
+export type { ReorgDiff, ReorgResult } from './reorg.js';
