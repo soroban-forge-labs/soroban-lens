@@ -23,13 +23,19 @@ always emitting.
 
 - **Contract filter** — paste a contract id; the id is validated against the
   StrKey shape before a request goes out, so a typo is a message rather than a
-  400 from the server.
+  400 from the server. The indexed-contract picker lists event counts and last
+  activity while leaving the field available for any other id.
 - **Topic filter** — type one, or click any topic chip in the table. Known
   topics for the current contract populate a `<datalist>`, so the field
   autocompletes from what has actually been indexed.
 - **Live updates** — streamed over the API's `GET /events/stream` (Server-Sent Events). When the stream is not open — before it connects, while the browser retries a dropped connection, or against an API without it — it falls back to polling every 5 seconds, which pauses while the tab is hidden.
 - **Expandable rows** — click a row for decoded topics and value, plus the raw
-  XDR the decoding came from, under a disclosure.
+  XDR the decoding came from, under a disclosure. Focus a row and use the
+  arrow keys to move, Enter/Space to expand, or Escape to collapse; `/` focuses
+  the contract field.
+- **Activity chart** — daily counts for the 30 days ending with the selected
+  contract's last activity. It follows the topic and successful-call filters;
+  selecting a day narrows the event list to that time and ledger range.
 - **Network switcher** — selects between configured API instances.
 - **Load more** — keyset pagination via the API's `nextCursor`.
 
@@ -76,6 +82,10 @@ hands it to a static server.
 **No design system**, by project constraint — the CSS is hand-written in
 [`src/styles.css`](./src/styles.css). Light and dark themes: dark follows the system
 setting unless the header toggle overrides it; the choice is saved in `localStorage`.
+
+The CI bundle budget sums the production JavaScript and CSS assets. Update
+[`bundle-size-budget.json`](./bundle-size-budget.json) deliberately when a
+measured increase is accepted.
 
 ## Tests
 

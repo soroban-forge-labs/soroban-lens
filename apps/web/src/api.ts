@@ -1,4 +1,12 @@
-import type { ApiErrorBody, ContractSummary, EventPage, Health, LensEvent, TopicCount } from './types.js';
+import type {
+  ApiErrorBody,
+  ContractActivity,
+  ContractSummary,
+  EventPage,
+  Health,
+  LensEvent,
+  TopicCount,
+} from './types.js';
 
 /**
  * Networks the UI can point at.
@@ -70,6 +78,8 @@ export interface EventQueryParams {
   topics?: (string | null)[];
   fromLedger?: number;
   toLedger?: number;
+  fromTime?: string;
+  toTime?: string;
   successfulOnly?: boolean;
   limit?: number;
   cursor?: string;
@@ -82,6 +92,8 @@ export function buildEventPath(params: EventQueryParams): string {
   if (params.cursor) search.set('cursor', params.cursor);
   if (params.fromLedger !== undefined) search.set('fromLedger', String(params.fromLedger));
   if (params.toLedger !== undefined) search.set('toLedger', String(params.toLedger));
+  if (params.fromTime !== undefined) search.set('fromTime', params.fromTime);
+  if (params.toTime !== undefined) search.set('toTime', params.toTime);
   if (params.successfulOnly) search.set('successfulOnly', 'true');
   for (const topic of params.topics ?? []) search.append('topic', topic ?? '*');
 
@@ -120,6 +132,32 @@ export const api = {
 
   contracts: (baseUrl: string, signal?: AbortSignal): Promise<{ contracts: ContractSummary[] }> =>
     request<{ contracts: ContractSummary[] }>(baseUrl, '/contracts', signal),
+
+  activity: (
+    baseUrl: string,
+    contractId: string,
+    params: {
+      bucket: 'minute' | 'hour' | 'day';
+      from: number;
+      to: number;
+      topics?: string[];
+      successfulOnly?: boolean;
+    },
+    signal?: AbortSignal,
+  ): Promise<ContractActivity> => {
+    const search = new URLSearchParams({
+      bucket: params.bucket,
+      from: String(params.from),
+      to: String(params.to),
+    });
+    if (params.successfulOnly) search.set('successfulOnly', 'true');
+    for (const topic of params.topics ?? []) search.append('topic', topic);
+    return request<ContractActivity>(
+      baseUrl,
+      `/contracts/${encodeURIComponent(contractId)}/activity?${search}`,
+      signal,
+    );
+  },
 
   topics: (baseUrl: string, contractId: string, signal?: AbortSignal): Promise<{ topics: TopicCount[] }> =>
     request<{ topics: TopicCount[] }>(baseUrl, `/contracts/${encodeURIComponent(contractId)}/topics`, signal),

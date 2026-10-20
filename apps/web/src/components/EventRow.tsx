@@ -13,12 +13,33 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
   const [expanded, setExpanded] = useState(false);
   const firstTopic = event.topics[0];
   const topicLabel = firstTopic ? summarise(firstTopic) : '—';
+  const onKeyDown = (keyEvent: React.KeyboardEvent<HTMLTableRowElement>): void => {
+    if (keyEvent.target !== keyEvent.currentTarget) return;
+
+    if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
+      keyEvent.preventDefault();
+      const rows = Array.from(
+        keyEvent.currentTarget.closest('tbody')?.querySelectorAll<HTMLTableRowElement>('.event-row') ?? [],
+      );
+      const index = rows.indexOf(keyEvent.currentTarget);
+      rows[index + (keyEvent.key === 'ArrowDown' ? 1 : -1)]?.focus();
+    } else if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
+      keyEvent.preventDefault();
+      setExpanded((value) => !value);
+    } else if (keyEvent.key === 'Escape' && expanded) {
+      keyEvent.preventDefault();
+      setExpanded(false);
+    }
+  };
 
   return (
     <>
       <tr
         className={`event-row${expanded ? ' is-expanded' : ''}${event.inSuccessfulContractCall ? '' : ' is-failed'}`}
         onClick={() => setExpanded((v) => !v)}
+        onKeyDown={onKeyDown}
+        role="row"
+        tabIndex={0}
         aria-expanded={expanded}
       >
         <td className="col-toggle" aria-hidden="true">{expanded ? '▾' : '▸'}</td>

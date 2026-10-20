@@ -235,6 +235,8 @@ export interface TimeBucketCount {
   /** Bucket start, seconds since the epoch, aligned to the bucket width. */
   start: number;
   count: number;
+  firstLedger: number;
+  lastLedger: number;
 }
 
 export interface StoreStats {
@@ -256,4 +258,3 @@ export interface StoreStats {
    */
   walSizeBytes: number | null;
 }
-

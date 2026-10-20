@@ -334,12 +334,14 @@ const routes: Route[] = [
     pattern: /^\/contracts\/([^/]+)\/activity$/,
     handler: async ({ params, query, store }) => {
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
-      const { bucket, from, to } = parseActivityQuery(query);
+      const { bucket, from, to, topics, successfulOnly } = parseActivityQuery(query);
       const counts = await store.countByTimeBucket(
         {
           contractId,
           ...(from !== undefined ? { fromTime: from } : {}),
           ...(to !== undefined ? { toTime: to } : {}),
+          ...(topics ? { topics } : {}),
+          ...(successfulOnly !== undefined ? { successfulOnly } : {}),
         },
         bucket,
       );
@@ -350,6 +352,8 @@ const routes: Route[] = [
           buckets: counts.map((c) => ({
             start: new Date(c.start * 1000).toISOString(),
             count: c.count,
+            firstLedger: c.firstLedger,
+            lastLedger: c.lastLedger,
           })),
         },
       };

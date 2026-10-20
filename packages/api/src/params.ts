@@ -283,6 +283,8 @@ export interface ActivityQuery {
   from?: number;
   /** Inclusive upper bound, epoch seconds. */
   to?: number;
+  topics?: (string | null)[];
+  successfulOnly?: boolean;
 }
 
 /** Parse `?bucket=hour&from=…&to=…` for the activity endpoint. */
@@ -299,9 +301,13 @@ export function parseActivityQuery(params: URLSearchParams): ActivityQuery {
   if (from !== undefined && to !== undefined && from > to) {
     throw ApiError.badRequest('"from" must not be after "to".', 'from');
   }
+  const topics = parseTopics(params);
+  const successfulOnly = boolParam(params, 'successfulOnly');
   return {
     bucket: bucket as TimeBucket,
     ...(from !== undefined ? { from } : {}),
     ...(to !== undefined ? { to } : {}),
+    ...(topics ? { topics } : {}),
+    ...(successfulOnly !== undefined ? { successfulOnly } : {}),
   };
 }
