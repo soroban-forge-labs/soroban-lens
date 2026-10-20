@@ -4,6 +4,8 @@ import { EventRow } from './EventRow.js';
 // Props for the EventTable component
 interface Props {
   events: LensEvent[];
+  expandedEventIds: Set<string>;
+  onToggleExpanded: (eventId: string) => void;
   showContract: boolean;
   onTopicClick: (topic: string) => void;
   loading: boolean;
@@ -11,7 +13,7 @@ interface Props {
 }
 
 export function EventTable({
-  events, showContract, onTopicClick, loading, emptyMessage,
+  events, expandedEventIds, onToggleExpanded, showContract, onTopicClick, loading, emptyMessage,
 }: Props): React.JSX.Element {
   if (events.length === 0) {
     return (
@@ -38,6 +40,8 @@ export function EventTable({
           <EventRow
             key={event.id}
             event={event}
+            expanded={expandedEventIds.has(event.id)}
+            onToggleExpanded={onToggleExpanded}
             showContract={showContract}
             onTopicClick={onTopicClick}
           />
