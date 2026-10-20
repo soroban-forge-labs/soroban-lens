@@ -1,10 +1,10 @@
-/**
+/*
  * Module 1 public data contract.
  *
  * `RawEvent` mirrors, field for field, one entry of the `events` array returned
  * by the Soroban RPC `getEvents` method with the default `xdrFormat: "base64"`.
  * It is deliberately a *transport* type: topics and values stay base64-encoded
- * XDR here. Decoding is Module 2's job (`@soroban-lens/store`).
+ * XDR here. Decoding is Module 2's job (@soroban-lens/store).
  *
  * Reference: https://developers.stellar.org/docs/data/apis/rpc/api-reference/methods/getEvents
  *
@@ -20,7 +20,7 @@ export interface RawEvent {
   type: 'contract' | 'system';
   /** Ledger sequence number the event was emitted in. */
   ledger: number;
-  /** RFC3339 close time of that ledger, e.g. "2026-09-15T19:22:52Z". */
+  /** RFC3333 close time of that ledger, e.g. "2026-09-15T19:22:52Z". */
   ledgerClosedAt: string;
   /** StrKey contract address ("C...") that emitted the event. */
   contractId: string;
@@ -83,8 +83,8 @@ export interface PollerOptions {
   startLedger?: number;
   /**
    * Last ledger to read, inclusive. The stream ends cleanly once the range is
-   * exhausted, which is what makes indexing a bounded historical window
-   * possible without watching the log and killing the process.
+   * exhausted, which is what makes indexing a bounded historical window possible
+   * without watching the log and killing the process.
    */
   endLedger?: number;
   /** Events per RPC page, 1..10000. Defaults to 200. */
@@ -93,4 +93,39 @@ export interface PollerOptions {
   pollIntervalMs?: number;
   /** Extra topic filters, base64 ScVal segments or "*". */
   topics?: TopicSegment[][];
+  /**
+   * How many of the most recent ledgers to re-poll and reconcile on each cycle
+   * to detect ledger reorgs. Defaults to a small number (see `DEFAULT_REORG_WINDOW`).
+   * Set to 0 to disable reorg detection.
+   */
+  reorgWindow?: number;
+}
+
+/** Default number of trailing ledgers re-polled to detect reorgs. */
+export const DEFAULT_REORG_WINDOW = 10;
+
+/** A stored row that no longer exists in the canonical chain. */
+export interface ReorgDeletion {
+  id: string;
+  ledger: number;
+}
+
+/** A stored row whose contents changed after a reorg. */
+export interface ReorgChange {
+  id: string;
+  ledger: number;
+  previous: RawEvent;
+  current: RawEvent;
+}
+
+/** Summary of a reconciliation pass over the reorg window. */
+export interface ReorgReport {
+  /** Inclusive lower bound of the re-polled window. */
+  fromLedger: number;
+  /** Inclusive upper bound of the re-polled window. */
+  toLedger: number;
+  deleted: ReorgDeletion[];
+  changed: ReorgChange[];
+  /** Events present in the new truth that had not been stored yet. */
+  added: RawEvent[];
 }

@@ -14,17 +14,13 @@ import type {
 
 /**
  * The storage trait. Everything above Module 2 — the API, the CLI — depends on
- * this interface and never on SQLite directly, which is what keeps a Postgres
- * backend a drop-in addition rather than a rewrite.
+ * this interface and never on SQLite directly, which is what keeps a Postgres backend a drop-in addition rather than a rewrite.
  *
  * Implementations must guarantee:
  *
- * - `insertEvents` is idempotent on `LensEvent.id`. Module 1 delivers
- *   at-least-once, so the same event will arrive twice and must not duplicate.
- * - `queryEvents` returns events ordered by `id`, which for Soroban event ids
- *   is the same as ledger order.
- * - Pagination is keyset, not offset: a page boundary stays correct while new
- *   events are being written behind it.
+ * - `insertEvents` is idempotent on `LensEvent.id`. Module 1 delivers at-least-once, so the same event will arrive twice and must not duplicate.
+ * - `queryEvents` returns events ordered by `id`, which for Soroban event ids * is the same as ledger order.
+ * - Pagination is keyset, not offset: a page boundary stays correct while new * events are being written behind it.
  */
 export interface EventStore {
   /** Apply any pending migrations. Safe to call repeatedly. */
@@ -50,16 +46,15 @@ export interface EventStore {
 
   /**
    * Write every event as NDJSON (one decoded LensEvent per line) to
-   * `destPath` — a format that outlives this backend, unlike a raw copy of
-   * the database file. Consistent even while the indexer is writing:
+   * `destPath` — a format that outlives this backend, unlike a raw copy of * the database file. Consistent even while the indexer is writing:
    * internally takes a point-in-time snapshot before reading from it.
    * @returns how many events were written.
    */
   exportSnapshot(destPath: string): Promise<number>;
 
   /**
-   * Read an NDJSON snapshot written by exportSnapshot() (or `lens seed`'s
-   * fixture format is not this — see the CLI) and insert every event.
+   * Read an NDJSON snapshot written by exportSnapshot() (or ``lens seed` fixture
+   * format is not this — see the CLI) and insert every event.
    * Idempotent the same way insertEvents() is: importing the same snapshot
    * twice does not duplicate rows.
    * @returns how many rows were newly inserted.
@@ -68,9 +63,9 @@ export interface EventStore {
 
   /**
    * Force a WAL checkpoint. A continuously-writing indexer with a long-lived
-   * reader (the API, kept open by an in-flight request) can grow `-wal`
+   * reader (the API, kept open by in-flight request) can grow `-wal`
    * without bound between natural checkpoints, which looks like a disk leak.
-   * `'TRUNCATE'` — the default — is the only mode that actually shrinks the
+   * `'TRUNCATE' — the default — is the only mode that actually shrinks the
    * file on disk; the others merely flush into the main database.
    */
   checkpoint(mode?: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE'): Promise<void>;
@@ -188,7 +183,38 @@ export interface EventStore {
   /** Recompute one row's derived columns from its stored raw XDR. */
   repairRow(id: string): Promise<void>;
 
+  /**
+   * Reconcile the most recent `N` ledgers against a fresh view of the chain.
+   *
+   * Stellar's consensus makes deep reorgs very unlikely, but not impossible.
+   * Events are written as they arrive and never revisited, so a reorg would
+   * leave permanently wrong rows with no way to detect them. This re-polls the
+   * tail of the chain and converges the store on the new truth.
+   *
+   * @fetchLedger A callback that returns the currently-canonical events
+   *   for one ledger, in the same raw shape the indexer writes.
+   * @param ledgers How many of the most recently-indexed ledgers to revisit.
+   * @returns a summary of what changed. Deletions and changes are logged
+   *   loudly by the implementation.
+   */
+  reconcileRecent(
+    fetchLedger: (ledger: number) => Promise<RawEventInput[]>,
+    ledgers?: number,
+  ): Promise<ReconcileResult>;
+
   close(): Promise<void>;
+}
+
+/** Summary of a single reconcile pass. */
+export interface ReconcileResult {
+  /** How many of the most recent ledgers were re-visited. */
+  ledgersChecked: number;
+  /** Rows that existed locally but are no longer canonical, and were removed. */
+  deleted: number;
+  /** Rows whose content changed and were rewritten. */
+  changed: number;
+  /** Rows that were missing locally and were inserted. */
+  inserted: number;
 }
 
 /** Ceiling on `limit`, enforced by every implementation. */
@@ -198,7 +224,7 @@ export const DEFAULT_MAX_QUERY_LIMIT = 1000;
  * Ceiling on `limit`, overridable with `LENS_MAX_QUERY_LIMIT`.
  *
  * Read once at module load rather than per call, so every layer — the store's
- * clamp, the API's rejection message and the served OpenAPI spec — agrees on
+ * clamp, the API's rejection message and the served OpenAPI spec — agree on
  * one number for the life of the process.
  *
  * An unusable value falls back to the default: an operator who typo'd this
@@ -218,4 +244,24 @@ export const DEFAULT_QUERY_LIMIT = 50;
 export function normaliseLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_QUERY_LIMIT;
   return Math.min(Math.max(Math.trunc(limit), 1), MAX_QUERY_LIMIT);
+}
+
+/** Default number of tail ledgers re-visited on each reconcile pass. */
+export const DEFAULT_RECONCILE_LEDGERS = 10;
+
+/**
+ * Resolve how many tail ledgers to re-poll on each cycle, from
+ * `LENS_RECONCILE_LEDGERS`. Defaults to a small number, as deep reorgs are
+ * very unlikely; an unusable value falls back to the default rather than
+ * disabling reconciliation by accident.
+ */
+export const RECONCILE_LEDGERS: number = resolveReconcileLedgers(
+  process.env.LENS_RECONCILE_LEDGERS,
+);
+
+export function resolveReconcileLedgers(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_RECONCILE_LEDGERS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_RECONCILE_LEDGERS;
+  return Math.trunc(value);
 }
