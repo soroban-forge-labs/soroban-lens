@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, chmod, rm } from 'node:fs/promises';
+import { mkdtemp, chmod, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -341,3 +341,182 @@ test('doctor warns that skew could not be measured when the RPC is unreachable',
   assert.match(skew.detail, /could not read/);
 });
 
+
+// ── #141 --contracts-file ────────────────────────────────────────────────────
+
+import { loadContractIdsFromFile, ContractFileParseError } from '@soroban-lens/ingest';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+
+const runFile = promisify(execFile);
+const CLI_BIN = fileURLToPath(new URL('../dist/bin.js', import.meta.url));
+const REPO_ROOT_CF = fileURLToPath(new URL('../../../', import.meta.url));
+
+/** Run the lens binary as a real subprocess (same helper pattern as bin.test.js). */
+async function runLens(args, options = {}) {
+  try {
+    const { stdout, stderr } = await runFile(process.execPath, [CLI_BIN, ...args], {
+      timeout: 20_000,
+      cwd: REPO_ROOT_CF,
+      ...options,
+    });
+    return { code: 0, stdout, stderr };
+  } catch (error) {
+    return { code: error.code ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
+  }
+}
+
+const SAC2 = 'CBIELTK6YBZJU5UP2WWQEQDYCUHCC2MUNSSSEKQ7QHFLC3WFG2UOEFMK';
+
+test('loadContractIdsFromFile: happy path — loads ids and skips comments and blanks', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cf-'));
+  const file = join(dir, 'contracts.txt');
+  await writeFile(file, [
+    '# This is a comment',
+    '',
+    SAC,
+    '  # indented comment',
+    '  ',
+    SAC2,
+    '',
+  ].join('\n'));
+
+  const ids = await loadContractIdsFromFile(file);
+  assert.deepEqual(ids, [SAC, SAC2]);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('loadContractIdsFromFile: deduplicates silently', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cf-'));
+  const file = join(dir, 'contracts.txt');
+  await writeFile(file, [SAC, SAC, SAC2].join('\n'));
+
+  const ids = await loadContractIdsFromFile(file);
+  assert.deepEqual(ids, [SAC, SAC2]);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('loadContractIdsFromFile: throws ContractFileParseError with line number for a bad id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cf-'));
+  const file = join(dir, 'contracts.txt');
+  await writeFile(file, [
+    '# good comment',
+    SAC,
+    'NOT_A_CONTRACT_ID',
+    SAC2,
+  ].join('\n'));
+
+  await assert.rejects(
+    () => loadContractIdsFromFile(file),
+    (err) => {
+      assert.ok(err instanceof ContractFileParseError, 'should be ContractFileParseError');
+      assert.equal(err.line, 3, 'line number must be 1-based');
+      assert.equal(err.value, 'NOT_A_CONTRACT_ID');
+      assert.match(err.message, /:3:/);
+      assert.match(err.message, /NOT_A_CONTRACT_ID/);
+      return true;
+    },
+  );
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('loadContractIdsFromFile: throws with message for a missing file', async () => {
+  await assert.rejects(
+    () => loadContractIdsFromFile('/tmp/this-file-does-not-exist-lens-141.txt'),
+    (err) => {
+      assert.match(err.message, /cannot read contracts file/);
+      return true;
+    },
+  );
+});
+
+test('loadContractIdsFromFile: handles a 20-id file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cf-'));
+  const file = join(dir, 'contracts.txt');
+  // Generate 20 syntactically valid contract StrKeys by varying the suffix.
+  // Valid base32 chars for StrKey are A-Z and 2-7 only (no 0, 1, 8, 9).
+  // Use letters only to stay well within the alphabet.
+  const SUFFIXES = [
+    'AA', 'AB', 'AC', 'AD', 'AE', 'AF', 'AG', 'AH', 'AI', 'AJ',
+    'AK', 'AL', 'AM', 'AN', 'AO', 'AP', 'AQ', 'AR', 'AS', 'AT',
+  ];
+  const ids20 = SUFFIXES.map((s) => 'C' + ('A'.repeat(53) + s).slice(0, 55));
+  await writeFile(file, [
+    '# 20 contracts',
+    '',
+    ...ids20,
+    '',
+    '# end',
+  ].join('\n'));
+
+  const loaded = await loadContractIdsFromFile(file);
+  assert.equal(loaded.length, 20);
+  assert.deepEqual(loaded, ids20);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('lens doctor with --contracts-file loads ids from file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cf-cli-'));
+  const file = join(dir, 'contracts.txt');
+  const dbPath = join(dir, 'lens.db');
+  await writeFile(file, `# watch the XLM SAC\n${SAC}\n`);
+
+  const { code, stdout } = await runLens([
+    'doctor',
+    '--contracts-file', file,
+    '--db', dbPath,
+    '--data-dir', dir,
+    '--rpc-url', DEAD_RPC,
+  ]);
+  // RPC will fail (dead endpoint) but contract id check should pass.
+  assert.match(stdout, /1 configured/i);
+  // Exit code 1 because RPC is unreachable, but not 2 (argument error).
+  assert.ok(code === 0 || code === 1, `unexpected exit code ${code}`);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('lens doctor: --contracts-file merged with -c flags', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cf-merge-'));
+  const file = join(dir, 'contracts.txt');
+  const dbPath = join(dir, 'lens.db');
+  await writeFile(file, `${SAC2}\n`);
+
+  const { code, stdout } = await runLens([
+    'doctor',
+    '-c', SAC,
+    '--contracts-file', file,
+    '--db', dbPath,
+    '--data-dir', dir,
+    '--rpc-url', DEAD_RPC,
+  ]);
+  assert.match(stdout, /2 configured/i);
+  assert.ok(code === 0 || code === 1, `unexpected exit code ${code}`);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('lens: --contracts-file with a bad id exits 2 and reports line number', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cf-bad-'));
+  const file = join(dir, 'contracts.txt');
+  await writeFile(file, `# comment\n${SAC}\nGBQHHOH72M522QBF7SMY57JH6FIN7YKTZUWSO4S5IFBXV3B7FI2UQLIQ\n`);
+
+  const { code, stderr } = await runLens([
+    'doctor',
+    '--contracts-file', file,
+    '--db', ':memory:',
+    '--data-dir', dir,
+  ]);
+  assert.equal(code, 2);
+  assert.match(stderr, /:3:/);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('lens: --contracts-file with a missing file exits 2', async () => {
+  const { code, stderr } = await runLens([
+    'doctor',
+    '--contracts-file', '/tmp/no-such-file-lens-141.txt',
+    '--db', ':memory:',
+  ]);
+  assert.equal(code, 2);
+  assert.match(stderr, /cannot read contracts file/);
+});

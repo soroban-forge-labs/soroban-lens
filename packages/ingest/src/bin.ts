@@ -10,6 +10,7 @@ import { LensRpcClient } from './rpc-client.js';
 import { EventPoller } from './poller.js';
 import { FileCursorStore, MemoryCursorStore } from './cursor.js';
 import { resolveNetwork, NETWORKS } from './networks.js';
+import { loadContractIdsFromFile } from './contract-id.js';
 import type { EventType } from './types.js';
 import { IngestMetrics } from './metrics.js';
 import { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';
@@ -81,6 +82,9 @@ Usage:
 
 Options:
   -c, --contract <id>      Contract id to watch. Repeatable (max 5 per RPC filter).
+      --contracts-file <path>
+                           File of contract ids to watch: one id per line,
+                           # comments and blank lines ignored. Merged with any -c flags.
   -n, --network <name>     ${Object.keys(NETWORKS).join(' | ')}  (default: testnet)
   -r, --rpc-url <url>      Override the network's RPC URL.
       --start-ledger <n>   First ledger to read when no cursor is stored.
@@ -122,6 +126,7 @@ async function main(argv: string[]): Promise<number> {
     args: argv,
     options: {
       contract: { type: 'string', short: 'c', multiple: true },
+      'contracts-file': { type: 'string' },
       network: { type: 'string', short: 'n' },
       'rpc-url': { type: 'string', short: 'r' },
       'start-ledger': { type: 'string' },
@@ -150,15 +155,35 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  const contractIds =
-    values.contract ??
-    (process.env.LENS_CONTRACT_IDS ?? '')
+  // Resolve contract ids: merge -c flags, --contracts-file, and LENS_CONTRACT_IDS.
+  // Priority: flags > file > environment. Duplicates are silently dropped.
+  let contractIds: string[];
+  {
+    const envIds = (process.env.LENS_CONTRACT_IDS ?? '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
 
+    let fileIds: string[] = [];
+    if (values['contracts-file'] !== undefined) {
+      try {
+        fileIds = await loadContractIdsFromFile(values['contracts-file']);
+      } catch (error) {
+        process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
+        return 2;
+      }
+    }
+
+    const seen = new Set<string>();
+    const merged: string[] = [];
+    for (const id of [...(values.contract ?? []), ...fileIds, ...envIds]) {
+      if (!seen.has(id)) { seen.add(id); merged.push(id); }
+    }
+    contractIds = merged;
+  }
+
   if (contractIds.length === 0) {
-    process.stderr.write('error: at least one --contract is required\n');
+    process.stderr.write('error: at least one --contract or --contracts-file is required\n');
     process.stderr.write(`${USAGE}\n`);
     return 2;
   }
