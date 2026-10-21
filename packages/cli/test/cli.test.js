@@ -341,3 +341,124 @@ test('doctor warns that skew could not be measured when the RPC is unreachable',
   assert.match(skew.detail, /could not read/);
 });
 
+
+// ── #141 --contracts-file ────────────────────────────────────────────────────
+
+import { execFile as _execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { writeFile, mkdtemp as _mkdtemp, rm as _rm } from 'node:fs/promises';
+
+const execFileP = promisify(_execFile);
+const LENS_BIN = fileURLToPath(new URL('../dist/bin.js', import.meta.url));
+
+const FAKE_IDS = [
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAF',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAG',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAI',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJ',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAL',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAN',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAO',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAR',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAS',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAT',
+];
+
+async function lens(args, env = {}) {
+  try {
+    const { stdout, stderr } = await execFileP('node', [LENS_BIN, ...args], {
+      env: { ...process.env, LENS_CONTRACT_IDS: '', LENS_RPC_HEADERS: '', ...env },
+      timeout: 20_000,
+    });
+    return { code: 0, stdout, stderr };
+  } catch (error) {
+    return { code: error.code ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
+  }
+}
+
+test('--contracts-file: documented in the lens help text', async () => {
+  const { code, stdout } = await lens(['doctor', '--help']);
+  assert.equal(code, 0);
+  assert.ok(stdout.includes('--contracts-file'), 'lens help is missing --contracts-file');
+});
+
+test('--contracts-file: missing file exits 2 with a clear error', async () => {
+  const { code, stderr } = await lens(['doctor', '--contracts-file', '/no/such/file.txt']);
+  assert.equal(code, 2);
+  assert.match(stderr, /could not read/);
+  assert.match(stderr, /no\/such\/file/);
+});
+
+test('--contracts-file: bad id reports its 1-based line number', async () => {
+  const dir = await _mkdtemp(join(tmpdir(), 'lens-cli-cf-'));
+  try {
+    const path = join(dir, 'bad.txt');
+    await writeFile(path, `${FAKE_IDS[0]}\n# comment\n\nbad-id-here\n`);
+    const { code, stderr } = await lens(['doctor', '--contracts-file', path]);
+    assert.equal(code, 2);
+    assert.match(stderr, /line 4/);
+    assert.match(stderr, /bad-id-here/);
+  } finally {
+    await _rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('--contracts-file: 20 ids with comments loads correctly (not rejected at arg-parse)', async () => {
+  const dir = await _mkdtemp(join(tmpdir(), 'lens-cli-cf-'));
+  try {
+    const path = join(dir, 'twenty.txt');
+    const lines = ['# soroban-lens contracts', '', ...FAKE_IDS, '', '# end'];
+    await writeFile(path, lines.join('\n'));
+    // doctor will fail at the RPC check (DEAD host), not at argument parsing.
+    const { code, stderr } = await lens(
+      ['doctor', '--contracts-file', path],
+      { LENS_RPC_URL: 'https://rpc.invalid.soroban-lens-test' },
+    );
+    // exit 1 means doctor ran (some check failed) — NOT exit 2 (arg error).
+    assert.notEqual(code, 2, `arg parsing should not reject 20-id file: ${stderr}`);
+  } finally {
+    await _rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('--contracts-file: ids merged with -c flags, duplicates silently dropped', async () => {
+  const dir = await _mkdtemp(join(tmpdir(), 'lens-cli-cf-'));
+  try {
+    const path = join(dir, 'merge.txt');
+    // File has FAKE_IDS[0], -c also passes FAKE_IDS[0] (duplicate) and FAKE_IDS[1].
+    await writeFile(path, `${FAKE_IDS[0]}\n`);
+    const { code, stderr } = await lens(
+      ['doctor', '--contracts-file', path, '-c', FAKE_IDS[0], '-c', FAKE_IDS[1]],
+      { LENS_RPC_URL: 'https://rpc.invalid.soroban-lens-test' },
+    );
+    assert.notEqual(code, 2, `merge should pass arg validation: ${stderr}`);
+  } finally {
+    await _rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('--contracts-file: account id on line 2 reports line 2', async () => {
+  const dir = await _mkdtemp(join(tmpdir(), 'lens-cli-cf-'));
+  try {
+    const path = join(dir, 'account.txt');
+    const accountId = 'GBQHHOH72M522QBF7SMY57JH6FIN7YKTZUWSO4S5IFBXV3B7FI2UQLIQ';
+    await writeFile(path, `${FAKE_IDS[0]}\n${accountId}\n`);
+    const { code, stderr } = await lens(['doctor', '--contracts-file', path]);
+    assert.equal(code, 2);
+    assert.match(stderr, /line 2/);
+    assert.match(stderr, /Account ids start with 'G'/);
+  } finally {
+    await _rm(dir, { recursive: true, force: true });
+  }
+});
