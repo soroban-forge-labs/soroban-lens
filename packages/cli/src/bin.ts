@@ -14,7 +14,7 @@ import type { ContractSpecRecord, RawEventInput } from '@soroban-lens/store';
 import { resolveConfig } from './config.js';
 import { formatReport, runDoctor } from './doctor.js';
 import { runIndexer } from './indexer.js';
-import { assertContractIds } from '@soroban-lens/ingest';
+import { assertContractIds, loadContractIdsFromFile } from '@soroban-lens/ingest';
 import {
   describeSpecRecord,
   lookupContractSpec,
@@ -45,6 +45,11 @@ Usage:
 
 Options:
   -c, --contract <id>     Contract to watch. Repeatable. (env LENS_CONTRACT_IDS)
+      --contracts-file <path>
+                          File of contract ids to watch: one id per line,
+                          # comments and blank lines ignored. Ids from the file
+                          are merged with any -c flags. Every id is validated
+                          with the same rules as -c, and errors report the line number.
       --rpc-header <h>    'Name: value' header for the RPC. Repeatable.
                           Values are redacted in all output. (env LENS_RPC_HEADERS)
       --retry-attempts <n>     Total RPC attempts including the first.
@@ -70,6 +75,7 @@ Options:
 Examples:
   lens doctor -c CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
   lens index  -c CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC --once
+  lens index  --contracts-file ./my-contracts.txt --once
   lens seed
 `;
 
@@ -81,6 +87,7 @@ async function main(argv: string[]): Promise<number> {
     args: rest,
     options: {
       contract: { type: 'string', short: 'c', multiple: true },
+      'contracts-file': { type: 'string' },
       network: { type: 'string', short: 'n' },
       'rpc-url': { type: 'string', short: 'r' },
       db: { type: 'string', short: 'd' },
@@ -110,10 +117,30 @@ async function main(argv: string[]): Promise<number> {
     return values.help ? 0 : 2;
   }
 
+  // Load ids from --contracts-file if given, then merge with any -c flags.
+  // Flags always win over the file for duplicates (Set deduplication keeps
+  // the first occurrence, so -c flags go in first).
+  let contractIds: string[] | undefined;
+  if (values['contracts-file'] !== undefined) {
+    let fileIds: string[];
+    try {
+      fileIds = await loadContractIdsFromFile(values['contracts-file']);
+    } catch (error) {
+      process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 2;
+    }
+    const merged = new Map<string, string>();
+    for (const id of (values.contract ?? [])) merged.set(id, id);
+    for (const id of fileIds) if (!merged.has(id)) merged.set(id, id);
+    contractIds = [...merged.values()];
+  } else if (values.contract !== undefined) {
+    contractIds = values.contract;
+  }
+
   const config = resolveConfig({
     ...(values.network !== undefined ? { network: values.network } : {}),
     ...(values['rpc-url'] !== undefined ? { rpcUrl: values['rpc-url'] } : {}),
-    ...(values.contract !== undefined ? { contracts: values.contract } : {}),
+    ...(contractIds !== undefined ? { contracts: contractIds } : {}),
     ...(values.db !== undefined ? { db: values.db } : {}),
     ...(values['data-dir'] !== undefined ? { dataDir: values['data-dir'] } : {}),
     ...(values['start-ledger'] !== undefined ? { startLedger: Number(values['start-ledger']) } : {}),
