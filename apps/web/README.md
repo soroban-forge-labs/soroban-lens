@@ -31,6 +31,9 @@ always emitting.
 - **Expandable rows** — click a row for decoded topics and value, plus the raw
   XDR the decoding came from, under a disclosure.
 - **Network switcher** — selects between configured API instances.
+- **Explorer links** — transactions, contracts and account addresses link out
+  to the explorer configured for the selected network (Stellar Expert by
+  default). A network with no explorer configured shows plain text, not a link.
 - **Load more** — keyset pagination via the API's `nextCursor`.
 
 Filters and the selected network persist in `localStorage`.
@@ -45,6 +48,27 @@ VITE_LENS_API_URL=http://localhost:8080
 
 # several — a JSON object of { label: apiBaseUrl }
 VITE_LENS_NETWORKS='{"testnet":"http://localhost:8080","mainnet":"http://localhost:8081"}'
+
+# block explorer links, keyed by the same labels (optional)
+VITE_LENS_EXPLORERS='{"testnet":"https://stellar.expert/explorer/testnet"}'
+```
+
+Explorer links default to Stellar Expert for `testnet`, `futurenet` and
+`mainnet`/`public`. Any other label gets **no link** — an unknown network has no
+sensible explorer, and a private instance must not link out to a public one.
+
+For a self-hosted explorer, either give a base URL that follows Stellar
+Expert's layout, or map each entity to a URL template containing `{value}`:
+
+```bash
+# base URL + /tx/…, /contract/…, /account/…
+VITE_LENS_EXPLORERS='{"local":"https://explorer.internal/stellar/testnet"}'
+
+# routes of your own; an entity you leave out gets no link
+VITE_LENS_EXPLORERS='{"local":{"tx":"https://horizon.internal/transactions/{value}","account":"https://horizon.internal/accounts/{value}"}}'
+
+# turn links off for a label that would otherwise get the default
+VITE_LENS_EXPLORERS='{"testnet":""}'
 ```
 
 Each network is a **separate API instance**, because one database holds events
@@ -78,6 +102,9 @@ hands it to a static server.
 setting unless the header toggle overrides it; the choice is saved in `localStorage`.
 
 ## Tests
+
+Explorer links are built in [`src/explorer.ts`](./src/explorer.ts), which is
+pure and covered by `test/explorer.test.js`.
 
 `npm test -w @soroban-lens/web` runs the production build, which type-checks
 every component under `strict` with `noUnusedLocals`. There is no component test

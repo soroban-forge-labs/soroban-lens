@@ -45,8 +45,9 @@ dev dependencies are never installed here.
 
 **The web image bakes its API URL at build time.** Vite inlines `VITE_*`
 variables into the bundle; it does not read them at runtime. Changing
-`LENS_WEB_NETWORKS` means `docker compose build web`, not a restart. This is the
-single most common confusion with this setup.
+`LENS_WEB_NETWORKS` — or the optional `LENS_WEB_EXPLORERS` block-explorer map —
+means `docker compose build web`, not a restart. This is the single most common
+confusion with this setup.
 
 **The API URL is a browser URL.** It is `http://localhost:8080` — the host's
 port mapping — not `http://api:8080`. The compose service name only resolves

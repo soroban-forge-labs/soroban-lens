@@ -375,6 +375,7 @@ export function App(): React.JSX.Element {
       <ErrorBoundary title="Event Table Error">
         <EventTable
           events={events}
+          network={selected.label}
           showContract={showContract}
           loading={loading}
           onTopicClick={(topic) => setFilters({ ...filters, topic })}

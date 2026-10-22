@@ -1,9 +1,14 @@
 import { useEffect, useState } from 'react';
 import type { LensEvent } from '../types.js';
 import { prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
+import { ExplorerLink } from './ExplorerLink.js';
+
+/** A StrKey that names an account or a contract, as opposed to any other string. */
+const ADDRESS_ID = /^[GC][A-Z2-7]{55}$/;
 
 interface Props {
   event: LensEvent;
+  network: string;
   showContract: boolean;
   onTopicClick: (topic: string) => void;
 }
@@ -21,7 +26,7 @@ function readTimeFormat(): TimeFormat {
 }
 
 /** One table row, expanding in place to show the full decoded payload. */
-export function EventRow({ event, showContract, onTopicClick }: Props): React.JSX.Element {
+export function EventRow({ event, network, showContract, onTopicClick }: Props): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(readTimeFormat);
   const firstTopic = event.topics[0];
@@ -106,7 +111,11 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
             </>
           )}
         </td>
-        <td className="col-tx mono" title={event.txHash}>{truncate(event.txHash, 6, 6)}</td>
+        <td className="col-tx mono" title={event.txHash}>
+          <ExplorerLink network={network} entity="tx" value={event.txHash} title="Open this transaction in a block explorer">
+            {truncate(event.txHash, 6, 6)}
+          </ExplorerLink>
+        </td>
       </tr>
 
       {expanded && (
@@ -123,10 +132,24 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
 
               <dl className="detail-meta">
                 <div><dt>Event id</dt><dd className="mono">{event.id}</dd></div>
-                <div><dt>Contract</dt><dd className="mono">{event.contractId}</dd></div>
+                <div>
+                  <dt>Contract</dt>
+                  <dd className="mono">
+                    <ExplorerLink network={network} entity="contract" value={event.contractId}>
+                      {event.contractId}
+                    </ExplorerLink>
+                  </dd>
+                </div>
                 <div><dt>Ledger</dt><dd className="mono">{event.ledger}</dd></div>
                 <div><dt>Closed at</dt><dd className="mono">{event.ledgerClosedAt}</dd></div>
-                <div><dt>Transaction</dt><dd className="mono">{event.txHash}</dd></div>
+                <div>
+                  <dt>Transaction</dt>
+                  <dd className="mono">
+                    <ExplorerLink network={network} entity="tx" value={event.txHash}>
+                      {event.txHash}
+                    </ExplorerLink>
+                  </dd>
+                </div>
                 <div><dt>Position</dt><dd className="mono">tx {event.transactionIndex} / op {event.operationIndex}</dd></div>
               </dl>
 
@@ -162,12 +185,29 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
               <section>
                 <h4>Topics</h4>
                 <ol className="topic-list">
-                  {event.topics.map((topic, i) => (
-                    <li key={i}>
-                      <span className="type-tag">{topic.type}</span>
-                      <code>{prettyJson(topic.value)}</code>
-                    </li>
-                  ))}
+                  {event.topics.map((topic, i) => {
+                    // Account and contract addresses are the identifiers worth
+                    // leaving the app for; everything else is just data.
+                    const address = typeof topic.value === 'string' && ADDRESS_ID.test(topic.value)
+                      ? topic.value
+                      : null;
+                    return (
+                      <li key={i}>
+                        <span className="type-tag">{topic.type}</span>
+                        <code>
+                          {address ? (
+                            <ExplorerLink
+                              network={network}
+                              entity={address.startsWith('G') ? 'account' : 'contract'}
+                              value={address}
+                            >
+                              {address}
+                            </ExplorerLink>
+                          ) : prettyJson(topic.value)}
+                        </code>
+                      </li>
+                    );
+                  })}
                 </ol>
               </section>
 

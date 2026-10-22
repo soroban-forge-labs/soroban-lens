@@ -16,6 +16,10 @@ COPY apps/web/ apps/web/
 
 ARG VITE_LENS_NETWORKS='{"testnet":"http://localhost:8080"}'
 ENV VITE_LENS_NETWORKS=$VITE_LENS_NETWORKS
+# Optional block-explorer map; empty means "use the built-in Stellar Expert
+# defaults", which is what a plain compose build gets.
+ARG VITE_LENS_EXPLORERS=''
+ENV VITE_LENS_EXPLORERS=$VITE_LENS_EXPLORERS
 RUN npm run build --workspace @soroban-lens/web
 
 
