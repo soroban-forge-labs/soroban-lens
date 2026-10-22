@@ -128,3 +128,72 @@ test('a non-numeric retry value is ignored rather than becoming NaN', async () =
   assert.notEqual(code, 2, `expected a runtime failure, not an argument error: ${stderr}`);
   assert.ok(!stderr.includes('NaN'), `NaN leaked into the retry path: ${stderr}`);
 });
+
+// ── #141 --contracts-file ────────────────────────────────────────────────────
+
+import { writeFile, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const FAKE_IDS = [
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB',
+];
+
+test('--contracts-file is documented in the help text', async () => {
+  const { stdout } = await cli(['--help']);
+  assert.ok(stdout.includes('--contracts-file'), 'help is missing --contracts-file');
+});
+
+test('--contracts-file: missing file exits 2 with a clear error', async () => {
+  const { code, stderr } = await cli(['--contracts-file', '/does/not/exist.txt', '--no-resume']);
+  assert.equal(code, 2);
+  assert.match(stderr, /could not read/);
+});
+
+test('--contracts-file: a bad id reports its line number and exits 2', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-ingest-cf-'));
+  try {
+    const path = join(dir, 'bad.txt');
+    await writeFile(path, `${FAKE_IDS[0]}\nnot-a-contract\n`);
+    const { code, stderr } = await cli(['--contracts-file', path, '--no-resume']);
+    assert.equal(code, 2);
+    assert.match(stderr, /line 2/);
+    assert.match(stderr, /not-a-contract/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('--contracts-file: valid file is accepted and not treated as a missing-contract error', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-ingest-cf-'));
+  try {
+    const path = join(dir, 'contracts.txt');
+    // Comments and blanks should be ignored; ids should be accepted.
+    await writeFile(path, `# comment\n\n${FAKE_IDS[0]}\n${FAKE_IDS[1]}\n`);
+    // The binary will fail at the RPC, not at argument parsing (exit != 2).
+    const { code, stderr } = await cli(
+      ['--contracts-file', path, '--no-resume', '--once'],
+      { LENS_RPC_URL: 'https://rpc.invalid.soroban-lens-test' },
+    );
+    assert.notEqual(code, 2, `argument parsing should not reject a valid file: ${stderr}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('--contracts-file: ids merged with -c flags, duplicates dropped', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-ingest-cf-'));
+  try {
+    const path = join(dir, 'merge.txt');
+    await writeFile(path, `${FAKE_IDS[0]}\n`);
+    // Pass the same id via -c; the binary should accept without "duplicate" error.
+    const { code, stderr } = await cli(
+      ['--contracts-file', path, '-c', FAKE_IDS[0], '-c', FAKE_IDS[1], '--no-resume', '--once'],
+      { LENS_RPC_URL: 'https://rpc.invalid.soroban-lens-test' },
+    );
+    assert.notEqual(code, 2, `merge should not fail argument validation: ${stderr}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

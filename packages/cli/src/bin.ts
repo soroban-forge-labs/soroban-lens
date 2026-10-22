@@ -14,7 +14,7 @@ import type { ContractSpecRecord, RawEventInput } from '@soroban-lens/store';
 import { resolveConfig } from './config.js';
 import { formatReport, runDoctor } from './doctor.js';
 import { runIndexer } from './indexer.js';
-import { assertContractIds } from '@soroban-lens/ingest';
+import { assertContractIds, loadContractIdsFromFile, ContractFileParseError } from '@soroban-lens/ingest';
 import {
   describeSpecRecord,
   lookupContractSpec,
@@ -45,6 +45,8 @@ Usage:
 
 Options:
   -c, --contract <id>     Contract to watch. Repeatable. (env LENS_CONTRACT_IDS)
+      --contracts-file <path>  Load contract ids from a file (one per line, # comments allowed).
+                          Merged with any -c flags; duplicates silently dropped.
       --rpc-header <h>    'Name: value' header for the RPC. Repeatable.
                           Values are redacted in all output. (env LENS_RPC_HEADERS)
       --retry-attempts <n>     Total RPC attempts including the first.
@@ -83,6 +85,7 @@ async function main(argv: string[]): Promise<number> {
     args: rest,
     options: {
       contract: { type: 'string', short: 'c', multiple: true },
+      'contracts-file': { type: 'string' },
       network: { type: 'string', short: 'n' },
       'rpc-url': { type: 'string', short: 'r' },
       'rpc-url-list': { type: 'string', multiple: true },
@@ -114,12 +117,40 @@ async function main(argv: string[]): Promise<number> {
     return values.help ? 0 : 2;
   }
 
+  // Load contract ids from --contracts-file (if given) and merge with -c flags.
+  // File ids come first; -c ids are appended, then duplicates are dropped.
+  let contractIds: string[] | undefined;
+  if (values['contracts-file'] !== undefined) {
+    let fileIds: string[];
+    try {
+      fileIds = await loadContractIdsFromFile(values['contracts-file']);
+    } catch (error) {
+      if (error instanceof ContractFileParseError) {
+        process.stderr.write(`error: ${error.message}\n`);
+        return 2;
+      }
+      throw error;
+    }
+    // Merge: file ids first, then -c flags; duplicates silently dropped.
+    const seen = new Set<string>(fileIds);
+    const merged = [...fileIds];
+    for (const id of values.contract ?? []) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        merged.push(id);
+      }
+    }
+    contractIds = merged;
+  } else if (values.contract !== undefined) {
+    contractIds = values.contract;
+  }
+
   const config = resolveConfig({
     ...(values.network !== undefined ? { network: values.network } : {}),
     ...(values['rpc-url'] !== undefined ? { rpcUrl: values['rpc-url'] } : {}),
     ...(values['rpc-url-list'] !== undefined ? { rpcUrls: values['rpc-url-list'] } : {}),
     ...(values['archive-url'] !== undefined ? { archiveUrl: values['archive-url'] } : {}),
-    ...(values.contract !== undefined ? { contracts: values.contract } : {}),
+    ...(contractIds !== undefined ? { contracts: contractIds } : {}),
     ...(values.db !== undefined ? { db: values.db } : {}),
     ...(values['data-dir'] !== undefined ? { dataDir: values['data-dir'] } : {}),
     ...(values['start-ledger'] !== undefined ? { startLedger: Number(values['start-ledger']) } : {}),

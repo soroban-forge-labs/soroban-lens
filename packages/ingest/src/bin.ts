@@ -13,6 +13,7 @@ import { resolveNetwork, NETWORKS } from './networks.js';
 import type { EventType } from './types.js';
 import { IngestMetrics } from './metrics.js';
 import { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';
+import { loadContractIdsFromFile, ContractFileParseError } from './contract-id.js';
 
 const EVENT_TYPES: EventType[] = ['contract', 'system', 'diagnostic'];
 
@@ -81,6 +82,8 @@ Usage:
 
 Options:
   -c, --contract <id>      Contract id to watch. Repeatable (max 5 per RPC filter).
+      --contracts-file <path>  Load contract ids from a file (one per line, # comments allowed).
+                           Merged with any -c flags; duplicates silently dropped.
   -n, --network <name>     ${Object.keys(NETWORKS).join(' | ')}  (default: testnet)
   -r, --rpc-url <url>      Override the network's RPC URL.
       --start-ledger <n>   First ledger to read when no cursor is stored.
@@ -124,6 +127,7 @@ async function main(argv: string[]): Promise<number> {
     args: argv,
     options: {
       contract: { type: 'string', short: 'c', multiple: true },
+      'contracts-file': { type: 'string' },
       network: { type: 'string', short: 'n' },
       'rpc-url': { type: 'string', short: 'r' },
       'start-ledger': { type: 'string' },
@@ -153,12 +157,37 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  const contractIds =
-    values.contract ??
-    (process.env.LENS_CONTRACT_IDS ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+  // Load contract ids from --contracts-file (if given) and merge with -c flags.
+  // File ids come first; -c ids are appended, then duplicates are dropped.
+  let contractIds: string[];
+  if (values['contracts-file'] !== undefined) {
+    let fileIds: string[];
+    try {
+      fileIds = await loadContractIdsFromFile(values['contracts-file']);
+    } catch (error) {
+      if (error instanceof ContractFileParseError) {
+        process.stderr.write(`error: ${error.message}\n`);
+        return 2;
+      }
+      throw error;
+    }
+    const seen = new Set<string>(fileIds);
+    const merged = [...fileIds];
+    for (const id of values.contract ?? []) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        merged.push(id);
+      }
+    }
+    contractIds = merged;
+  } else {
+    contractIds =
+      values.contract ??
+      (process.env.LENS_CONTRACT_IDS ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+  }
 
   if (contractIds.length === 0) {
     process.stderr.write('error: at least one --contract is required\n');
