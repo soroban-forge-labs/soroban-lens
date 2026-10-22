@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { UrlState } from './route.js';
+import { parseUrl, stringifyUrl, sameFilterView } from './route.js';
 
 /**
  * Re-run `tick` on an interval, and once immediately.
@@ -115,6 +117,116 @@ export function usePersistentState<T>(key: string, initial: T): [T, (value: T) =
   );
 
   return [state, set];
+}
+
+/**
+ * Sync view state with the URL, using `localStorage` as the fallback for a bare
+ * visit (no query params and no `/events/{id}` path).
+ *
+ * Filter changes (contract, topic, successfulOnly, live, network) push a new
+ * history entry so back/forward move through filter history. Expanding or
+ * collapsing an event replaces the current entry — that is navigation within
+ * the same view, not a new view.
+ *
+ * On popstate (back/forward), the state is re-read from the URL.
+ */
+export function useUrlState(
+  initial: UrlState,
+  storageKeys: { filters: string; network: string },
+): [UrlState, (next: UrlState) => void] {
+  const [state, setState] = useState<UrlState>(() => {
+    const parsed = parseUrl(window.location.pathname, window.location.search);
+    if (parsed) {
+      // A shared link — fill in defaults the URL omitted.
+      return {
+        filters: {
+          contractId: parsed.filters.contractId,
+          topic: parsed.filters.topic,
+          successfulOnly: parsed.filters.successfulOnly,
+          live: parsed.filters.live,
+          fromLedger: parsed.filters.fromLedger,
+          toLedger: parsed.filters.toLedger,
+        },
+        network: parsed.network || initial.network,
+        expandedEventId: parsed.expandedEventId,
+      };
+    }
+    // Bare visit: restore from localStorage, falling back to the defaults.
+    let restored = initial;
+    try {
+      const f = window.localStorage.getItem(storageKeys.filters);
+      const n = window.localStorage.getItem(storageKeys.network);
+      if (f || n) {
+        restored = {
+          // Merge over the defaults: filters saved before a field existed
+          // (e.g. fromLedger/toLedger) must not come back undefined.
+          filters: f ? { ...initial.filters, ...(JSON.parse(f) as Partial<UrlState['filters']>) } : initial.filters,
+          network: n ? (JSON.parse(n) as string) : initial.network,
+          expandedEventId: null,
+        };
+      }
+    } catch {
+      // Corrupted localStorage — use defaults.
+    }
+    return restored;
+  });
+
+  // Track the previous state to decide push vs replace.
+  const prev = useRef(state);
+
+  const update = useCallback(
+    (next: UrlState): void => {
+      const url = stringifyUrl(next);
+      // Filter/network changes create a new history entry; expansion-only
+      // changes replace the current one.
+      if (sameFilterView(prev.current, next)) {
+        window.history.replaceState(next, '', url);
+      } else {
+        window.history.pushState(next, '', url);
+        // Persist to localStorage so a future bare visit restores this view.
+        try {
+          window.localStorage.setItem(storageKeys.filters, JSON.stringify(next.filters));
+          window.localStorage.setItem(storageKeys.network, JSON.stringify(next.network));
+        } catch {
+          // Private browsing or quota — the URL is the source of truth now.
+        }
+      }
+      prev.current = next;
+      setState(next);
+    },
+    [storageKeys.filters, storageKeys.network],
+  );
+
+  // Listen for back/forward navigation.
+  useEffect(() => {
+    const onPopState = (): void => {
+      const parsed = parseUrl(window.location.pathname, window.location.search);
+      const next: UrlState = parsed ?? {
+        filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+        network: '',
+        expandedEventId: null,
+      };
+      // Fill defaults the URL omitted.
+      if (!next.network) next.network = prev.current.network;
+      prev.current = next;
+      setState(next);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  // Replace the initial URL on mount so the address bar reflects the state
+  // (e.g. a bare visit with localStorage values gets query params written in).
+  useEffect(() => {
+    const url = stringifyUrl(state);
+    if (url !== window.location.pathname + window.location.search) {
+      window.history.replaceState(state, '', url);
+    }
+    // Only on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return [state, update];
 }
 
 export type Theme = 'light' | 'dark';

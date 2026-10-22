@@ -10,7 +10,7 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --force",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "npm run build && tsc -p tsconfig.test.json && node --test test/api.test.js test/format.test.js",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test test/api.test.js test/format.test.js test/route.test.js",
     "test:a11y": "node test/accessibility.test.js"
   },
   "dependencies": {

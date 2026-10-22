@@ -1,14 +1,5 @@
 import type { TopicCount } from '../types.js';
-
-// Filter state interface for event filtering
-export interface FilterState {
-  contractId: string;
-  topic: string;
-  successfulOnly: boolean;
-  live: boolean;
-  fromLedger: string;
-  toLedger: string;
-}
+import type { FilterState } from '../route.js';
 
 interface Props {
   value: FilterState;

@@ -11,5 +11,5 @@
     "composite": false,
     "declaration": false
   },
-  "include": ["src/types.ts", "src/format.ts", "src/api.ts"]
+  "include": ["src/types.ts", "src/format.ts", "src/api.ts", "src/route.ts"]
 }
