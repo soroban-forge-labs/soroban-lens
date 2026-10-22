@@ -28,6 +28,9 @@ export {
 } from './clock-skew.js';
 export type { ClockSkew } from './clock-skew.js';
 
+export { compareRetention, describeRetentionGap } from './retention.js';
+export type { RetentionComparison, RetentionSnapshot } from './retention.js';
+
 export { FileCursorStore, MemoryCursorStore } from './cursor.js';
 export type { CursorStore, CursorState } from './cursor.js';
 
@@ -54,3 +57,8 @@ export type { RetryOptions } from './retry.js';
 
 export { IngestMetrics } from './metrics.js';
 export { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';
+
+export { FailoverRpcClient } from './rpc-pool.js';
+export type { RpcPoolOptions } from './rpc-pool.js';
+export { StellarArchiveSource } from './archive.js';
+export type { ArchiveSourceOptions, ArchiveRange } from './archive.js';

@@ -14,8 +14,8 @@ import type {
 
 /**
  * The storage trait. Everything above Module 2 — the API, the CLI — depends on
- * this interface and never on SQLite directly, which is what keeps a Postgres
- * backend a drop-in addition rather than a rewrite.
+ * this interface and never on SQLite directly, which is what keeps a Postgres is a
+ * drop-in addition rather than a rewrite.
  *
  * Implementations must guarantee:
  *
@@ -161,6 +161,21 @@ export interface EventStore {
   pruneBefore(ledger: number): Promise<number>;
 
   /**
+   * Delete the oldest events in ledger chunks until the on-disk size
+   * (`bytes` + its WAL) fits under `targetBytes`, then checkpoint.
+   *
+   * This is the size-based counterpart to `pruneBefore`, for operators who
+   * care about disk rather than a ledger horizon. It always prunes the
+   * oldest rows first and stops as soon as the target is met.
+   *
+   * @param targetBytes Maximum combined size of the database and its WAL.
+   * @param chunkLedgers How many ledgers to remove per pass. Defaults to
+   *   a small chunk so a single pass never deletes more than needed.
+   * @returns a summary of what was removed.
+   */
+  pruneToSize(targetBytes: number, chunkLedgers?: number): Promise<PruneToSizeResult>;
+
+  /**
    * Re-run the decoder over stored rows and rewrite their decoded columns in
    * place, from the raw XDR that was always kept for exactly this.
    *
@@ -191,6 +206,20 @@ export interface EventStore {
   close(): Promise<void>;
 }
 
+/** Result of a size-based prune pass. */
+export interface PruneToSizeResult {
+  /** How many event rows were deleted. */
+  rowsRemoved: number;
+  /** How many ledgers were deleted (at least one row each). */
+  ledgersRemoved: number;
+  /** The highest ledger that was pruned, `null` if nothing was. */
+  highestPrunedLedger: number | null;
+  /** Combined database + WAL bytes after the pass. */
+  sizeBytesAfter: number;
+  /** Whether the store fits under the target after the pass. */
+  withinTarget: boolean;
+}
+
 /** Ceiling on `limit`, enforced by every implementation. */
 export const DEFAULT_MAX_QUERY_LIMIT = 1000;
 
@@ -198,7 +227,7 @@ export const DEFAULT_MAX_QUERY_LIMIT = 1000;
  * Ceiling on `limit`, overridable with `LENS_MAX_QUERY_LIMIT`.
  *
  * Read once at module load rather than per call, so every layer — the store's
- * clamp, the API's rejection message and the served OpenAPI spec — agrees on
+ * clamp, the API's rejection message and the served OpenAPI spec — agree on
  * one number for the life of the process.
  *
  * An unusable value falls back to the default: an operator who typo'd this

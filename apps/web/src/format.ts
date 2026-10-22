@@ -53,6 +53,25 @@ export function relativeTime(iso: string, now: number = Date.now()): string {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+/**
+ * Exact timestamp for the `title` attribute, so the precise time is always
+ * available on hover regardless of the relative/absolute toggle.
+ */
+export function exactTime(iso: string): string {
+  const then = new Date(iso);
+  return Number.isFinite(then.getTime()) ? then.toISOString() : iso;
+}
+
+/**
+ * Absolute form of a timestamp for the toggle: "2024-01-02 15:04:05 UTC".
+ * Falls back to the raw input when it is not a parseable date.
+ */
+export function absoluteTime(iso: string): string {
+  const then = new Date(iso);
+  if (!Number.isFinite(then.getTime())) return iso;
+  return `${then.toISOString().slice(0, 19).replace('T', ' ')} UTC`;
+}
+
 /** Pretty-print a decoded payload for the expanded row. */
 export function prettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2);

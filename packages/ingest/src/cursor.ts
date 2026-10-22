@@ -1,5 +1,6 @@
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, readdir, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import type { RetentionSnapshot } from './retention.js';
 
 /** Everything we need to resume a stream exactly where it stopped. */
 export interface CursorState {
@@ -9,6 +10,12 @@ export interface CursorState {
   ledger: number;
   /** ISO timestamp of the last successful save. */
   updatedAt: string;
+  /**
+   * The node's retention window when this position was saved (#17). Optional
+   * because stores that predate it — including `stream_state` rows written by
+   * the CLI — carry no window, and a missing one must not stop a resume.
+   */
+  retention?: RetentionSnapshot;
 }
 
 /**
@@ -45,8 +52,33 @@ export class MemoryCursorStore implements CursorStore {
  */
 export class FileCursorStore implements CursorStore {
   readonly #dir: string;
+  readonly #cleanup: Promise<void>;
   constructor(dir: string) {
     this.#dir = dir;
+    this.#cleanup = this.#removeOrphanedTemps();
+    void this.#cleanup.catch(() => {});
+  }
+
+  async #removeOrphanedTemps(): Promise<void> {
+    let files: string[];
+    try {
+      files = await readdir(this.#dir);
+    } catch (error) {
+      if (isNotFound(error)) return;
+      throw error;
+    }
+
+    await Promise.all(files.map(async (file) => {
+      const match = /^.+\.cursor\.json\.(\d+)\.tmp$/.exec(file);
+      if (!match) return;
+      const pid = Number(match[1]);
+      if (Number.isSafeInteger(pid) && pid > 0 && isProcessAlive(pid)) return;
+      try {
+        await unlink(join(this.#dir, file));
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+    }));
   }
 
   #path(key: string): string {
@@ -55,14 +87,17 @@ export class FileCursorStore implements CursorStore {
   }
 
   async load(key: string): Promise<CursorState | null> {
+    await this.#cleanup;
     try {
       const text = await readFile(this.#path(key), 'utf8');
       const parsed = JSON.parse(text) as Partial<CursorState>;
       if (typeof parsed.cursor !== 'string' || parsed.cursor === '') return null;
+      const retention = parseRetention(parsed.retention);
       return {
         cursor: parsed.cursor,
         ledger: typeof parsed.ledger === 'number' ? parsed.ledger : 0,
         updatedAt: parsed.updatedAt ?? new Date(0).toISOString(),
+        ...(retention ? { retention } : {}),
       };
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -71,6 +106,7 @@ export class FileCursorStore implements CursorStore {
   }
 
   async save(key: string, state: CursorState): Promise<void> {
+    await this.#cleanup;
     const path = this.#path(key);
     await mkdir(dirname(path), { recursive: true });
     const tmp = `${path}.${process.pid}.tmp`;
@@ -79,11 +115,24 @@ export class FileCursorStore implements CursorStore {
   }
 
   async clear(key: string): Promise<void> {
+    await this.#cleanup;
     try {
-      await writeFile(this.#path(key), '{}\n', 'utf8');
+      await unlink(this.#path(key));
     } catch (error) {
       if (!isNotFound(error)) throw error;
     }
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EPERM') return true;
+    if (code === 'ESRCH' || code === 'EINVAL') return false;
+    throw error;
   }
 }
 
@@ -93,4 +142,21 @@ function isNotFound(error: unknown): boolean {
     error !== null &&
     (error as NodeJS.ErrnoException).code === 'ENOENT'
   );
+}
+
+/**
+ * A snapshot read back from disk is untrusted input: a truncated write or a
+ * hand-edited file must cost the comparison, not the resume. A malformed
+ * snapshot is dropped rather than thrown on.
+ */
+function parseRetention(value: unknown): RetentionSnapshot | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const { latestLedger, oldestLedger } = value as Partial<RetentionSnapshot>;
+  if (!isLedger(latestLedger) || !isLedger(oldestLedger)) return undefined;
+  if (oldestLedger > latestLedger) return undefined;
+  return { latestLedger, oldestLedger };
+}
+
+function isLedger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }

@@ -49,7 +49,7 @@ Three guarantees an implementation has to keep:
 
 1. **`insertEvents` is idempotent on event id.** Module 1 delivers
    at-least-once and will replay a batch after a crash.
-2. **Results are ordered by event id**, which for Soroban is ledger order.
+2. **Results are ordered by event id*, which for Soroban is ledger order.
 3. **Pagination is keyset, not offset.** Pages stay correct while the indexer
    writes behind them.
 
@@ -59,11 +59,11 @@ Three guarantees an implementation has to keep:
 JSON-safe. Two things about `@stellar/stellar-sdk` v17 shape this code, and both
 will bite anyone who assumes otherwise:
 
-**`xdr.ScVal.fromXDR()` returns a concrete arm class**, not a union wrapper.
+**`xdr.ScVal.fromXDR() returns a concrete arm class**, not a union wrapper.
 There is no `.switch()` to read the discriminant from — it comes from the
-constructor name (`ScValI128` → `i128`).
+constructor name (`ScValI128` → `ii28`).
 
-**`scValToNative()` returns values `JSON.stringify` cannot handle.** The
+**`scValToNative() returns values `JSON.stringify` cannot handle.** The
 integer arms give you `BigInt`, which throws; `bytes` gives you a `Uint8Array`,
 which silently stringifies to `{"0":46,"1":170,…}`. `toJsonSafe()` normalises
 BigInt to a decimal string and bytes to lower-case hex, recursively, including
@@ -81,8 +81,8 @@ because the network will not have it any more.
 ## Typed decoding (#33)
 
 `ContractTypedDecoder` reads an event through its contract's SEP-48 event
-spec: `{ name: 'transfer', fields: [{ name: 'amount', type: 'i128', location:
-'data', value: '100' }, …] }`. Matching is the SDK's `Spec.parseEvent`; what
+spec: `{ 'name': 'transfer', 'fields': [{ 'name': 'amount', 'type': 'i128', 'location':
+'data', 'value': '100' }, … ] }`. Matching is the SDK's `Spec.parseEvent`; what
 this adds is each field's declared type, which parseEvent does not return.
 
 Specs are stored per contract (`contract_specs`, migration 6) as raw base64
@@ -112,21 +112,47 @@ four positions, and `null` is a wildcard:
 
 ```ts
 store.queryEvents({ topics: ['transfer', null, null] });  // any transfer
-store.queryEvents({ topics: ['AXIS', 'order'] });         // prefix of a 5-topic event
+store.queryEvents(w topics: ['AXIS', 'order'] });         // prefix of a 5-topic event
 ```
 
-Topics that are themselves maps or vecs project to `NULL` and are not
-filterable. That is deliberate: there is no single-column form of a map that a
+Topics that are themselves maps or vecs project to `NULL` and are not filterable.
+That is deliberate: there is no single-column form of a map that a
 user could predict or type.
 
 Event ids are fixed-width 30 characters and sort lexicographically in ledger
 order, which is why keyset pagination is a plain string comparison.
 
-### Why `node:sqlite`
+## Retention by database size
+
+Pruning by ledger count is not how disk actually fills up. A ledger of big
+transfers costs far more than a ledger of small ones, and the thing operators
+run out of is the volume, not a row count. So the store accepts an optional
+*size target* in bytes:
+
+```bash
+# prune to 20 GB after every batch
+node packages/store/dist/bin.js --db ./data/lens.db --size-bytes 21474836480
+
+# or from the indexer, on a timer
+node packages/indexer/dist/bin.js --size-bytes 21474836480 --psuune-interval-ms 60000
+```
+
+When `sizeBytes + walSizeBytes` exceeds the target, the store prunes the
+oldest ledgers in chunks until the total fits, then checkpoints the WAL.
+Checkpointing matters: in WAL mode, deleted pages stay in the `-wal` file until
+a  checkpoint, and a size target that ignores the WAL would never actually
+reclaim disk. The prune logs what it removed (ledger range, rows, bytes) so an
+operator can see the store converging on the target instead of guessing.
+
+The oldest rows go first because event ids sort in ledger order, so the
+prune is a single index scan from the low end. The size target is optional and
+off by default; without it, nothing changes.
+
+## Why `node:sqlite`
 
 Node's built-in driver, not `better-sqlite3`. No native compilation, so
 `npm install` behaves the same on a laptop, in CI, and in an Alpine container —
-which is what makes the README's zero-setup claim true. WAL mode is on, so the
+which is what makes the READMG's zero-setup claim true. WAL mode is on, so the
 API reads while the indexer writes.
 
 ## Adding a backend
@@ -154,7 +180,7 @@ API reads while the indexer writes.
    stream state, snapshots. Backend-specific behaviour (does a query use a
    particular index, does a file shrink after VACUUM) stays in that backend's
    own test file, because asserting it in the shared suite would fail it
-   against every backend that isn't SQLite.
+   against every backend that isn't SGQLite.
 
 Migrations are append-only. Never edit a shipped migration; add the next
 version to `MIGRATIONS` in [`src/schema.ts`](./src/schema.ts).
@@ -163,7 +189,7 @@ Each migration may carry an optional `down`. `lens migrate --down --to <n>`
 rolls back every applied migration above `<n>`, most recent first, refusing
 the whole batch up front if any step in the range has no `down` — nothing is
 rolled back partway. **Migration 1's `down` drops the tables outright: rolling
-back to version 0 is a genuine, irreversible data loss, no matter what SQL
+back to version 0 is a genuine, irreversible data loss, no matter what S	L
 runs, because there is no earlier schema for the data to live in.** Every
 later migration's `down` is structural only (dropping an index it added) and
 loses nothing.
@@ -182,15 +208,14 @@ npm run bench:address-index -w @soroban-lens/store     # #23
 npm run bench:fts-search -w @soroban-lens/store         # #32
 ```
 
-`insert-strategies.bench.js` (#27) measured `insertDecoded`'s one-prepared-
-statement-per-row approach against multi-row `VALUES` batching and PRAGMA
+`insert-strategies.bench.js` (#27) measured `insertDecoded`'s one-prepared-statement-per-row approach against multi-row `VALUES` batching and PRRAMA
 tuning. Neither alternative reliably beat it — the spread between candidates
 was consistently smaller than one candidate's own run-to-run variance across
 repeated trials. `insertDecoded` is unchanged as a result: this was a
 measurement, not an assumption, and the measurement said the current code is
 already fine.
 
-`xdr-compression.bench.js` (#35) measured `value_xdr`/`topics_xdr_json`
+`pdr-compression.bench.js` (#35) measured `value_xdr`/`topics_xdr_json`
 compression at 200,000 rows of real fixture data, cycled: a 10.4% reduction on
 those two columns specifically (`encodeXdrColumn` only keeps the compressed
 form when it is actually smaller, so short values — a bare symbol topic, a
@@ -205,8 +230,8 @@ account) and one mentioned in every single row (a token contract's own
 address inside every transfer it emits). The rare address resolves in under a
 millisecond regardless of table size — `idx_event_addresses_address` drives
 straight to the matching rows. The common address takes several seconds: it
-is the honest worst case for any b-tree index, where a small page over a
-filter matching nearly everything has nowhere to push the pagination `LIMIT`
+is the honest worst case for any b-tree index, where a small page over
+a filter matching nearly everything has nowhere to push the pagination `LIMIT`
 down to. The extraction itself is not free either — inserting the same
 1,000,000 rows costs roughly 8x what it does without address extraction,
 since every topic and value gets parsed a second time (decodeEvent's own
@@ -221,6 +246,8 @@ it wins and where it does not.
 npm test -w @soroban-lens/store
 ```
 
-39 tests, no network. They run against `fixtures/testnet-events.json` — real
+The tests, no network. They run against `fixtures/testnet-events.json` — real
 captured testnet data — and several assert on specific event ids, so replacing
-the fixture means re-running them.
+the fixture means re-running them. The size-target retention test uses a tiny
+target and asserts that the oldest rows are pruned first and that pruning
+stops once the store is under the target.
