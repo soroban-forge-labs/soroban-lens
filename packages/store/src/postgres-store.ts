@@ -63,6 +63,8 @@ export interface PostgresStoreOptions {
   countCacheTtlMs?: number;
   /** Clock for the count cache's TTL, swappable in tests. Defaults to Date.now. */
   now?: () => number;
+  /** Prune oldest ledgers when `sizeBytes + walSizeBytes` exceeds this. Optional. */
+  maxSizeBytes?: number;
 }
 
 const noopLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -105,6 +107,7 @@ export class PostgresEventStore implements EventStore {
   readonly #log: Logger;
   readonly #countCacheTtlMs: number;
   readonly #now: () => number;
+  readonly #maxSizeBytes: number | undefined;
   readonly #countCache = new Map<string, { total: number; expiresAt: number }>();
 
   constructor(pool: PgPool, options: PostgresStoreOptions = {}, ownsPool = false) {
@@ -113,6 +116,7 @@ export class PostgresEventStore implements EventStore {
     this.#log = options.log ?? noopLogger;
     this.#countCacheTtlMs = options.countCacheTtlMs ?? 2000;
     this.#now = options.now ?? Date.now;
+    this.#maxSizeBytes = options.maxSizeBytes;
   }
 
   /** Open a pool, apply pending migrations (unless disabled) and return the store. */
@@ -613,6 +617,47 @@ export class PostgresEventStore implements EventStore {
     // other writers for no benefit. event_addresses rows go via ON DELETE CASCADE.
     const result = await this.#pool.query('DELETE FROM events WHERE ledger < $1', [ledger]);
     return result.rowCount ?? 0;
+  }
+
+  /**
+   * Prune the oldest ledgers in chunks until `sizeBytes + walSizeBytes` fits
+   * under `maxSizeBytes`, then checkpoint. Returns the number of rows removed.
+   * A no-op when no size target is configured.
+   */
+  async pruneToSize(maxSizeBytes = this.#maxSizeBytes): Promise<number> {
+    if (maxSizeBytes === undefined) return 0;
+    const CHUNK = 1000;
+    let removed = 0;
+    for (;;) {
+      const stats = await this.getStats();
+      const size = (stats.sizeBytes ?? 0) + (stats.walSizeBytes ?? 0);
+      if (size <= maxSizeBytes) break;
+      const { rows } = await this.#pool.query(
+        'SELECT ledger FROM events ORDER BY ledger ASC LIMIT 1',
+      );
+      const oldest = rows[0]?.['ledger'];
+      if (oldest === null || oldest === undefined) break;
+      const nextRow = await this.#pool.query(
+        'SELECT ledger FROM events WHERE ledger > $1 ORDER BY ledger ASC LIMIT 1',
+        [Number(oldest)],
+      );
+      const next = nextRow.rows[0]?.['ledger'];
+      const upper = next === null || next === undefined ? Number(oldest) + 1 : Number(next);
+      const result = await this.#pool.query(
+        'DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ledger < $1 ORDER BY ledger ASC, id ASC LIMIT $2)',
+        [upper, CHUNK],
+      );
+      const deleted = result.rowCount ?? 0;
+      removed += deleted;
+      this.#log.info(
+        'prune_by_size',
+        `pruned ${deleted} event(s) below ledger ${upper} to fit ${maxSizeBytes} bytes`,
+        { removed: deleted, ledger: upper, sizeBytes: size, maxSizeBytes },
+      );
+      if (deleted === 0) break;
+    }
+    if (removed > 0) await this.checkpoint();
+    return removed;
   }
 
   async redecode(all = false): Promise<number> {

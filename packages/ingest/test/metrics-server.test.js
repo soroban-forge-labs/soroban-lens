@@ -12,7 +12,7 @@ test('metrics endpoint serves live text, handles methods, and closes cleanly', a
     const response = await fetch(`${url}/metrics`);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('content-type'), 'text/plain; version=0.0.4; charset=utf-8');
-    assert.match(await response.text(), /lens_events_ingested_total 7\n/);
+    assert.match(await response.text(), /lens_events_ingested_total\{contract="other"\} 7\n/);
     const head = await fetch(`${url}/metrics`, { method: 'HEAD' });
     assert.equal(head.status, 200);
     assert.equal(await head.text(), '');

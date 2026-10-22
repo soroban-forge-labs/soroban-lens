@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { LensEvent } from '../types.js';
 import { prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
 
@@ -8,23 +8,68 @@ interface Props {
   onTopicClick: (topic: string) => void;
 }
 
+const TIME_FORMAT_KEY = 'lens.timeFormat';
+
+type TimeFormat = 'relative' | 'absolute';
+
+function readTimeFormat(): TimeFormat {
+  try {
+    return localStorage.getItem(TIME_FORMAT_KEY) === 'absolute' ? 'absolute' : 'relative';
+  } catch {
+    return 'relative';
+  }
+}
+
 /** One table row, expanding in place to show the full decoded payload. */
 export function EventRow({ event, showContract, onTopicClick }: Props): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
+  const [timeFormat, setTimeFormat] = useState<TimeFormat>(readTimeFormat);
   const firstTopic = event.topics[0];
   const topicLabel = firstTopic ? summarise(firstTopic) : '—';
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TIME_FORMAT_KEY, timeFormat);
+    } catch {
+      // ignore storage failures (private mode, quota, etc.)
+    }
+  }, [timeFormat]);
 
   return (
     <>
       <tr
         className={`event-row${expanded ? ' is-expanded' : ''}${event.inSuccessfulContractCall ? '' : ' is-failed'}`}
-        onClick={() => setExpanded((v) => !v)}
-        aria-expanded={expanded}
       >
-        <td className="col-toggle" aria-hidden="true">{expanded ? '▾' : '▸'}</td>
+        <td className="col-toggle">
+          <button
+            type="button"
+            aria-label={expanded ? 'Collapse event details' : 'Expand event details'}
+            aria-expanded={expanded}
+            onClick={() => setExpanded((v) => !v)}
+          >
+            {expanded ? '▾' : '▸'}
+          </button>
+        </td>
         <td className="col-ledger">
           <span className="mono">{event.ledger}</span>
-          <span className="muted small">{relativeTime(event.ledgerClosedAt)}</span>
+          <span className="muted small">
+            {timeFormat === 'absolute' ? (
+              <span className="mono">{event.ledgerClosedAt}</span>
+            ) : (
+              <span title={event.ledgerClosedAt}>{relativeTime(event.ledgerClosedAt)}</span>
+            )}{' '}
+            <button
+              type="button"
+              className="time-toggle"
+              title={timeFormat === 'relative' ? 'Show absolute timestamps' : 'Show relative timestamps'}
+              onClick={(e) => {
+                e.stopPropagation();
+                setTimeFormat((v) => (v === 'relative' ? 'absolute' : 'relative'));
+              }}
+            >
+              {timeFormat === 'relative' ? 'abs' : 'rel'}
+            </button>
+          </span>
         </td>
         {showContract && (
           <td className="col-contract mono" title={event.contractId}>
@@ -36,10 +81,7 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
             type="button"
             className="topic-chip"
             title={`Filter by "${topicLabel}"`}
-            onClick={(e) => {
-              e.stopPropagation();
-              onTopicClick(topicLabel);
-            }}
+            onClick={() => onTopicClick(topicLabel)}
           >
             {topicLabel}
           </button>

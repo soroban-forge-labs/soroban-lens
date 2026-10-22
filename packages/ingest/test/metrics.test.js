@@ -5,16 +5,33 @@ import { IngestMetrics, parseMetricsPort } from '../dist/index.js';
 test('metrics start at zero and accumulate counters independently', () => {
   const metrics = new IngestMetrics();
   assert.match(metrics.render(), /lens_metrics_ready 0\n/);
-  metrics.eventsIngested(3);
-  metrics.eventsIngested(2);
+  metrics.eventsIngested(3, 'CA');
+  metrics.eventsIngested(2, 'CA');
+  metrics.eventsIngested(4, 'CB');
   metrics.cursorRestarted();
-  assert.match(metrics.render(), /lens_events_ingested_total 5\n/);
+  assert.match(metrics.render(), /lens_events_ingested_total\{contract="CA"\} 5\n/);
+  assert.match(metrics.render(), /lens_events_ingested_total\{contract="CB"\} 4\n/);
   assert.match(metrics.render(), /lens_cursor_restarts_total 1\n/);
   metrics.progress(10, 20);
   assert.match(metrics.render(), /lens_current_ledger 10\n/);
   assert.match(metrics.render(), /lens_latest_ledger 20\n/);
+  assert.match(metrics.render(), /lens_rpc_stalled 0\n/);
+  metrics.rpcStalled(true);
+  assert.match(metrics.render(), /lens_rpc_stalled 1\n/);
+  metrics.rpcStalled(false);
+  assert.match(metrics.render(), /lens_rpc_stalled 0\n/);
   assert.match(metrics.render(), /lens_metrics_ready 1\n/);
-  assert.match(new IngestMetrics().render(), /lens_events_ingested_total 0\n/);
+  assert.doesNotMatch(new IngestMetrics().render(), /lens_events_ingested_total\{/);
+});
+
+test('contract label is capped, extra contracts fold into other', () => {
+  const metrics = new IngestMetrics();
+  for (let i = 0; i < 80; i++) metrics.eventsIngested(1, `C${i}`);
+  metrics.eventsIngested(1, 'C0');
+  const series = metrics.render().split('\n').filter((l) => l.startsWith('lens_events_ingested_total{'));
+  assert.equal(series.length, 51);
+  assert.ok(series.includes('lens_events_ingested_total{contract="C0"} 2'));
+  assert.ok(series.includes('lens_events_ingested_total{contract="other"} 30'));
 });
 
 test('metrics port accepts TCP ports and rejects ambiguous configuration', () => {

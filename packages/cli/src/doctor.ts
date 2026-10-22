@@ -1,6 +1,6 @@
 import { access, constants, mkdir, rm, writeFile, statfs } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { LensRpcClient, isContractId, describeClockSkew, CONTRACT_ID_HINT } from '@soroban-lens/ingest';
+import { FailoverRpcClient, StellarArchiveSource, isContractId, describeClockSkew, CONTRACT_ID_HINT } from '@soroban-lens/ingest';
 import { SqliteEventStore, LATEST_SCHEMA_VERSION } from '@soroban-lens/store';
 import { redactHeaders, type LensConfig } from './config.js';
 
@@ -39,6 +39,7 @@ export async function runDoctor(config: LensConfig): Promise<CheckResult[]> {
     checkDatabase(config.dbPath),
     checkRpc(config),
     checkClockSkew(config),
+    checkArchive(config),
   ]);
   return [...checks, checkContractIds(config.contractIds), checkRpcHeaders(config.rpcHeaders)];
 }
@@ -150,8 +151,8 @@ async function checkDatabase(dbPath: string): Promise<CheckResult> {
 }
 
 async function checkRpc(config: LensConfig): Promise<CheckResult> {
-  const client = new LensRpcClient({
-    rpcUrl: config.network.rpcUrl,
+  const client = new FailoverRpcClient({
+    rpcUrls: config.rpcUrls,
     // Headers are part of what makes the endpoint reachable, so doctor has to
     // use them or it would report a 401 the real indexer would never hit.
     ...(Object.keys(config.rpcHeaders).length > 0 ? { headers: config.rpcHeaders } : {}),
@@ -191,8 +192,8 @@ async function checkRpc(config: LensConfig): Promise<CheckResult> {
  * exactly the silent wrong answer this check exists to surface.
  */
 async function checkClockSkew(config: LensConfig): Promise<CheckResult> {
-  const client = new LensRpcClient({
-    rpcUrl: config.network.rpcUrl,
+  const client = new FailoverRpcClient({
+    rpcUrls: config.rpcUrls,
     ...(Object.keys(config.rpcHeaders).length > 0 ? { headers: config.rpcHeaders } : {}),
     timeoutSeconds: 10,
   });
@@ -232,6 +233,15 @@ async function checkClockSkew(config: LensConfig): Promise<CheckResult> {
  * itself is a provider API key, and doctor output is the single most likely
  * thing to end up pasted into an issue.
  */
+async function checkArchive(config: LensConfig): Promise<CheckResult> {
+  if (!config.archiveUrl) return { name: 'History archive', status: 'warn', detail: 'not configured', fix: 'Set LENS_ARCHIVE_URL to backfill ledgers older than RPC retention.' };
+  try {
+    const range = await new StellarArchiveSource({ archiveUrl: config.archiveUrl }).range();
+    return { name: 'History archive', status: 'pass', detail: `${config.archiveUrl} covers ledgers ${range.fromLedger}..${range.toLedger}` };
+  } catch (error) {
+    return { name: 'History archive', status: 'fail', detail: `${config.archiveUrl}: ${message(error)}`, fix: 'Check the archive root and that .well-known/stellar-history.json is reachable.' };
+  }
+}
 function checkRpcHeaders(headers: Record<string, string>): CheckResult {
   const names = Object.keys(headers);
   return {
