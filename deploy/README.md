@@ -37,8 +37,11 @@ stops the stack at a clear error rather than at three confusing ones.
 
 ## Things that are easy to get wrong here
 
-**`Dockerfile.node` installs only the four Node workspaces**, skipping the web
-app's large dev dependencies. The web image is separate.
+**`Dockerfile.node` is a two-stage build.** The builder installs dev
+dependencies and compiles the four Node workspaces. The runtime stage installs
+only production dependencies and copies only `dist/`, `packages/api/openapi.json`
+and the fixtures used by `lens seed`. The web app has its own image, so its large
+dev dependencies are never installed here.
 
 **The web image bakes its API URL at build time.** Vite inlines `VITE_*`
 variables into the bundle; it does not read them at runtime. Changing

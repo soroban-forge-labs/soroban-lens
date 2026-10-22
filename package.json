@@ -16,7 +16,7 @@
     "apps/web"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "node api.js && npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:integration": "npm run test:integration --workspace @soroban-lens/cli",
     "bench": "npm run build -w @soroban-lens/store -w @soroban-lens/api && node bench/run.js",

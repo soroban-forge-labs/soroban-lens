@@ -16,9 +16,10 @@ An invalid port or occupied bind address fails startup.
 
 | Metric | Meaning |
 | --- | --- |
-| `lens_events_ingested_total` | Events acknowledged when the consumer requests the next batch and the cursor saves successfully; includes replay across process restarts |
+| `lens_events_ingested_total{contract}` | Per-contract events acknowledged (label cardinality capped at 50 distinct contracts, later ones counted under `contract="other"`; series appear after a contract's first event). Events acknowledged when the consumer requests the next batch and the cursor saves successfully; includes replay across process restarts |
 | `lens_current_ledger` | Last acknowledged page's event ledger; an empty page advances to the reported network tip |
 | `lens_latest_ledger` | Latest ledger reported by that page |
+| `lens_rpc_stalled` | 1 when the RPC-reported tip has not advanced for the configured threshold; resets to 0 when it advances |
 | `lens_metrics_ready` | 1 after the first acknowledged page; 0 before that |
 | `lens_rpc_request_duration_seconds` | Histogram per `method`, covering every successful or failed attempt, excluding retry waits |
 | `lens_rpc_errors_total` | Failed attempts by `method` and `kind`: `rate_limit`, `http`, `timeout`, `json_rpc`, or `transport` |
@@ -28,6 +29,9 @@ Metrics live in memory and reset when the process restarts. The event counter is
 an ingestion throughput measure, not the number of unique rows in storage.
 A consumer that stops immediately after a yielded batch has not acknowledged
 that page under the poller's cursor protocol. Metrics update on empty pages too.
+The poller reports a stalled RPC tip after 60 seconds without advancement by
+default; configure the threshold with `--stalled-threshold` or
+`LENS_STALLED_THRESHOLD_MS`.
 Ledger lag measures the most recent event on nonempty pages, so a quiet contract
 can show lag even when the poller has caught up. Inspect the workload before
 choosing an alert threshold. Error labels never contain provider messages,

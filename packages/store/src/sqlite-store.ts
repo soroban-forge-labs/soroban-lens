@@ -70,6 +70,14 @@ export interface SqliteStoreOptions {
    * a test.
    */
   forceDisableFts5?: boolean;
+  /**
+   * Optional disk target for the database plus its WAL, in bytes. When set,
+   * the indexer calls pruneToSize() on an interval: once
+   * `sizeBytes + walSizeBytes` exceeds this, the oldest ledgers are deleted in
+   * chunks until the total fits, then the WAL is checkpointed. Unset means no
+   * size-based pruning — the store only prunes when a caller asks it to.
+   */
+  sizeTargetBytes?: number;
 }
 
 const noopLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -87,6 +95,7 @@ export class SqliteEventStore implements EventStore {
   readonly #log: Logger;
   readonly #countCacheTtlMs: number;
   readonly #now: () => number;
+  readonly #sizeTargetBytes: number | undefined;
   readonly #countCache = new Map<string, { total: number; expiresAt: number }>();
   #statements: Statements | null = null;
   #checkpointTimer: ReturnType<typeof setInterval> | undefined;
@@ -97,6 +106,7 @@ export class SqliteEventStore implements EventStore {
     this.#log = options.log ?? noopLogger;
     this.#countCacheTtlMs = options.countCacheTtlMs ?? 2000;
     this.#now = options.now ?? Date.now;
+    this.#sizeTargetBytes = options.sizeTargetBytes;
     if (options.path !== ':memory:') mkdirSync(dirname(options.path), { recursive: true });
     this.#db = new DatabaseSync(options.path);
 
@@ -658,6 +668,75 @@ export class SqliteEventStore implements EventStore {
     return before;
   }
 
+  /**
+   * Prune the oldest ledgers until the database plus its WAL fits under
+   * `targetBytes`, then checkpoint. Returns what was removed.
+   *
+   * Deletes in chunks (whole ledgers at a time, oldest first) rather than one
+   * giant DELETE: a single statement over millions of rows holds the write
+   * lock for the whole scan, and the indexer cannot insert behind it. A chunk
+   * is a bounded pause, and re-measuring between chunks is what lets the loop
+   * stop as soon as the file is actually small enough — the file size, not a
+   * row count, is the thing being targeted.
+   *
+   * VACUUM runs once at the end, not per chunk: it rewrites the whole file,
+   * so doing it per chunk would be O(chunks × file size) of work for the same
+   * result. The final checkpoint flushes the WAL so the on-disk total the
+   * caller measures next actually reflects the prune.
+   */
+  async pruneToSize(targetBytes: number): Promise<{ ledgers: number; events: number }> {
+    if (this.#path === ':memory:') return { ledgers: 0, events: 0 };
+
+    const CHUNK_LEDGERS = 1000;
+    let ledgers = 0;
+    let events = 0;
+
+    for (;;) {
+      const { sizeBytes, walSizeBytes } = this.#sizes();
+      const total = (sizeBytes ?? 0) + (walSizeBytes ?? 0);
+      if (total <= targetBytes) break;
+
+      // The oldest ledger still present, and the ledger CHUNK_LEDGERS past it
+      // — everything strictly below `cutoff` is one chunk's worth of the
+      // oldest data. Using ledger boundaries rather than row LIMIT keeps a
+      // ledger atomic: a half-pruned ledger would leave a gap in the middle
+      // of the history, which is worse than a slightly larger prune.
+      const oldest = this.#db.prepare('SELECT MIN(ledger) AS ledger FROM events').get() as {
+        ledger: number | null;
+      };
+      if (oldest.ledger === null) break; // nothing left to prune
+      const cutoff = oldest.ledger + CHUNK_LEDGERS;
+
+      const removed = this.#db
+        .prepare('SELECT COUNT(*) AS n FROM events WHERE ledger < ?')
+        .get(cutoff) as { n: number };
+      if (removed.n === 0) break; // fewer than a chunk's worth left; nothing more to give
+
+      this.#db.exec('BEGIN');
+      try {
+        this.#db.prepare('DELETE FROM events WHERE ledger < ?').run(cutoff);
+        this.#db.exec('COMMIT');
+      } catch (error) {
+        this.#db.exec('ROLLBACK');
+        throw error;
+      }
+      ledgers += CHUNK_LEDGERS;
+      events += removed.n;
+    }
+
+    if (events > 0) {
+      this.#db.exec('VACUUM');
+      this.#db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      this.#log.info(
+        'prune_by_size',
+        `pruned ${events} event(s) across ~${ledgers} ledger(s) to fit under ${targetBytes} bytes`,
+        { events, ledgers, targetBytes },
+      );
+    }
+
+    return { ledgers, events };
+  }
+
   async redecode(all = false): Promise<number> {
     const rows = this.#rawRows(all ? '' : 'WHERE decode_error IS NOT NULL');
     if (rows.length === 0) return 0;
@@ -911,6 +990,12 @@ export class SqliteEventStore implements EventStore {
     // The mode is typed and only ever one of four literal SQL keywords, never
     // interpolated from anything a caller could inject.
     this.#db.exec(`PRAGMA wal_checkpoint(${mode})`);
+  }
+
+  /** The configured disk target, if any. The indexer reads this to decide
+   * whether to schedule pruneToSize() on an interval. */
+  get sizeTargetBytes(): number | undefined {
+    return this.#sizeTargetBytes;
   }
 
   async close(): Promise<void> {

@@ -6,6 +6,8 @@ export interface FilterState {
   topic: string;
   successfulOnly: boolean;
   live: boolean;
+  fromLedger: string;
+  toLedger: string;
 }
 
 interface Props {
@@ -15,9 +17,23 @@ interface Props {
   onUseExample: () => void;
 }
 
+/** Returns true if the string is empty OR a non-negative integer with no decimals. */
+function isValidLedger(v: string): boolean {
+  return v === '' || (/^\d+$/.test(v) && Number.isInteger(Number(v)) && Number(v) >= 0);
+}
+
 export function Filters({ value, onChange, knownTopics, onUseExample }: Props): React.JSX.Element {
   const set = <K extends keyof FilterState>(key: K, v: FilterState[K]): void =>
     onChange({ ...value, [key]: v });
+
+  const fromInvalid = !isValidLedger(value.fromLedger);
+  const toInvalid = !isValidLedger(value.toLedger);
+  const rangeInvalid =
+    !fromInvalid &&
+    !toInvalid &&
+    value.fromLedger !== '' &&
+    value.toLedger !== '' &&
+    Number(value.fromLedger) > Number(value.toLedger);
 
   return (
     <form className="filters" onSubmit={(e) => e.preventDefault()}>
@@ -56,6 +72,47 @@ export function Filters({ value, onChange, knownTopics, onUseExample }: Props): 
             <option key={t.topic} value={t.topic}>{`${t.topic} (${t.count})`}</option>
           ))}
         </datalist>
+      </div>
+
+      <div className="field">
+        <label htmlFor="fromLedger">From ledger</label>
+        <input
+          id="fromLedger"
+          name="fromLedger"
+          inputMode="numeric"
+          placeholder="e.g. 1000000"
+          value={value.fromLedger}
+          aria-invalid={fromInvalid || rangeInvalid}
+          onChange={(e) => set('fromLedger', e.target.value.trim())}
+        />
+        {fromInvalid && (
+          <span className="warning" role="alert" style={{ padding: '2px 6px', fontSize: '11px' }}>
+            Must be a non-negative integer
+          </span>
+        )}
+      </div>
+
+      <div className="field">
+        <label htmlFor="toLedger">To ledger</label>
+        <input
+          id="toLedger"
+          name="toLedger"
+          inputMode="numeric"
+          placeholder="e.g. 2000000"
+          value={value.toLedger}
+          aria-invalid={toInvalid || rangeInvalid}
+          onChange={(e) => set('toLedger', e.target.value.trim())}
+        />
+        {toInvalid && (
+          <span className="warning" role="alert" style={{ padding: '2px 6px', fontSize: '11px' }}>
+            Must be a non-negative integer
+          </span>
+        )}
+        {rangeInvalid && !toInvalid && (
+          <span className="warning" role="alert" style={{ padding: '2px 6px', fontSize: '11px' }}>
+            Must be ≥ from ledger
+          </span>
+        )}
       </div>
 
       <div className="field field-checks">

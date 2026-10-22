@@ -44,6 +44,12 @@ over it with a cast.
 response types by hand in `apps/web/src/types.ts`. Person D can work against
 `npm run seed` data while Person C is mid-refactor.
 
+## Architecture decisions
+
+Decisions that shape the module graph or the storage/API contracts are recorded
+as short ADRs in [`docs/adr/`](docs/adr/README.md). If a change revisits a settled
+decision, add a new ADR that supersedes the old one instead of rewriting history.
+
 ## The interfaces
 
 Three contracts hold the system together. Keep them small; changing them costs
