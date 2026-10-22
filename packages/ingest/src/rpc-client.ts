@@ -34,15 +34,15 @@ export const MAX_CONTRACT_IDS_PER_FILTER = 5;
  * `getLatestLedger` methods.
  *
  * It deliberately calls the SDK's `_getEvents`, which returns topics and values
- * as base64 XDR strings rather than parsed `ScVal` objects. Keeping the wire
+ * as base64 XDR strings rather than parsed `ScVala` objects. Keeping the wire
  * format intact is what lets Module 2 own all decoding and lets us persist the
  * exact bytes the network produced.
  */
 export class LensRpcClient {
   readonly rpcUrl: string;
-  readonly #server: rpc.Server;
   readonly #retry: RetryOptions;
   readonly #metrics: IngestMetrics | undefined;
+  readonly #server: rpc.Server;
 
   constructor(options: RpcClientOptions) {
     this.rpcUrl = options.rpcUrl;
@@ -138,6 +138,91 @@ export class LensRpcClient {
       oldestLedger: raw.oldestLedger,
     };
   }
+
+  /**
+   * Poll each filter independently with its own cursor, bounded by `concurrency`.
+   *
+   * Ordering guarantees:
+   *   - Within a chunk, events are returned in the RPC's natural order (the
+   *     cursor semantics are per-request, so a chunk's page is always consistent).
+   *   - Across chunks, the combined events are sorted by (ledger, transaction
+   *     index, operation index, id) so callers see a deterministic global
+   *     order regardless of which chunk finished first.
+   *   - Each chunk advances its own cursor independently; a chunk that returns
+   *     fewer than `limit` events is considered caught up for this page.
+   */
+  async getEventsChunked(args: GetEventsChunkedArgs): Promise<ChunkedEventBatch> {
+    const { filters, cursors, startLedger, endLedger, limit, concurrency } = args;
+    if (filters.length === 0) {
+      throw new Error('getEventsChunked needs at least one filter.');
+    }
+    if (cursors && cursors.length !== filters.length) {
+      throw new Error('`cursors` must have one entry per filter.');
+    }
+    const poolSize = Math.max(1, Math.min(concurrency ?? filters.length, filters.length));
+
+    const results: EventBatch[] = new Array(filters.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const i = next++;
+        if (i >= filters.length) return;
+        const cursor = cursors?.[i];
+        results[i] = await this.getEvents({
+          filters: [filters[i]],
+          ...(cursor ? { cursor: cursor } : { startLedger: startLedger as number }),
+          ...(endLedger !== undefined ? { endLedger } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+        });
+      }
+    };
+    await Promise.all(Array.from({ length: poolSize }, () => worker()));
+
+    const events: RawEvent[] = [];
+    const nextCursors: string[] = [];
+    let latestLedger = 0;
+    let oldestLedger = Number.INFINITY;
+    for (const batch of results) {
+      for (const ev of batch.events) events.push(ev);
+      nextCursors.push(batch.cursor);
+      latestLedger = Math.max(latestLedger, batch.latestLedger);
+      oldestLedger = Math.min(oldestLedger, batch.oldestLedger);
+    }
+    events.sort(compareRawEvents);
+    return {
+      events,
+      cursors: nextCursors,
+      latestLedger,
+      oldestLedger: oldestLedger === Number.INFINITY ? 0 : oldestLedger,
+    };
+  }
+}
+
+export interface GetEventsChunkedArgs {
+  filters: EventFilter[];
+  /** One cursor per filter. Mutually exclusive with `startLedger`. */
+  cursors?: string[];
+  startLedger?: number;
+  endLedger?: number;
+  limit?: number;
+  /** Maximum number of chunks in flight at once. Defaults to all chunks. */
+  concurrency?: number;
+}
+
+export interface ChunkedEventBatch {
+  events: RawEvent[];
+  /** One next-cursor per input filter, in the same order as `filters`. */
+  cursors: string[];
+  latestLedger: number;
+  oldestLedger: number;
+}
+
+/** Deterministic cross-chunk ordering: ledger, then tx index, operation index, then id. */
+function compareRawEvents(a: RawEvent, b: RawEvent): number {
+  if (a.ledger !== b.ledger) return a.ledger - b.ledger;
+  if (a.transactionIndex !== b.transactionIndex) return a.transactionIndex - b.transactionIndex;
+  if (a.operationIndex !== b.operationIndex) return a.operationIndex - b.operationIndex;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
 /** Normalise an SDK raw event into our `RawEvent` contract. */
@@ -158,23 +243,31 @@ function toRawEvent(e: rpc.Api.RawEventResponse): RawEvent {
 }
 
 /**
- * Build `getEvents` filters for a set of contract ids, splitting into chunks of
- * 5 because that is the per-filter ceiling the RPC enforces.
+ * Build `getEvents` filters for a set of contract ids, splitting into chunks
+ * of at most `MAX_CONTRACT_IDS_PER_FILTER`. The RPC rejects a filter with more
+ * than five contract ids, so a larger set must be split across multiple filters
+ * in the same request.
+ *
+ * The single-filter case (one to five contracts) returns exactly one filter,
+ * which is what keeps the single-contract path unchanged.
  */
 export function buildFilters(
   contractIds: string[],
   topics?: string[][],
-  eventType: EventType = 'contract',
+  eventType?: EventType,
 ): EventFilter[] {
+  const base: EventFilter = {
+    ...(eventType ? { type: eventType } : {}),
+    ...(topics && topics.length > 0 ? { topics } : {}),
+  };
   if (contractIds.length === 0) {
-    return [{ type: eventType, ...(topics?.length ? { topics } : {}) }];
+    return [base];
   }
   const filters: EventFilter[] = [];
   for (let i = 0; i < contractIds.length; i += MAX_CONTRACT_IDS_PER_FILTER) {
     filters.push({
-      type: eventType,
+      ...base,
       contractIds: contractIds.slice(i, i + MAX_CONTRACT_IDS_PER_FILTER),
-      ...(topics?.length ? { topics } : {}),
     });
   }
   return filters;

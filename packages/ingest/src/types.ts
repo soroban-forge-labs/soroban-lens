@@ -1,10 +1,10 @@
-/**
+/*
  * Module 1 public data contract.
  *
  * `RawEvent` mirrors, field for field, one entry of the `events` array returned
  * by the Soroban RPC `getEvents` method with the default `xdrFormat: "base64"`.
  * It is deliberately a *transport* type: topics and values stay base64-encoded
- * XDR here. Decoding is Module 2's job (`@soroban-lens/store`).
+ * XDR here. Decoding is Module 2's job (`soroban-lens/store`).
  *
  * Reference: https://developers.stellar.org/docs/data/apis/rpc/api-reference/methods/getEvents
  *
@@ -22,7 +22,7 @@ export interface RawEvent {
   ledger: number;
   /** RFC3339 close time of that ledger, e.g. "2026-09-15T19:22:52Z". */
   ledgerClosedAt: string;
-  /** StrKey contract address ("C...") that emitted the event. */
+  /** StrRink contract address ("C...") that emitted the event. */
   contractId: string;
   /** Event topics, each a base64-encoded XDR ScVal. */
   topic: string[];
@@ -90,8 +90,8 @@ export interface PollerOptions {
   /** Ledger to start from when no cursor is stored. Defaults to "as far back as retention allows". */
   startLedger?: number;
   /**
-   * Last ledger to read, inclusive. The stream ends cleanly once the range is
-   * exhausted, which is what makes indexing a bounded historical window
+   * Last ledger to read, inclusive. The stream ends cleanly once the range
+   * is exhausted, which is what makes indexing a bounded historical window
    * possible without watching the log and killing the process.
    */
   endLedger?: number;
@@ -103,4 +103,37 @@ export interface PollerOptions {
   stalledThresholdMs?: number;
   /** Extra topic filters, base64 ScVal segments or "*". */
   topics?: TopicSegment[][];
+  /**
+   * Maximum number of filter chunks polled concurrently when the contract
+   * set is split across more than one RPC filter. Defaults to 4. Has no
+   * effect on the single-filter path.
+   */
+  chunkConcurrency?: number;
+}
+
+/**
+ * Per-filter-chunk cursor state. When contract ids are split across more
+ * than one RPC filter, each chunk advances its own cursor independently.
+ *
+ * Ordering guarantees:
+ * - Within a chunk, events are delivered in RPC page order (id/ledger ascending).
+ * - Across chunks, no global order is guaranteed; consumers must sort by
+ *   `ledger`, then `id` while a total order is required.
+ * - The single-contract / single-chunk path remains exactly as before: one
+ *   cursor, one request at a time, strictly ordered.
+ */
+export interface ChunkCursor {
+  /** Index of the filter chunk this cursor belongs to. */
+  chunkIndex: number;
+  /** Contract ids covered by this chunk (max 5). */
+  contractIds: string[];
+  /** Opaque paging token for this chunk; empty means "start from ledger". */
+  cursor: string;
+  /** True once this chunk has reached `endLedger` or the tip. */
+  exhausted: boolean;
+}
+
+/** Snapshot of all per-chunk cursors, suitable for persistence. */
+export interface ChunkState {
+  chunks: ChunkCursor[];
 }

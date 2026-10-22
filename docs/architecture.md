@@ -11,7 +11,8 @@ Settled design decisions and the alternatives that lost are recorded in
           ▼
    ┌──────────────────┐
    │ Module 1: ingest │  polls, retries with backoff, tracks a cursor
-   └──────────────────┘  emits RawEvent — base64 XDR, undecoded
+   └──────────────────┘  per filter chunk (polled concurrently); emits
+                         RawEvent — base64 XDR, undecoded
           │
           │  RawEvent  ◀── the data contract
           ▼
@@ -70,6 +71,31 @@ that safe by using `INSERT OR IGNORE` on the event id, so replay is a no-op.
 At-most-once would mean saving the cursor first and silently dropping events on
 a crash. For an indexer, duplicate work is cheap and missing data is not
 recoverable — the RPC will have moved on.
+
+### Filter chunks are polled concurrently, each with its own cursor
+
+`buildFilters()` splits more than five contract ids across multiple filters
+(the RPC caps a filter at five ids). Each chunk is an independent stream with
+its own cursor, persisted separately in `stream_state`, and chunks are polled
+through a bounded worker pool (concurrency capped, not unbounded) rather than one at a time. A slow or failing
+chunk therefore does not stall the others, and 25 contracts overlap instead of
+serialising.
+
+Ordering guarantees:
+
+- **Within a chunk**, events are delivered in ledger order, exactly as before.
+- **Across chunks**, there is no global ordering. Events from different chunks
+  may interleave arbitrarily, and a chunk may be ahead of another by several
+  ledgers.
+- **Per-chunk delivery is at-least-once**, same as the single-stream case: a
+  chunk's cursor advances only after its batch is consumed, so a crash replays
+  that chunk's last batch. `INSERT OR IGNORE` on the event id makes replay a
+  no-op.
+- **The single-contract path is unchanged**: one filter, one cursor, one
+  worker — no pool, no extra state.
+
+Consumers must not assume cross-chunk ordering; anything that needs a total
+order should sort by event id (which sorts in ledger order) at read time.
 
 ### Pagination is keyset, never offset
 
