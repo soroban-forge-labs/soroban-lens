@@ -1,5 +1,6 @@
 import type { Health } from '../types.js';
 import type { NetworkOption } from '../api.js';
+import { useLocale } from '../i18n/index.js';
 
 // Props for StatusBar component
 interface Props {
@@ -14,6 +15,8 @@ interface Props {
 export function StatusBar({
   networks, selected, onSelect, health, error, lastUpdated,
 }: Props): React.JSX.Element {
+  const { t } = useLocale();
+
   // The label the user picked and the network the API actually indexed can
   // disagree if the compose file is misconfigured. Saying so is far kinder than
   // letting someone read testnet data believing it is mainnet.
@@ -27,7 +30,7 @@ export function StatusBar({
   return (
     <div className="status-bar">
       <div className="status-left">
-        <label htmlFor="network" className="sr-only">Network</label>
+        <label htmlFor="network" className="sr-only">{t('networkLabel')}</label>
         <select
           id="network"
           value={selected.label}
@@ -49,27 +52,28 @@ export function StatusBar({
         ) : health ? (
           <>
             <span className={`status-pill status-${health.status}`} role="status">
-              {health.status === 'ok' ? 'connected' : 'degraded'}
+              {health.status === 'ok' ? t('connected') : t('degraded')}
             </span>
             <span className="muted small">
-              {health.events.toLocaleString()} events · {health.contracts} contracts
+              {t('healthStats', {
+                count: health.events.toLocaleString(),
+                contracts: health.contracts,
+              })}
             </span>
             {lastUpdated && (
               <span className="muted small">
-                updated {new Date(lastUpdated).toLocaleTimeString()}
+                {t('lastUpdated', { time: new Date(lastUpdated).toLocaleTimeString() })}
               </span>
             )}
           </>
         ) : (
-          <span className="status-pill" role="status">connecting…</span>
+          <span className="status-pill" role="status">{t('connecting')}</span>
         )}
       </div>
 
       {mismatch && (
         <p className="warning banner">
-          This API reports network <strong>{reported}</strong>, but it is configured here as{' '}
-          <strong>{selected.label}</strong>. Check <code>VITE_LENS_NETWORKS</code> and the
-          indexer's <code>LENS_NETWORK</code>.
+          {t('networkMismatch', { reported, selected: selected.label })}
         </p>
       )}
     </div>

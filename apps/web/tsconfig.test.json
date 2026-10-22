@@ -11,5 +11,5 @@
     "composite": false,
     "declaration": false
   },
-  "include": ["src/types.ts", "src/format.ts", "src/api.ts"]
+  "include": ["src/types.ts", "src/format.ts", "src/api.ts", "src/i18n/en.ts", "src/i18n/es.ts", "src/i18n/translate.ts"]
 }

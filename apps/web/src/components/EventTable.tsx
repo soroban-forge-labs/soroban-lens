@@ -1,5 +1,6 @@
 import type { LensEvent } from '../types.js';
 import { EventRow } from './EventRow.js';
+import { useLocale } from '../i18n/index.js';
 
 // Props for the EventTable component
 interface Props {
@@ -15,10 +16,12 @@ interface Props {
 export function EventTable({
   events, showContract, onTopicClick, loading, emptyMessage, absolute,
 }: Props): React.JSX.Element {
+  const { t } = useLocale();
+
   if (events.length === 0) {
     return (
       <div className="empty">
-        {loading ? 'Loading…' : emptyMessage}
+        {loading ? t('loading') : emptyMessage}
       </div>
     );
   }
@@ -27,12 +30,12 @@ export function EventTable({
     <table className="event-table">
       <thead>
         <tr>
-          <th className="col-toggle"><span className="sr-only">Expand</span></th>
-          <th className="col-ledger">Ledger</th>
-          {showContract && <th className="col-contract">Contract</th>}
-          <th className="col-topic">Topic</th>
-          <th className="col-value">Value</th>
-          <th className="col-tx">Tx</th>
+          <th className="col-toggle"><span className="sr-only">{t('colExpand')}</span></th>
+          <th className="col-ledger">{t('colLedger')}</th>
+          {showContract && <th className="col-contract">{t('colContract')}</th>}
+          <th className="col-topic">{t('colTopic')}</th>
+          <th className="col-value">{t('colValue')}</th>
+          <th className="col-tx">{t('colTx')}</th>
         </tr>
       </thead>
       <tbody>
