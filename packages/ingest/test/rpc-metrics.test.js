@@ -58,6 +58,9 @@ test('RPC metrics include failed retries and successful calls without timing ret
     for (const method of ['getHealth', 'getLatestLedger']) {
       assert.ok(text.includes(`duration_seconds_count{method="${method}"} 1\n`));
     }
+    // No field may be a permanent empty string (#17): the window is exactly the
+    // two ledgers getHealth reports, and nothing else.
+    assert.deepEqual(await client.retention(), { latestLedger: 20, oldestLedger: 10 });
     const before = metrics.render();
     await assert.rejects(client.getEvents({ filters: [] }), /needs either/);
     assert.equal(metrics.render(), before, 'local validation is not an RPC attempt');

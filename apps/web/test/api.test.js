@@ -106,6 +106,21 @@ test('the stream path carries the contract as a query parameter and drops paging
   assert.equal(params.has('cursor'), false);
 });
 
+test('the stream path forwards ledger range params', () => {
+  const { params } = parse(buildStreamPath({ fromLedger: 100, toLedger: 200 }));
+  assert.equal(params.get('fromLedger'), '100');
+  assert.equal(params.get('toLedger'), '200');
+});
+
+test('ledger range combines with contract id on the event path', () => {
+  const { pathname, params } = parse(
+    buildEventPath({ contractId: SAC, fromLedger: 500000, toLedger: 600000 }),
+  );
+  assert.equal(pathname, `/contracts/${SAC}/events`);
+  assert.equal(params.get('fromLedger'), '500000');
+  assert.equal(params.get('toLedger'), '600000');
+});
+
 test('no filters streams every contract, with no query string', () => {
   assert.equal(buildStreamPath({}), '/events/stream');
 });
