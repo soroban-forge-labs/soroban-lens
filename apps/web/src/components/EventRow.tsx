@@ -4,6 +4,8 @@ import { prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncat
 
 interface Props {
   event: LensEvent;
+  expanded: boolean;
+  onToggleExpanded: (eventId: string) => void;
   showContract: boolean;
   onTopicClick: (topic: string) => void;
 }
@@ -21,8 +23,7 @@ function readTimeFormat(): TimeFormat {
 }
 
 /** One table row, expanding in place to show the full decoded payload. */
-export function EventRow({ event, showContract, onTopicClick }: Props): React.JSX.Element {
-  const [expanded, setExpanded] = useState(false);
+export function EventRow({ event, expanded, onToggleExpanded, showContract, onTopicClick }: Props): React.JSX.Element {
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(readTimeFormat);
   const firstTopic = event.topics[0];
   const topicLabel = firstTopic ? summarise(firstTopic) : '—';
@@ -45,7 +46,7 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
             type="button"
             aria-label={expanded ? 'Collapse event details' : 'Expand event details'}
             aria-expanded={expanded}
-            onClick={() => setExpanded((v) => !v)}
+            onClick={() => onToggleExpanded(event.id)}
           >
             {expanded ? '▾' : '▸'}
           </button>
