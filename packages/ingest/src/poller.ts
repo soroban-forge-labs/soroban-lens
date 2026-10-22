@@ -1,16 +1,20 @@
 import { buildFilters, MAX_PAGE_SIZE, type LensRpcClient } from './rpc-client.js';
+import type { FailoverRpcClient } from './rpc-pool.js';
 import { assertContractIds } from './contract-id.js';
-import { MemoryCursorStore, type CursorStore } from './cursor.js';
+import { MemoryCursorStore, type CursorState, type CursorStore } from './cursor.js';
+import { compareRetention, describeRetentionGap } from './retention.js';
 import { sleep as defaultSleep } from './retry.js';
-import type { EventBatch, PollerOptions } from './types.js';
+import type { EventBatch, PollerOptions, RetentionState } from './types.js';
 import type { IngestMetrics } from './metrics.js';
 
 export interface PollerDeps {
-  client: LensRpcClient;
+  client: LensRpcClient | FailoverRpcClient;
   cursors?: CursorStore;
   /** Stable id for the stream's saved position. Defaults to a hash of the config. */
   cursorKey?: string;
   sleep?: (ms: number) => Promise<void>;
+  /** Clock used to track how long the RPC tip remains unchanged. */
+  now?: () => number;
   /** Set to stop the generator cleanly. */
   signal?: AbortSignal;
   log?: (message: string) => void;
@@ -24,6 +28,7 @@ export interface PollerDeps {
  * estimate everywhere it is surfaced.
  */
 export const APPROX_LEDGER_SECONDS = 5;
+export const DEFAULT_STALLED_THRESHOLD_MS = 60_000;
 
 /** Emitted alongside batches so callers can show progress without extra RPC calls. */
 export interface PollerProgress {
@@ -66,10 +71,11 @@ export function ingestionLag(ledger: number, latestLedger: number): {
  * replay is harmless.
  */
 export class EventPoller {
-  readonly #client: LensRpcClient;
+  readonly #client: LensRpcClient | FailoverRpcClient;
   readonly #cursors: CursorStore;
   readonly #key: string;
   readonly #sleep: (ms: number) => Promise<void>;
+  readonly #now: () => number;
   readonly #signal: AbortSignal | undefined;
   readonly #log: (message: string) => void;
   readonly #options: PollerOptions;
@@ -84,6 +90,7 @@ export class EventPoller {
     this.#cursors = deps.cursors ?? new MemoryCursorStore();
     this.#key = deps.cursorKey ?? defaultCursorKey(deps.client.rpcUrl, options.contractIds);
     this.#sleep = deps.sleep ?? defaultSleep;
+    this.#now = deps.now ?? Date.now;
     this.#signal = deps.signal;
     this.#log = deps.log ?? (() => {});
     this.#metrics = deps.metrics;
@@ -102,6 +109,11 @@ export class EventPoller {
   async #resolveStart(): Promise<{ cursor?: string; startLedger?: number }> {
     const saved = await this.#cursors.load(this.#key);
     if (saved) {
+      // Before the first page is asked for, not after it is rejected (#17): a
+      // restart that outlived the node's retention window is the one case where
+      // "resumed successfully" and "lost a week of history" look identical
+      // until an event id goes missing.
+      await this.#warnAboutRetentionGap(saved);
       this.#log(`resuming from cursor ${saved.cursor} (ledger ${saved.ledger})`);
       return { cursor: saved.cursor };
     }
@@ -115,6 +127,31 @@ export class EventPoller {
       );
     }
     return { startLedger };
+  }
+
+  /**
+   * Compare the saved position with the node's window and warn if it is gone.
+   *
+   * A failed `getHealth` here is not fatal: a process that restarted cleanly
+   * yesterday should not refuse to start because one diagnostic call timed out,
+   * and the mid-stream recovery still catches a genuinely dead cursor.
+   */
+  async #warnAboutRetentionGap(saved: CursorState): Promise<void> {
+    let current: RetentionState;
+    try {
+      current = await this.#client.retention();
+    } catch (error) {
+      this.#log(
+        `could not read the node's retention window before resuming: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    const warning = describeRetentionGap(
+      compareRetention(saved, current),
+      saved.updatedAt || undefined,
+    );
+    if (warning) this.#log(warning);
   }
 
   /** Yields pages of events until aborted. */
@@ -132,6 +169,11 @@ export class EventPoller {
     // here so "at least once" is not every consumer's problem to solve.
     const seen = new RecentIds(pageSize * RECENT_ID_WINDOW_PAGES);
 
+    let observedLatestLedger: number | undefined;
+    let latestLedgerUnchangedSince: number | undefined;
+    let stallReported = false;
+    const stalledThresholdMs = this.#options.stalledThresholdMs ?? DEFAULT_STALLED_THRESHOLD_MS;
+
     const endLedger = this.#options.endLedger;
     let { cursor, startLedger } = await this.#resolveStart();
 
@@ -142,7 +184,7 @@ export class EventPoller {
           filters,
           limit: pageSize,
           ...(endLedger !== undefined ? { endLedger } : {}),
-          ...(cursor ? { cursor } : { startLedger: startLedger as number }),
+          ...(cursor ? { cursor, fallbackLedger: startLedger ?? (await this.#cursors.load(this.#key))?.ledger } : { startLedger: startLedger as number }),
         });
       } catch (error) {
         // A cursor can fall out of the retention window if the indexer was off
@@ -161,6 +203,26 @@ export class EventPoller {
           continue;
         }
         throw error;
+      }
+
+      const now = this.#now();
+      if (observedLatestLedger === undefined || batch.latestLedger !== observedLatestLedger) {
+        observedLatestLedger = batch.latestLedger;
+        latestLedgerUnchangedSince = now;
+        stallReported = false;
+        this.#metrics?.rpcStalled(false);
+      } else if (
+        !stallReported &&
+        latestLedgerUnchangedSince !== undefined &&
+        now - latestLedgerUnchangedSince >= stalledThresholdMs
+      ) {
+        const stalledSeconds = Math.floor((now - latestLedgerUnchangedSince) / 1000);
+        this.#log(
+          `RPC latest ledger has not advanced beyond ${batch.latestLedger} for ${stalledSeconds}s; ` +
+            'the node may be stalled.',
+        );
+        this.#metrics?.rpcStalled(true);
+        stallReported = true;
       }
 
       // caughtUp reflects what the RPC returned, not what survived dedup: a
@@ -207,8 +269,16 @@ export class EventPoller {
         cursor: batch.cursor,
         ledger: lastLedger || batch.latestLedger,
         updatedAt: new Date().toISOString(),
+        // The window travels with the position so the next process can compare
+        // it with what the node holds then (#17). The page already carries both
+        // numbers, so this costs no extra RPC call.
+        retention: { latestLedger: batch.latestLedger, oldestLedger: batch.oldestLedger },
       });
-      this.#metrics?.eventsIngested(fresh.length);
+      if (this.#metrics) {
+        const perContract = new Map<string, number>();
+        for (const e of fresh) perContract.set(e.contractId, (perContract.get(e.contractId) ?? 0) + 1);
+        for (const [id, n] of perContract) this.#metrics.eventsIngested(n, id);
+      }
       this.#metrics?.progress(lastLedger || batch.latestLedger, batch.latestLedger);
 
       cursor = batch.cursor;

@@ -150,3 +150,20 @@ export function useTheme(): [Theme, () => void] {
   const toggle = useCallback(() => setSaved(theme === 'dark' ? 'light' : 'dark'), [theme, setSaved]);
   return [theme, toggle];
 }
+
+export type TimestampFormat = 'relative' | 'absolute';
+
+/**
+ * Whether timestamps are shown as relative ("3h ago") or absolute.
+ *
+ * Persisted so the choice survives a reload, and shared by every row through
+ * the context that consumes it, so the toggle flips the whole table at once.
+ */
+export function useTimestampFormat(): [TimestampFormat, () => void] {
+  const [format, setFormat] = usePersistentState<TimestampFormat>('lens.timestampFormat', 'relative');
+  const toggle = useCallback(
+    () => setFormat(format === 'relative' ? 'absolute' : 'relative'),
+    [format, setFormat],
+  );
+  return [format, toggle];
+}

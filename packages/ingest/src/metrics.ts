@@ -1,13 +1,17 @@
 const BUCKETS = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30];
+/** Distinct `contract` label values before further contracts fold into `other`. */
+export const MAX_CONTRACT_LABELS = 50;
+const OTHER_CONTRACT = 'other';
 type RpcMethod = 'getHealth' | 'getLatestLedger' | 'getEvents';
 type Histogram = { count: number; sum: number; buckets: number[] };
 
 /** Process-local metrics; event counts include at-least-once replay. */
 export class IngestMetrics {
-  #events = 0;
+  #events = new Map<string, number>();
   #restarts = 0;
   #ledger = 0;
   #latest = 0;
+  #stalled = false;
   #ready = false;
   #durations = new Map<RpcMethod, Histogram>();
   #errors = new Map<string, number>();
@@ -35,7 +39,15 @@ export class IngestMetrics {
     this.#durations.set(method, h);
   }
 
-  eventsIngested(count: number): void { this.#events += count; }
+  /** Counts events per contract; contracts past MAX_CONTRACT_LABELS share `other`. */
+  eventsIngested(count: number, contractId: string = OTHER_CONTRACT): void {
+    let label = contractId;
+    if (!this.#events.has(label) && label !== OTHER_CONTRACT
+      && this.#events.size - Number(this.#events.has(OTHER_CONTRACT)) >= MAX_CONTRACT_LABELS) {
+      label = OTHER_CONTRACT;
+    }
+    this.#events.set(label, (this.#events.get(label) ?? 0) + count);
+  }
   cursorRestarted(): void { this.#restarts++; }
   progress(ledger: number, latestLedger: number): void {
     this.#ledger = ledger;
@@ -43,11 +55,14 @@ export class IngestMetrics {
     this.#ready = true;
   }
 
+  rpcStalled(stalled: boolean): void { this.#stalled = stalled; }
+
   render(): string {
     return [
       '# HELP lens_events_ingested_total Events acknowledged by the consumer, including replay.',
       '# TYPE lens_events_ingested_total counter',
-      `lens_events_ingested_total ${this.#events}`,
+      ...[...this.#events].sort(([a], [b]) => a.localeCompare(b))
+        .map(([contract, count]) => `lens_events_ingested_total{contract="${contract}"} ${count}`),
       '# HELP lens_cursor_restarts_total Cursor restarts after retention gaps.',
       '# TYPE lens_cursor_restarts_total counter',
       `lens_cursor_restarts_total ${this.#restarts}`,
@@ -57,6 +72,9 @@ export class IngestMetrics {
       '# HELP lens_latest_ledger Latest ledger reported by the RPC node.',
       '# TYPE lens_latest_ledger gauge',
       `lens_latest_ledger ${this.#latest}`,
+      '# HELP lens_rpc_stalled Whether the RPC node tip has stopped advancing beyond the configured threshold.',
+      '# TYPE lens_rpc_stalled gauge',
+      `lens_rpc_stalled ${Number(this.#stalled)}`,
       '# HELP lens_metrics_ready Whether a page has been acknowledged.',
       '# TYPE lens_metrics_ready gauge',
       `lens_metrics_ready ${Number(this.#ready)}`,

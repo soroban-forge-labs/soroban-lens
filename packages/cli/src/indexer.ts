@@ -1,9 +1,8 @@
 import {
-  EventPoller, LensRpcClient, defaultCursorKey, describeClockSkew, IngestMetrics,
+  EventPoller, FailoverRpcClient, StellarArchiveSource, buildFilters, defaultCursorKey, describeClockSkew, IngestMetrics,
   startMetricsServer, closeMetricsServer, parseMetricsPort,
 } from '@soroban-lens/ingest';
-import { writeFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, existsSync, statSync } from 'node:fs'; import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CursorStore, CursorState } from '@soroban-lens/ingest';
 import { SqliteEventStore } from '@soroban-lens/store';
@@ -60,7 +59,57 @@ export interface IndexerResult {
 }
 
 /**
- * The full pipeline: Module 1 polls, Module 2 decodes and stores.
+ * Returns the current on-disk size of the database file plus its WAL, in
+ * bytes. Missing files count as zero so a fresh database does not throw.
+ */
+export function databaseSizeBytes(dbPath: string): number {
+  const sizeOf = (path: string): number => {
+    try {
+      return existsSync(path) ? statSync(path).size : 0;
+    } catch {
+      return 0;
+    }
+  };
+  return sizeOf(dbPath) + sizeOf(`${dbPath}-wal`);
+}
+
+/**
+ * Prunes oldest ledgers in chunks until the database (+ WAL) fits under
+ * `sizeBytes`, then checkpoints to reclaim space. Returns the number of
+ * ledgers removed. Stops early if a chunk removes nothing, so a store that
+ * cannot shrink further does not loop forever.
+ */
+export async function pruneToSize(
+  store: EventStore,
+  dbPath: string,
+  sizeBytes: number,
+  options: {
+    chunkLedgers?: number;
+    log?: (message: string) => void;
+  } = {},
+): Promise<number> {
+  const log = options.log ?? (() => {});
+  const chunk = Math.max(1, options.chunkLedgers ?? 1000);
+  let removed = 0;
+  while (databaseSizeBytes(dbPath) > sizeBytes) {
+    const before = databaseSizeBytes(dbPath);
+    const deleted = await store.pruneOldestLedgers(chunk);
+    if (deleted <= 0) break;
+    removed += deleted;
+    await store.checkpoint();
+    const after = databaseSizeBytes(dbPath);
+    log(
+      `size target ${sizeBytes}B: pruned ${deleted} ledger(s), ${before} -> ${after} bytes`,
+    );
+  }
+  if (removed > 0) {
+    log(`size target ${sizeBytes}B met after pruning ${removed} ledger(s); now ${databaseSizeBytes(dbPath)}B`);
+  }
+  return removed;
+}
+
+/**
+ * Runs the full pipeline: Module 1 polls, Module 2 decodes and stores.
  *
  * This is the only place the two modules meet. `RawEvent` and `RawEventInput`
  * are structurally identical by design, so nothing has to be converted here —
@@ -74,9 +123,9 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
   const metrics = new IngestMetrics();
 
   const store = new SqliteEventStore({ path: config.dbPath });
-  const client = new LensRpcClient({
+  const client = new FailoverRpcClient({
     metrics,
-    rpcUrl: config.network.rpcUrl,
+    rpcUrls: config.rpcUrls,
     ...(Object.keys(config.rpcHeaders).length > 0 ? { headers: config.rpcHeaders } : {}),
     retry: {
       ...config.retry,
@@ -112,6 +161,8 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
   let seen = 0;
   let lastLedger = 0;
   let metricsServer: Awaited<ReturnType<typeof startMetricsServer>> | undefined;
+  let sizeTimer: ReturnType<typeof setInterval> | undefined;
+  let sizePruning = false;
 
   try {
     if (metricsPort !== undefined) {
@@ -119,10 +170,21 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       log(`metrics listening on ${process.env.LENS_METRICS_HOST ?? '127.0.0.1'}:${metricsPort}/metrics`);
     }
     log(
-      `indexing ${config.network.name} (${config.network.rpcUrl}) into ${config.dbPath}; ` +
+      `indexing ${config.network.name} (${config.network.rpcUrl}) tinto ${config.dbPath}; ` +
         `${config.contractIds.length || 'all'} contract(s), stream "${cursorKey}"`,
     );
 
+    if (config.archiveUrl && config.startLedger !== undefined) {
+      const archive = new StellarArchiveSource({ archiveUrl: config.archiveUrl });
+      const retention = await client.retention();
+      const archiveEnd = Math.min(config.startLedger < retention.oldestLedger ? retention.oldestLedger - 1 : 0, retention.latestLedger);
+      if (archiveEnd >= config.startLedger) {
+        log(`backfilling ledgers ${config.startLedger}..${archiveEnd} from archive ${config.archiveUrl}`);
+        const archived = await archive.getEvents({ startLedger: config.startLedger, endLedger: archiveEnd, filters: buildFilters(config.contractIds), limit: 10000 });
+        const added = await store.insertEvents(archived.events);
+        log(`archive backfill: +${added} new of ${archived.events.length} events through ledger ${archiveEnd}`);
+      }
+    }
     // A skewed local clock does not stop indexing, it makes every time-based
     // query misleading (#18) — so it is a warning, and it must not block startup.
     try {
@@ -136,6 +198,30 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       }
     } catch (error) {
       log(`could not check clock skew: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    // Optional size target: when the database grows past the cap, prune the
+    // oldest ledgers in chunks until it fits, then checkpoint. Runs on an
+    // interval so a long-running indexer stays within the operator's disk budget.
+    if (config.maxDbSizeBytes !== undefined) {
+      const target = config.maxDbSizeBytes;
+      const intervalMs = config.sizePruneIntervalMs;
+      const runSizePrune = async (): Promise<void> => {
+        if (sizePruning) return;
+        sizePruning = true;
+        try {
+          await pruneToSize(store, config.dbPath, target, { log });
+        } catch (error) {
+          log(`size prune failed: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          sizePruning = false;
+        }
+      };
+      log(`size target ${target}B enabled; checking every ${intervalMs}ms`);
+      sizeTimer = setInterval(() => void runSizePrune(), intervalMs);
+      // Do not hold the process open just for the timer.
+      sizeTimer.unref?.();
+      void runSizePrune();
     }
 
     for await (const batch of poller.stream()) {
@@ -170,6 +256,7 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       }
     }
   } finally {
+    if (sizeTimer) clearInterval(sizeTimer);
     // A lookup still queued is cheap to redo next run; one in flight is
     // allowed to finish so it never writes to a closed store.
     specs?.stop();
