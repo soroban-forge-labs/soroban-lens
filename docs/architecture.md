@@ -1,5 +1,8 @@
 # Architecture
 
+Settled design decisions and the alternatives that lost are recorded in
+[`docs/adr/`](adr/README.md). Read those before reopening a decision.
+
 ## Data pipeline
 
 ```

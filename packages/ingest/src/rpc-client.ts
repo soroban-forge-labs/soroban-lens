@@ -96,15 +96,13 @@ export class LensRpcClient {
     );
   }
 
-  /** Current retention window, used to clamp a start ledger into range. */
+  /**
+   * Current retention window, used to clamp a start ledger into range and to
+   * tell whether a saved cursor is still inside it (#17).
+   */
   async retention(): Promise<RetentionState> {
     const h = await this.health();
-    return {
-      latestLedger: h.latestLedger,
-      oldestLedger: h.oldestLedger,
-      latestLedgerCloseTime: '',
-      oldestLedgerCloseTime: '',
-    };
+    return { latestLedger: h.latestLedger, oldestLedger: h.oldestLedger };
   }
 
   /** Fetch one page of events. Never mixes cursor and ledger-range mode. */

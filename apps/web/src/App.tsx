@@ -8,7 +8,7 @@ import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { usePersistentState, usePolling, useDebounced, useEventStream, useTheme } from './hooks.js';
 
 /** Testnet Stellar Asset Contract for native XLM — always emitting events. */
-const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC'; // XLM SAC
+const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMPQVUU2HHGCYSC'; // XLM SAC
 const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
@@ -18,12 +18,55 @@ export function App(): React.JSX.Element {
   const [networkLabel, setNetworkLabel] = usePersistentState('lens.network', networks[0]!.label);
   const selected = networks.find((n) => n.label === networkLabel) ?? networks[0]!;
 
-  const [filters, setFilters] = usePersistentState<FilterState>('lens.filters', {
-    contractId: '',
-    topic: '',
-    successfulOnly: false,
-    live: true,
-  });
+  // ---------- URL-based shareable state (#63, #68) ----------
+  // On first load, prefer URL search params over localStorage so that a shared
+  // link always wins. After that, keep URL and localStorage in sync.
+  const [filters, setFiltersRaw] = usePersistentState<FilterState>('lens.filters', (() => {
+    const sp = new URLSearchParams(window.location.search);
+    return {
+      contractId: sp.get('contractId') ?? '',
+      topic: sp.get('topic') ?? '',
+      successfulOnly: sp.get('successfulOnly') === 'true',
+      live: sp.has('live') ? sp.get('live') === 'true' : true,
+      fromLedger: sp.get('fromLedger') ?? '',
+      toLedger: sp.get('toLedger') ?? '',
+    };
+  })());
+
+  /** Update filter state and push the new params into the URL bar. */
+  const setFilters = useCallback(
+    (next: FilterState) => {
+      setFiltersRaw(next);
+      const sp = new URLSearchParams();
+      if (next.contractId) sp.set('contractId', next.contractId);
+      if (next.topic) sp.set('topic', next.topic);
+      if (next.successfulOnly) sp.set('successfulOnly', 'true');
+      if (!next.live) sp.set('live', 'false');
+      if (next.fromLedger) sp.set('fromLedger', next.fromLedger);
+      if (next.toLedger) sp.set('toLedger', next.toLedger);
+      const qs = sp.toString();
+      const newUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+      window.history.pushState(null, '', newUrl);
+    },
+    [setFiltersRaw],
+  );
+
+  // Restore filter state when the user navigates with back/forward.
+  useEffect(() => {
+    const onPopState = (): void => {
+      const sp = new URLSearchParams(window.location.search);
+      setFiltersRaw({
+        contractId: sp.get('contractId') ?? '',
+        topic: sp.get('topic') ?? '',
+        successfulOnly: sp.get('successfulOnly') === 'true',
+        live: sp.has('live') ? sp.get('live') === 'true' : true,
+        fromLedger: sp.get('fromLedger') ?? '',
+        toLedger: sp.get('toLedger') ?? '',
+      });
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [setFiltersRaw]);
 
   const [events, setEvents] = useState<LensEvent[]>([]);
   const [total, setTotal] = useState(0);
@@ -40,27 +83,49 @@ export function App(): React.JSX.Element {
   const [contractUnknown, setContractUnknown] = useState(false);
   const [emptyReason, setEmptyReason] = useState<'no_matching_events' | null>(null);
   const [theme, toggleTheme] = useTheme();
+  // Absolute vs relative timestamps in the Ledger column. Persisted so the
+  // choice survives a reload, like the theme.
+  const [absoluteTime, setAbsoluteTime] = usePersistentState('lens.absoluteTime', false);
 
   // Typing a 56-character contract id should not fire 56 requests.
   const debouncedContractId = useDebounced(filters.contractId, 300);
   const debouncedTopic = useDebounced(filters.topic, 300);
 
   const contractIdValid = debouncedContractId === '' || CONTRACT_ID_PATTERN.test(debouncedContractId);
+
+  // Parse ledger bounds: only include when valid non-empty integers.
+  const fromLedgerNum =
+    filters.fromLedger !== '' && /^\d+$/.test(filters.fromLedger)
+      ? parseInt(filters.fromLedger, 10)
+      : undefined;
+  const toLedgerNum =
+    filters.toLedger !== '' && /^\d+$/.test(filters.toLedger)
+      ? parseInt(filters.toLedger, 10)
+      : undefined;
+  // Do not fire a request if the range is inverted.
+  const ledgerRangeValid =
+    fromLedgerNum === undefined ||
+    toLedgerNum === undefined ||
+    fromLedgerNum <= toLedgerNum;
+
   const query = useMemo(
     () => ({
       ...(contractIdValid && debouncedContractId ? { contractId: debouncedContractId } : {}),
       ...(debouncedTopic ? { topics: [debouncedTopic] } : {}),
       ...(filters.successfulOnly ? { successfulOnly: true } : {}),
+      ...(fromLedgerNum !== undefined ? { fromLedger: fromLedgerNum } : {}),
+      ...(toLedgerNum !== undefined ? { toLedger: toLedgerNum } : {}),
       limit: PAGE_SIZE,
     }),
-    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly, fromLedgerNum, toLedgerNum],
   );
 
   // Guards against a slow earlier response overwriting a newer one.
   const requestId = useRef(0);
 
   const loadFirstPage = useCallback(async (): Promise<void> => {
-    if (!contractIdValid) return;
+    if (!contractIdValid || !ledgerRangeValid) return;
     const id = ++requestId.current;
     try {
       const page = await api.events(selected.baseUrl, query);
@@ -88,7 +153,7 @@ export function App(): React.JSX.Element {
     } finally {
       if (id === requestId.current) setLoading(false);
     }
-  }, [selected.baseUrl, query, contractIdValid]);
+  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid]);
 
   const loadMore = useCallback(async (): Promise<void> => {
     if (!nextCursor || loadingMore) return;
@@ -113,14 +178,14 @@ export function App(): React.JSX.Element {
   // When the query or network changes, fetch fresh data but keep the old rows
   // on screen until the new ones arrive.
   useEffect(() => {
-    if (!contractIdValid) {
+    if (!contractIdValid || !ledgerRangeValid) {
       setLoading(false);
       return;
     }
     setLoading(true);
     setNextCursor(null);
     void loadFirstPage();
-  }, [loadFirstPage, contractIdValid]);
+  }, [loadFirstPage, contractIdValid, ledgerRangeValid]);
 
   // Live updates arrive over SSE; polling is the fallback for whenever the
   // stream is not open (before it connects, while the browser retries a drop,
@@ -212,7 +277,7 @@ export function App(): React.JSX.Element {
       `"${JSON.stringify(e.value.value).replace(/"/g, '""')}"`,
     ]);
     const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob([csvSontent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -222,11 +287,11 @@ export function App(): React.JSX.Element {
   }, [events]);
 
   return (
-    <div className="app">
+    <main className="app">
       <header className="app-header">
         <div>
           <h1>
-            soroban<span className="accent">-lens</span>
+            soroban <span className="accent">-</span>lens
           </h1>
           <p className="tagline">See what your Soroban contracts are actually emitting.</p>
         </div>
@@ -234,10 +299,9 @@ export function App(): React.JSX.Element {
           type="button"
           className="theme-toggle"
           onClick={toggleTheme}
-          aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
           title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
         >
-          {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+          {theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
         </button>
       </header>
 
@@ -276,7 +340,7 @@ export function App(): React.JSX.Element {
 
       <div className="result-meta">
         <div className="result-meta-left">
-          <span>
+          <span aria-live="polite" aria-atomic="true">
             {total.toLocaleString()} event{total === 1 ? '' : 's'}
             {query.contractId ? ' for this contract' : ' indexed'}
             {debouncedTopic ? ` with topic "${debouncedTopic}"` : ''}
@@ -290,6 +354,14 @@ export function App(): React.JSX.Element {
         </div>
         {events.length > 0 && (
           <div className="export-actions">
+            <button
+              type="button"
+              className="btn-export"
+              onClick={() => setAbsoluteTime(!absoluteTime)}
+              title={absoluteTime ? 'Show relative timestamps' : 'Show absolute timestamps'}
+            >
+              {absoluteTime ? 'Relative time' : 'Absolute time'}
+            </button>
             <button type="button" className="btn-export" onClick={exportJson} title="Export current events as JSON">
               Export JSON
             </button>
@@ -306,6 +378,7 @@ export function App(): React.JSX.Element {
           showContract={showContract}
           loading={loading}
           onTopicClick={(topic) => setFilters({ ...filters, topic })}
+          absolute={absoluteTime}
           emptyMessage={
             contractUnknown
               ? 'This contract has not been seen by this indexer. Check the id, and that it is one this instance indexes (LENS_CONTRACT_IDS).'
@@ -319,17 +392,15 @@ export function App(): React.JSX.Element {
       </ErrorBoundary>
 
       {nextCursor && (
-        <button type="button" className="load-more" onClick={() => void loadMore()} disabled={loadingMore}>
-          {loadingMore ? 'Loading…' : `Load ${PAGE_SIZE} more`}
+        <button type="button" className="load-more" onClick={loadMore} disabled={loadingMore}>
+          {loadingMore ? 'Loading…' : 'Load more'}
         </button>
       )}
 
       <footer className="app-footer">
-        <span>Read-only explorer · v0.1</span>
-        <a href={`${selected.baseUrl}/openapi.json`} target="_blank" rel="noreferrer">
-          API spec
-        </a>
+        <span>Soroban Lens — a reading lens for Soroban contract events.</span>
+        <a href="https://github.com/soroban-forge-labs/soroban-lens">Source</a>
       </footer>
-    </div>
+    </main>
   );
 }
