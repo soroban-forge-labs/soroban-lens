@@ -12,6 +12,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  accessibility:
+    name: Web accessibility (axe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Build web app
+        run: npm run build --workspace @soroban-lens/web
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Audit light and dark themes
+        run: npm run test:a11y --workspace @soroban-lens/web
+
   test:
     name: Build and test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest

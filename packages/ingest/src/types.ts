@@ -46,11 +46,19 @@ export interface EventBatch {
   oldestLedger: number;
 }
 
+/**
+ * The ledgers a node still serves, as `getHealth` reports them.
+ *
+ * Only the two ledgers the RPC actually reports: readers used to get
+ * `latestLedgerCloseTime`/`oldestLedgerCloseTime` as permanent empty strings,
+ * which looked like data and was not (#17). Nothing consumed them, so they are
+ * gone rather than kept as a promise this module cannot keep.
+ */
 export interface RetentionState {
+  /** Latest ledger the node knows about. */
   latestLedger: number;
+  /** Oldest ledger still inside the node's retention window. */
   oldestLedger: number;
-  latestLedgerCloseTime: string;
-  oldestLedgerCloseTime: string;
 }
 
 /** A topic filter segment: an exact base64 ScVal, or "*" to match any one segment. */
@@ -91,6 +99,8 @@ export interface PollerOptions {
   pageSize?: number;
   /** Milliseconds to wait after catching up to the tip. Defaults to 2000. */
   pollIntervalMs?: number;
+  /** Milliseconds without RPC tip advancement before reporting a stall. Defaults to 60000. */
+  stalledThresholdMs?: number;
   /** Extra topic filters, base64 ScVal segments or "*". */
   topics?: TopicSegment[][];
 }

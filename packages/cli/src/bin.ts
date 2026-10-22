@@ -54,6 +54,8 @@ Options:
       --retry-max-delay <ms>   Ceiling on any one retry delay.
   -n, --network <name>    testnet | mainnet | futurenet  (env LENS_NETWORK)
   -r, --rpc-url <url>     Override the network's RPC URL. (env LENS_RPC_URL)
+      --rpc-url-list <url> Repeatable ordered RPC failover list. (env LENS_RPC_URLS)
+      --archive-url <url>  Public Stellar history archive root. (env LENS_ARCHIVE_URL)
   -d, --db <path>         SQLite file. (env LENS_DB_PATH, default ./data/lens.db)
       --data-dir <path>   Working directory for state. (env LENS_DATA_DIR)
       --start-ledger <n>  First ledger when no cursor is stored. (env LENS_START_LEDGER)
@@ -86,6 +88,8 @@ async function main(argv: string[]): Promise<number> {
       'contracts-file': { type: 'string' },
       network: { type: 'string', short: 'n' },
       'rpc-url': { type: 'string', short: 'r' },
+      'rpc-url-list': { type: 'string', multiple: true },
+      'archive-url': { type: 'string' },
       db: { type: 'string', short: 'd' },
       'data-dir': { type: 'string' },
       'start-ledger': { type: 'string' },
@@ -144,6 +148,8 @@ async function main(argv: string[]): Promise<number> {
   const config = resolveConfig({
     ...(values.network !== undefined ? { network: values.network } : {}),
     ...(values['rpc-url'] !== undefined ? { rpcUrl: values['rpc-url'] } : {}),
+    ...(values['rpc-url-list'] !== undefined ? { rpcUrls: values['rpc-url-list'] } : {}),
+    ...(values['archive-url'] !== undefined ? { archiveUrl: values['archive-url'] } : {}),
     ...(contractIds !== undefined ? { contracts: contractIds } : {}),
     ...(values.db !== undefined ? { db: values.db } : {}),
     ...(values['data-dir'] !== undefined ? { dataDir: values['data-dir'] } : {}),
