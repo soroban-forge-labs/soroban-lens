@@ -401,14 +401,20 @@ export class PostgresEventStore implements EventStore {
     // Integer division on BIGINT floors for the non-negative epochs stored here,
     // matching the SQLite store's bucket starts exactly.
     const { rows } = await this.#pool.query(
-      `SELECT (closed_at_unix / ${width}) * ${width} AS start, COUNT(*)::int AS count
+      `SELECT (closed_at_unix / ${width}) * ${width} AS start, COUNT(*)::int AS count,
+              MIN(ledger) AS first_ledger, MAX(ledger) AS last_ledger
        FROM events
        ${where.clause}
        GROUP BY start
        ORDER BY start ASC`,
       where.values,
     );
-    return rows.map((r) => ({ start: Number(r['start']), count: Number(r['count']) }));
+    return rows.map((r) => ({
+      start: Number(r['start']),
+      count: Number(r['count']),
+      firstLedger: Number(r['first_ledger']),
+      lastLedger: Number(r['last_ledger']),
+    }));
   }
 
   async getLatestEventId(): Promise<string | null> {

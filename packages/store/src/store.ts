@@ -111,7 +111,8 @@ export interface EventStore {
    * Count events matching `query` per fixed-width time bucket, by ledger close
    * time (`fromTime`/`toTime` bound the range, as for `queryEvents`).
    * Buckets are aligned to the epoch, ordered oldest first, and sparse: a
-   * bucket with no events is omitted. `limit`, `cursor` and `order` are ignored.
+   * bucket with no events is omitted. Each bucket includes its ledger bounds.
+   * `limit`, `cursor` and `order` are ignored.
    */
   countByTimeBucket(query: EventQuery, bucket: TimeBucket): Promise<TimeBucketCount[]>;
 

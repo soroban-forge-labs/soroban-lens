@@ -305,7 +305,7 @@
           "contracts"
         ],
         "summary": "Event counts per time bucket for one contract",
-        "description": "Counts events per `minute`, `hour` or `day` of ledger close time, within the optional `from`/`to` range, oldest bucket first. Buckets with no events are omitted, so a client drawing a chart should fill the gaps with zero. Answers \"how many events per hour this week\" without paging every event.",
+        "description": "Counts events per `minute`, `hour` or `day` of ledger close time, within the optional `from`/`to` range, oldest bucket first. Accepts the same repeatable `topic` prefix and `successfulOnly` filters as the events endpoint. Buckets with no events are omitted, so a client drawing a chart should fill the gaps with zero. Answers \"how many events per hour this week\" without paging every event.",
         "operationId": "getContractActivity",
         "parameters": [
           {
@@ -319,6 +319,12 @@
           },
           {
             "$ref": "#/components/parameters/ActivityTo"
+          },
+          {
+            "$ref": "#/components/parameters/Topic"
+          },
+          {
+            "$ref": "#/components/parameters/SuccessfulOnly"
           }
         ],
         "responses": {
@@ -2259,7 +2265,9 @@
         "type": "object",
         "required": [
           "start",
-          "count"
+          "count",
+          "firstLedger",
+          "lastLedger"
         ],
         "properties": {
           "start": {
@@ -2270,6 +2278,14 @@
           "count": {
             "type": "integer",
             "description": "Events whose ledger closed in this bucket."
+          },
+          "firstLedger": {
+            "type": "integer",
+            "description": "Lowest ledger containing a matching event in this bucket."
+          },
+          "lastLedger": {
+            "type": "integer",
+            "description": "Highest ledger containing a matching event in this bucket."
           }
         }
       },

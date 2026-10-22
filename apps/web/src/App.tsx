@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiRequestError, buildStreamPath, configuredNetworks } from './api.js';
-import type { Health, LensEvent, TopicCount } from './types.js';
+import type { ContractActivity, ContractSummary, Health, LensEvent, TopicCount } from './types.js';
 import { Filters, type FilterState } from './components/Filters.js';
+import { ActivityChart } from './components/ActivityChart.js';
 import { EventTable } from './components/EventTable.js';
 import { StatusBar } from './components/StatusBar.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
@@ -12,6 +13,15 @@ const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMPQVUU2HHGC
 const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
+const ACTIVITY_DAYS = 30;
+const SECONDS_PER_DAY = 24 * 60 * 60;
+
+interface ActivityRange {
+  fromTime: string;
+  toTime: string;
+  fromLedger: number;
+  toLedger: number;
+}
 
 export function App(): React.JSX.Element {
   const networks = useMemo(configuredNetworks, []);
@@ -73,6 +83,12 @@ export function App(): React.JSX.Element {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [topics, setTopics] = useState<TopicCount[]>([]);
+  const [contracts, setContracts] = useState<ContractSummary[]>([]);
+  const [contractsError, setContractsError] = useState<string | null>(null);
+  const [activity, setActivity] = useState<ContractActivity | null>(null);
+  const [activityError, setActivityError] = useState<string | null>(null);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityRange, setActivityRange] = useState<ActivityRange | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -86,6 +102,46 @@ export function App(): React.JSX.Element {
   // Absolute vs relative timestamps in the Ledger column. Persisted so the
   // choice survives a reload, like the theme.
   const [absoluteTime, setAbsoluteTime] = usePersistentState('lens.absoluteTime', false);
+
+  const contractInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== '/' || event.altKey || event.ctrlKey || event.metaKey) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+      ) {
+        return;
+      }
+      event.preventDefault();
+      contractInputRef.current?.focus();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setContracts([]);
+    setContractsError(null);
+    api.contracts(selected.baseUrl, controller.signal)
+      .then(({ contracts: available }) => {
+        setContracts(available);
+        setContractsError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setContracts([]);
+        setContractsError(err instanceof ApiRequestError ? err.message : String(err));
+      });
+    return () => controller.abort();
+  }, [selected.baseUrl]);
+
+  useEffect(() => {
+    setActivityRange(null);
+  }, [selected.baseUrl]);
 
   // Typing a 56-character contract id should not fire 56 requests.
   const debouncedContractId = useDebounced(filters.contractId, 300);
@@ -113,13 +169,82 @@ export function App(): React.JSX.Element {
       ...(contractIdValid && debouncedContractId ? { contractId: debouncedContractId } : {}),
       ...(debouncedTopic ? { topics: [debouncedTopic] } : {}),
       ...(filters.successfulOnly ? { successfulOnly: true } : {}),
-      ...(fromLedgerNum !== undefined ? { fromLedger: fromLedgerNum } : {}),
-      ...(toLedgerNum !== undefined ? { toLedger: toLedgerNum } : {}),
+      ...(activityRange
+        ? {
+            fromLedger: activityRange.fromLedger,
+            toLedger: activityRange.toLedger,
+            fromTime: activityRange.fromTime,
+            toTime: activityRange.toTime,
+          }
+        : {
+            ...(fromLedgerNum !== undefined ? { fromLedger: fromLedgerNum } : {}),
+            ...(toLedgerNum !== undefined ? { toLedger: toLedgerNum } : {}),
+          }),
       limit: PAGE_SIZE,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly, fromLedgerNum, toLedgerNum],
+    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly, fromLedgerNum, toLedgerNum, activityRange],
   );
+
+  const contractSummary = contracts.find((contract) => contract.contractId === debouncedContractId);
+  const activityWindow = useMemo(() => {
+    if (!contractSummary) return null;
+    const lastSeen = Date.parse(contractSummary.lastSeenAt);
+    if (!Number.isFinite(lastSeen)) return null;
+    const finalDay = Math.floor(lastSeen / (SECONDS_PER_DAY * 1000)) * SECONDS_PER_DAY;
+    return {
+      from: finalDay - (ACTIVITY_DAYS - 1) * SECONDS_PER_DAY,
+      to: finalDay + SECONDS_PER_DAY - 1,
+    };
+  }, [contractSummary]);
+
+  useEffect(() => {
+    if (!contractIdValid || !debouncedContractId || !activityWindow) {
+      setActivity(null);
+      setActivityError(
+        contractSummary && !activityWindow ? 'The indexed contract has an invalid last-activity time.' : null,
+      );
+      setActivityLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setActivityLoading(true);
+    setActivity(null);
+    setActivityError(null);
+    api.activity(
+      selected.baseUrl,
+      debouncedContractId,
+      {
+        bucket: 'day',
+        ...activityWindow,
+        ...(debouncedTopic ? { topics: [debouncedTopic] } : {}),
+        ...(filters.successfulOnly ? { successfulOnly: true } : {}),
+      },
+      controller.signal,
+    )
+      .then((result) => {
+        setActivity(result);
+        setActivityError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setActivity(null);
+        setActivityError(err instanceof ApiRequestError ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setActivityLoading(false);
+      });
+    return () => controller.abort();
+  }, [
+    selected.baseUrl,
+    contractIdValid,
+    debouncedContractId,
+    debouncedTopic,
+    filters.successfulOnly,
+    activityWindow,
+    contractSummary,
+  ]);
 
   // Guards against a slow earlier response overwriting a newer one.
   const requestId = useRef(0);
@@ -191,7 +316,9 @@ export function App(): React.JSX.Element {
   // stream is not open (before it connects, while the browser retries a drop,
   // or against an API that does not offer it).
   const streamUrl =
-    filters.live && contractIdValid ? `${selected.baseUrl}${buildStreamPath(query)}` : null;
+    filters.live && contractIdValid && !activityRange
+      ? `${selected.baseUrl}${buildStreamPath(query)}`
+      : null;
   const streaming = useEventStream(
     streamUrl,
     (data) => {
@@ -217,7 +344,7 @@ export function App(): React.JSX.Element {
       void loadFirstPage();
     },
     LIVE_INTERVAL_MS,
-    filters.live && !streaming,
+    filters.live && !streaming && !activityRange,
   );
 
   useEffect(() => {
@@ -251,6 +378,32 @@ export function App(): React.JSX.Element {
   }, [selected.baseUrl, debouncedContractId, contractIdValid]);
 
   const showContract = !filters.contractId;
+  const changeFilters = (next: FilterState): void => {
+    if (
+      next.contractId !== filters.contractId ||
+      next.topic !== filters.topic ||
+      next.successfulOnly !== filters.successfulOnly ||
+      next.fromLedger !== filters.fromLedger ||
+      next.toLedger !== filters.toLedger
+    ) {
+      setActivityRange(null);
+    }
+    setFilters(next);
+  };
+
+  const filterActivityBucket = (start: number, firstLedger: number, lastLedger: number): void => {
+    const fromTime = new Date(start * 1000).toISOString();
+    if (activityRange?.fromTime === fromTime) {
+      setActivityRange(null);
+      return;
+    }
+    setActivityRange({
+      fromTime,
+      toTime: new Date((start + SECONDS_PER_DAY - 1) * 1000).toISOString(),
+      fromLedger: firstLedger,
+      toLedger: lastLedger,
+    });
+  };
 
   const exportJson = useCallback(() => {
     if (events.length === 0) return;
@@ -319,9 +472,12 @@ export function App(): React.JSX.Element {
       <ErrorBoundary title="Filter Controls Error">
         <Filters
           value={filters}
-          onChange={setFilters}
+          onChange={changeFilters}
           knownTopics={topics}
-          onUseExample={() => setFilters({ ...filters, contractId: EXAMPLE_CONTRACT })}
+          knownContracts={contracts}
+          contractsError={contractsError}
+          contractInputRef={contractInputRef}
+          onUseExample={() => changeFilters({ ...filters, contractId: EXAMPLE_CONTRACT })}
         />
       </ErrorBoundary>
 
@@ -345,7 +501,7 @@ export function App(): React.JSX.Element {
             {query.contractId ? ' for this contract' : ' indexed'}
             {debouncedTopic ? ` with topic "${debouncedTopic}"` : ''}
           </span>
-          {filters.live && <span
+          {filters.live && !activityRange && <span
               className="live-dot"
               title={streaming ? 'Streaming live updates' : 'Polling every 5 seconds'}
             >
@@ -372,12 +528,30 @@ export function App(): React.JSX.Element {
         )}
       </div>
 
+      {contractIdValid && debouncedContractId && activityWindow && (
+        <section className="activity-panel" aria-label="Event activity">
+          {activityError ? (
+            <p className="warning" role="alert">Could not load activity chart: {activityError}</p>
+          ) : activityLoading && !activity ? (
+            <p className="muted small" role="status">Loading activity…</p>
+          ) : activity ? (
+            <ActivityChart
+              activity={activity}
+              from={activityWindow.from}
+              to={activityWindow.to}
+              selectedFrom={activityRange?.fromTime ?? null}
+              onBucketClick={filterActivityBucket}
+            />
+          ) : null}
+        </section>
+      )}
+
       <ErrorBoundary title="Event Table Error">
         <EventTable
           events={events}
           showContract={showContract}
           loading={loading}
-          onTopicClick={(topic) => setFilters({ ...filters, topic })}
+          onTopicClick={(topic) => changeFilters({ ...filters, topic })}
           absolute={absoluteTime}
           emptyMessage={
             contractUnknown

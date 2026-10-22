@@ -53,6 +53,9 @@ jobs:
       - name: Build all workspaces
         run: npm run build
 
+      - name: Check web bundle size budget
+        run: npm run check:bundle-size -w @soroban-lens/web
+
       - name: Test all workspaces
         # Every suite runs against fixtures/testnet-events.json, so CI needs no
         # network access and cannot be broken by a testnet outage.

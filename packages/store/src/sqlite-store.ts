@@ -474,14 +474,25 @@ export class SqliteEventStore implements EventStore {
     const where = buildWhere(query);
     const rows = this.#db
       .prepare(
-        `SELECT (closed_at_unix / ${width}) * ${width} AS start, COUNT(*) AS count
+        `SELECT (closed_at_unix / ${width}) * ${width} AS start,
+                COUNT(*) AS count, MIN(ledger) AS first_ledger, MAX(ledger) AS last_ledger
          FROM events
          ${where.clause}
          GROUP BY start
          ORDER BY start ASC`,
       )
-      .all(...where.values) as { start: number; count: number }[];
-    return rows.map((r) => ({ start: r.start, count: r.count }));
+      .all(...where.values) as {
+        start: number;
+        count: number;
+        first_ledger: number;
+        last_ledger: number;
+      }[];
+    return rows.map((r) => ({
+      start: r.start,
+      count: r.count,
+      firstLedger: r.first_ledger,
+      lastLedger: r.last_ledger,
+    }));
   }
 
   /**

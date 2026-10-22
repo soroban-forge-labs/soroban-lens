@@ -26,6 +26,24 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(readTimeFormat);
   const firstTopic = event.topics[0];
   const topicLabel = firstTopic ? summarise(firstTopic) : '—';
+  const onKeyDown = (keyEvent: React.KeyboardEvent<HTMLTableRowElement>): void => {
+    if (keyEvent.target !== keyEvent.currentTarget) return;
+
+    if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
+      keyEvent.preventDefault();
+      const rows = Array.from(
+        keyEvent.currentTarget.closest('tbody')?.querySelectorAll<HTMLTableRowElement>('.event-row') ?? [],
+      );
+      const index = rows.indexOf(keyEvent.currentTarget);
+      rows[index + (keyEvent.key === 'ArrowDown' ? 1 : -1)]?.focus();
+    } else if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
+      keyEvent.preventDefault();
+      setExpanded((value) => !value);
+    } else if (keyEvent.key === 'Escape' && expanded) {
+      keyEvent.preventDefault();
+      setExpanded(false);
+    }
+  };
 
   useEffect(() => {
     try {
@@ -39,6 +57,9 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
     <>
       <tr
         className={`event-row${expanded ? ' is-expanded' : ''}${event.inSuccessfulContractCall ? '' : ' is-failed'}`}
+        onKeyDown={onKeyDown}
+        role="row"
+        tabIndex={0}
       >
         <td className="col-toggle">
           <button

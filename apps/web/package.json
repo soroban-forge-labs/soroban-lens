@@ -9,6 +9,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --force",
+    "check:bundle-size": "node scripts/check-bundle-size.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "test": "npm run build && tsc -p tsconfig.test.json && node --test test/api.test.js test/format.test.js",
     "test:a11y": "node test/accessibility.test.js"
