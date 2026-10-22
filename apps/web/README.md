@@ -30,6 +30,14 @@ always emitting.
 - **Live updates** — streamed over the API's `GET /events/stream` (Server-Sent Events). When the stream is not open — before it connects, while the browser retries a dropped connection, or against an API without it — it falls back to polling every 5 seconds, which pauses while the tab is hidden.
 - **Expandable rows** — click a row for decoded topics and value, plus the raw
   XDR the decoding came from, under a disclosure.
+- **Compare two events** — tick the checkbox on any two rows to open a
+  side-by-side diff: differing topics and metadata highlighted, the decoded
+  value diffed structurally through maps and vecs (a key present on one side
+  only shows as added/removed rather than a wholesale change), and the
+  spec-decoded fields diffed by name when both events carry them. The
+  comparison lives in the URL as `?compare=<id1>,<id2>`, so it can be shared
+  as a link — a deep-linked pair is fetched by id even when it is not in the
+  loaded page.
 - **Network switcher** — selects between configured API instances.
 - **Load more** — keyset pagination via the API's `nextCursor`.
 

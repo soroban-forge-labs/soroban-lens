@@ -3,6 +3,7 @@ import { api, ApiRequestError, buildStreamPath, configuredNetworks } from './api
 import type { Health, LensEvent, TopicCount } from './types.js';
 import { Filters, type FilterState } from './components/Filters.js';
 import { EventTable } from './components/EventTable.js';
+import { EventCompare } from './components/EventCompare.js';
 import { StatusBar } from './components/StatusBar.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { usePersistentState, usePolling, useDebounced, useEventStream, useTheme } from './hooks.js';
@@ -12,6 +13,17 @@ const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMPQVUU2HHGC
 const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
+
+/** The `?compare=<id1>,<id2>` deep link, which opens two events in the diff view. */
+function readCompareParam(): string[] {
+  const raw = new URLSearchParams(window.location.search).get('compare');
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .slice(0, 2);
+}
 
 export function App(): React.JSX.Element {
   const networks = useMemo(configuredNetworks, []);
@@ -87,6 +99,11 @@ export function App(): React.JSX.Element {
   // choice survives a reload, like the theme.
   const [absoluteTime, setAbsoluteTime] = usePersistentState('lens.absoluteTime', false);
 
+  // Ordered: the first ticked event is the left side of the comparison.
+  const [selectedIds, setSelectedIds] = useState<string[]>(readCompareParam);
+  const [comparePair, setComparePair] = useState<[LensEvent, LensEvent] | null>(null);
+  const [compareError, setCompareError] = useState<string | null>(null);
+
   // Typing a 56-character contract id should not fire 56 requests.
   const debouncedContractId = useDebounced(filters.contractId, 300);
   const debouncedTopic = useDebounced(filters.topic, 300);
@@ -123,6 +140,58 @@ export function App(): React.JSX.Element {
 
   // Guards against a slow earlier response overwriting a newer one.
   const requestId = useRef(0);
+
+  const toggleSelect = useCallback((id: string): void => {
+    setSelectedIds((current) => {
+      if (current.includes(id)) return current.filter((x) => x !== id);
+      // Exactly two events compare at once; a third pick replaces the older one.
+      return [...current, id].slice(-2);
+    });
+  }, []);
+
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+
+  // The selection lives in the URL so a comparison can be shared as a link.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (selectedIds.length === 2) url.searchParams.set('compare', selectedIds.join(','));
+    else url.searchParams.delete('compare');
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+  }, [selectedIds]);
+
+  // Both events come from the loaded page when they can; a deep link fetches
+  // them by id, since the two being compared are often far outside page one.
+  useEffect(() => {
+    if (selectedIds.length !== 2) {
+      setComparePair(null);
+      setCompareError(null);
+      return;
+    }
+    const firstId = selectedIds[0];
+    const secondId = selectedIds[1];
+    if (!firstId || !secondId) return;
+    const loadedFirst = events.find((e) => e.id === firstId);
+    const loadedSecond = events.find((e) => e.id === secondId);
+    if (loadedFirst && loadedSecond) {
+      setComparePair([loadedFirst, loadedSecond]);
+      return;
+    }
+    let cancelled = false;
+    void Promise.all([api.event(selected.baseUrl, firstId), api.event(selected.baseUrl, secondId)])
+      .then(([a, b]) => {
+        if (cancelled) return;
+        setComparePair([a, b]);
+        setCompareError(null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setComparePair(null);
+        setCompareError(err instanceof ApiRequestError ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedIds, events, selected.baseUrl]);
 
   const loadFirstPage = useCallback(async (): Promise<void> => {
     if (!contractIdValid || !ledgerRangeValid) return;
@@ -372,11 +441,48 @@ export function App(): React.JSX.Element {
         )}
       </div>
 
+      {selectedIds.length === 1 && (
+        <div className="compare-bar">
+          <span>
+            One event selected — tick one more to compare. The selection is kept in
+            the URL, so the comparison can be shared as a link.
+          </span>
+          <button type="button" className="btn-export" onClick={() => setSelectedIds([])}>
+            Clear
+          </button>
+        </div>
+      )}
+
+      {selectedIds.length === 2 && compareError && (
+        <p className="warning banner" role="alert">
+          Cannot load the events to compare: {compareError}{' '}
+          <button type="button" className="link-button" onClick={() => setSelectedIds([])}>
+            Clear selection
+          </button>
+        </p>
+      )}
+
+      {selectedIds.length === 2 && !comparePair && !compareError && (
+        <p className="compare-bar">Loading the events to compare…</p>
+      )}
+
+      {comparePair && (
+        <ErrorBoundary title="Compare View Error">
+          <EventCompare
+            left={comparePair[0]}
+            right={comparePair[1]}
+            onClose={() => setSelectedIds([])}
+          />
+        </ErrorBoundary>
+      )}
+
       <ErrorBoundary title="Event Table Error">
         <EventTable
           events={events}
           showContract={showContract}
           loading={loading}
+          selectedIds={selectedIdSet}
+          onToggleSelect={toggleSelect}
           onTopicClick={(topic) => setFilters({ ...filters, topic })}
           absolute={absoluteTime}
           emptyMessage={
