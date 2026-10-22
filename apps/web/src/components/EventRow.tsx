@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { LensEvent } from '../types.js';
 import { prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
+import { CopyButton } from './CopyButton.js';
 
 interface Props {
   event: LensEvent;
@@ -81,10 +82,16 @@ export function EventRow({ event, showContract, onTopicClick, selected, onToggle
               {timeFormat === 'relative' ? 'abs' : 'rel'}
             </button>
           </span>
+          <div className="mobile-copy-actions">
+            {showContract && <CopyButton value={event.contractId} label="contract ID" />}
+            <CopyButton value={event.txHash} label="transaction hash" />
+          </div>
+          <div className="row-event-copy"><span className="muted small">Event ID</span> <CopyButton value={event.id} label="event ID" /></div>
         </td>
         {showContract && (
-          <td className="col-contract mono" title={event.contractId}>
-            {truncate(event.contractId)}
+          <td className="col-contract" title={event.contractId}>
+            <span className="mono">{truncate(event.contractId)}</span>
+            <CopyButton value={event.contractId} label="contract ID" />
           </td>
         )}
         <td className="col-topic">
@@ -117,7 +124,10 @@ export function EventRow({ event, showContract, onTopicClick, selected, onToggle
             </>
           )}
         </td>
-        <td className="col-tx mono" title={event.txHash}>{truncate(event.txHash, 6, 6)}</td>
+        <td className="col-tx" title={event.txHash}>
+          <span className="mono">{truncate(event.txHash, 6, 6)}</span>
+          <CopyButton value={event.txHash} label="transaction hash" />
+        </td>
       </tr>
 
       {expanded && (
@@ -133,11 +143,11 @@ export function EventRow({ event, showContract, onTopicClick, selected, onToggle
               {event.decodeError && <p className="warning">Decode error: {event.decodeError}</p>}
 
               <dl className="detail-meta">
-                <div><dt>Event id</dt><dd className="mono">{event.id}</dd></div>
-                <div><dt>Contract</dt><dd className="mono">{event.contractId}</dd></div>
+                <div><dt>Event id</dt><dd className="mono">{event.id} <CopyButton value={event.id} label="event ID" /></dd></div>
+                <div><dt>Contract</dt><dd className="mono">{event.contractId} <CopyButton value={event.contractId} label="contract ID" /></dd></div>
                 <div><dt>Ledger</dt><dd className="mono">{event.ledger}</dd></div>
                 <div><dt>Closed at</dt><dd className="mono">{event.ledgerClosedAt}</dd></div>
-                <div><dt>Transaction</dt><dd className="mono">{event.txHash}</dd></div>
+                <div><dt>Transaction</dt><dd className="mono">{event.txHash} <CopyButton value={event.txHash} label="transaction hash" /></dd></div>
                 <div><dt>Position</dt><dd className="mono">tx {event.transactionIndex} / op {event.operationIndex}</dd></div>
               </dl>
 

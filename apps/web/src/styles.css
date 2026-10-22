@@ -216,6 +216,20 @@ body {
 .col-ledger .mono { display: block; }
 .col-contract { width: 160px; }
 .col-tx { width: 130px; color: var(--muted); }
+.col-contract, .col-tx { white-space: nowrap; }
+
+.copy-control { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+.copy-button {
+  border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px;
+  background: var(--surface); color: var(--accent); font: inherit; font-size: 11px;
+  cursor: pointer; vertical-align: middle;
+}
+.copy-button:hover { border-color: var(--accent); background: var(--accent-soft); }
+.copy-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.copy-status { color: var(--accent); font-size: 11px; }
+.copy-status:empty { display: none; }
+.mobile-copy-actions { display: none; }
+.row-event-copy { margin-top: 4px; }
 
 .event-row { cursor: pointer; }
 .event-row:hover { background: var(--accent-soft); }
@@ -377,5 +391,6 @@ body {
 
 @media (max-width: 700px) {
   .col-contract, .col-tx { display: none; }
+  .mobile-copy-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
   .filters { flex-direction: column; align-items: stretch; }
 }
