@@ -21,7 +21,7 @@ export type {
   TypedField,
 } from './types.js';
 
-export type { EventStore } from './store.js';
+export type { EventStore, PruneToSizeResult } from './store.js';
 export {
   MAX_QUERY_LIMIT,
   DEFAULT_MAX_QUERY_LIMIT,

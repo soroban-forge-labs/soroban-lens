@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { LensEvent } from '../types.js';
-import { prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
+import { absoluteTime, prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
 
 interface Props {
   event: LensEvent;
@@ -8,34 +8,15 @@ interface Props {
   onTopicClick: (topic: string) => void;
   selected: boolean;
   onToggleSelect: (id: string) => void;
-}
-
-const TIME_FORMAT_KEY = 'lens.timeFormat';
-
-type TimeFormat = 'relative' | 'absolute';
-
-function readTimeFormat(): TimeFormat {
-  try {
-    return localStorage.getItem(TIME_FORMAT_KEY) === 'absolute' ? 'absolute' : 'relative';
-  } catch {
-    return 'relative';
-  }
+  /** Show the ledger close time as an absolute timestamp instead of "3h ago". */
+  absolute: boolean;
 }
 
 /** One table row, expanding in place to show the full decoded payload. */
-export function EventRow({ event, showContract, onTopicClick, selected, onToggleSelect }: Props): React.JSX.Element {
+export function EventRow({ event, showContract, onTopicClick, selected, onToggleSelect, absolute }: Props): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
-  const [timeFormat, setTimeFormat] = useState<TimeFormat>(readTimeFormat);
   const firstTopic = event.topics[0];
   const topicLabel = firstTopic ? summarise(firstTopic) : '—';
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(TIME_FORMAT_KEY, timeFormat);
-    } catch {
-      // ignore storage failures (private mode, quota, etc.)
-    }
-  }, [timeFormat]);
 
   return (
     <>
@@ -64,22 +45,11 @@ export function EventRow({ event, showContract, onTopicClick, selected, onToggle
         <td className="col-ledger">
           <span className="mono">{event.ledger}</span>
           <span className="muted small">
-            {timeFormat === 'absolute' ? (
-              <span className="mono">{event.ledgerClosedAt}</span>
+            {absolute ? (
+              <span className="timestamp-absolute" title={event.ledgerClosedAt}>{absoluteTime(event.ledgerClosedAt)}</span>
             ) : (
               <span title={event.ledgerClosedAt}>{relativeTime(event.ledgerClosedAt)}</span>
-            )}{' '}
-            <button
-              type="button"
-              className="time-toggle"
-              title={timeFormat === 'relative' ? 'Show absolute timestamps' : 'Show relative timestamps'}
-              onClick={(e) => {
-                e.stopPropagation();
-                setTimeFormat((v) => (v === 'relative' ? 'absolute' : 'relative'));
-              }}
-            >
-              {timeFormat === 'relative' ? 'abs' : 'rel'}
-            </button>
+            )}
           </span>
         </td>
         {showContract && (

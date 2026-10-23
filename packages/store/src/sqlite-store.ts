@@ -10,7 +10,7 @@ import { decodeEvent, topicKey, extractAddresses } from './decode.js';
 import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
-import { normaliseLimit, type EventStore } from './store.js';
+import { normaliseLimit, type EventStore, type PruneToSizeResult } from './store.js';
 import type {
   ContractSpecRecord,
   ContractSummary,
@@ -684,17 +684,21 @@ export class SqliteEventStore implements EventStore {
    * result. The final checkpoint flushes the WAL so the on-disk total the
    * caller measures next actually reflects the prune.
    */
-  async pruneToSize(targetBytes: number): Promise<{ ledgers: number; events: number }> {
-    if (this.#path === ':memory:') return { ledgers: 0, events: 0 };
-
-    const CHUNK_LEDGERS = 1000;
+  async pruneToSize(targetBytes: number, chunkLedgers = 1000): Promise<PruneToSizeResult> {
+    const CHUNK_LEDGERS = Math.max(1, chunkLedgers);
     let ledgers = 0;
     let events = 0;
+    let highestPrunedLedger: number | null = null;
+    const total = (): number => {
+      const { sizeBytes, walSizeBytes } = this.#sizes();
+      return (sizeBytes ?? 0) + (walSizeBytes ?? 0);
+    };
+    if (this.#path === ':memory:') {
+      return { rowsRemoved: 0, ledgersRemoved: 0, highestPrunedLedger: null, sizeBytesAfter: 0, withinTarget: true };
+    }
 
     for (;;) {
-      const { sizeBytes, walSizeBytes } = this.#sizes();
-      const total = (sizeBytes ?? 0) + (walSizeBytes ?? 0);
-      if (total <= targetBytes) break;
+      if (total() <= targetBytes) break;
 
       // The oldest ledger still present, and the ledger CHUNK_LEDGERS past it
       // — everything strictly below `cutoff` is one chunk's worth of the
@@ -708,8 +712,8 @@ export class SqliteEventStore implements EventStore {
       const cutoff = oldest.ledger + CHUNK_LEDGERS;
 
       const removed = this.#db
-        .prepare('SELECT COUNT(*) AS n FROM events WHERE ledger < ?')
-        .get(cutoff) as { n: number };
+        .prepare('SELECT COUNT(*) AS n, COUNT(DISTINCT ledger) AS l, MAX(ledger) AS top FROM events WHERE ledger < ?')
+        .get(cutoff) as { n: number; l: number; top: number | null };
       if (removed.n === 0) break; // fewer than a chunk's worth left; nothing more to give
 
       this.#db.exec('BEGIN');
@@ -720,8 +724,9 @@ export class SqliteEventStore implements EventStore {
         this.#db.exec('ROLLBACK');
         throw error;
       }
-      ledgers += CHUNK_LEDGERS;
+      ledgers += removed.l;
       events += removed.n;
+      highestPrunedLedger = removed.top;
     }
 
     if (events > 0) {
@@ -729,12 +734,19 @@ export class SqliteEventStore implements EventStore {
       this.#db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
       this.#log.info(
         'prune_by_size',
-        `pruned ${events} event(s) across ~${ledgers} ledger(s) to fit under ${targetBytes} bytes`,
+        `pruned ${events} event(s) across ${ledgers} ledger(s) to fit under ${targetBytes} bytes`,
         { events, ledgers, targetBytes },
       );
     }
 
-    return { ledgers, events };
+    const sizeBytesAfter = total();
+    return {
+      rowsRemoved: events,
+      ledgersRemoved: ledgers,
+      highestPrunedLedger,
+      sizeBytesAfter,
+      withinTarget: sizeBytesAfter <= targetBytes,
+    };
   }
 
   async redecode(all = false): Promise<number> {
