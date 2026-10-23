@@ -169,7 +169,7 @@ export class LensRpcClient {
         if (i >= filters.length) return;
         const cursor = cursors?.[i];
         results[i] = await this.getEvents({
-          filters: [filters[i]],
+          filters: [filters[i]!],
           ...(cursor ? { cursor: cursor } : { startLedger: startLedger as number }),
           ...(endLedger !== undefined ? { endLedger } : {}),
           ...(limit !== undefined ? { limit } : {}),
@@ -181,7 +181,7 @@ export class LensRpcClient {
     const events: RawEvent[] = [];
     const nextCursors: string[] = [];
     let latestLedger = 0;
-    let oldestLedger = Number.INFINITY;
+    let oldestLedger = Number.POSITIVE_INFINITY;
     for (const batch of results) {
       for (const ev of batch.events) events.push(ev);
       nextCursors.push(batch.cursor);
@@ -193,7 +193,7 @@ export class LensRpcClient {
       events,
       cursors: nextCursors,
       latestLedger,
-      oldestLedger: oldestLedger === Number.INFINITY ? 0 : oldestLedger,
+      oldestLedger: oldestLedger === Number.POSITIVE_INFINITY ? 0 : oldestLedger,
     };
   }
 }
@@ -254,10 +254,10 @@ function toRawEvent(e: rpc.Api.RawEventResponse): RawEvent {
 export function buildFilters(
   contractIds: string[],
   topics?: string[][],
-  eventType?: EventType,
+  eventType: EventType = 'contract',
 ): EventFilter[] {
   const base: EventFilter = {
-    ...(eventType ? { type: eventType } : {}),
+    type: eventType,
     ...(topics && topics.length > 0 ? { topics } : {}),
   };
   if (contractIds.length === 0) {

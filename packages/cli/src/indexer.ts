@@ -72,8 +72,8 @@ export function databaseSizeBytes(dbPath: string): number {
 /**
  * Prunes oldest ledgers in chunks until the database (+ WAL) fits under
  * `sizeBytes`, then checkpoints to reclaim space. Returns the number of
- * ledgers removed. Stops early if a chunk removes nothing, so a store that
- * cannot shrink further does not loop forever.
+ * ledgers removed. The store stops on its own once a chunk removes nothing,
+ * so a store that cannot shrink further does not loop forever.
  */
 export async function pruneToSize(
   store: EventStore,
@@ -85,23 +85,17 @@ export async function pruneToSize(
   } = {},
 ): Promise<number> {
   const log = options.log ?? (() => {});
-  const chunk = Math.max(1, options.chunkLedgers ?? 1000);
-  let removed = 0;
-  while (databaseSizeBytes(dbPath) > sizeBytes) {
-    const before = databaseSizeBytes(dbPath);
-    const deleted = await store.pruneOldestLedgers(chunk);
-    if (deleted <= 0) break;
-    removed += deleted;
-    await store.checkpoint();
-    const after = databaseSizeBytes(dbPath);
+  const before = databaseSizeBytes(dbPath);
+  if (before <= sizeBytes) return 0;
+  const result = await store.pruneToSize(sizeBytes, options.chunkLedgers);
+  if (result.ledgersRemoved > 0) {
     log(
-      `size target ${sizeBytes}B: pruned ${deleted} ledger(s), ${before} -> ${after} bytes`,
+      `size target ${sizeBytes}B: pruned ${result.rowsRemoved} event(s) across ${result.ledgersRemoved} ledger(s), ` +
+        `${before} -> ${databaseSizeBytes(dbPath)} bytes` +
+        (result.withinTarget ? '' : ' (still over target)'),
     );
   }
-  if (removed > 0) {
-    log(`size target ${sizeBytes}B met after pruning ${removed} ledger(s); now ${databaseSizeBytes(dbPath)}B`);
-  }
-  return removed;
+  return result.ledgersRemoved;
 }
 
 /**
@@ -206,7 +200,7 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
     // interval so a long-running indexer stays within the operator's disk budget.
     if (config.maxDbSizeBytes !== undefined) {
       const target = config.maxDbSizeBytes;
-      const intervalMs = config.sizePruneIntervalMs;
+      const intervalMs = config.pruneIntervalMs;
       const runSizePrune = async (): Promise<void> => {
         if (sizePruning) return;
         sizePruning = true;

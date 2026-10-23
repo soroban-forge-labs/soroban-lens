@@ -5,7 +5,7 @@ import { decodeEvent, topicKey, extractAddresses } from './decode.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION } from './schema.js';
 import { POSTGRES_MIGRATIONS } from './postgres-schema.js';
-import { normaliseLimit, type EventStore } from './store.js';
+import { normaliseLimit, type EventStore, type PruneToSizeResult } from './store.js';
 import type {
   ContractSpecRecord,
   ContractSummary,
@@ -621,43 +621,53 @@ export class PostgresEventStore implements EventStore {
 
   /**
    * Prune the oldest ledgers in chunks until `sizeBytes + walSizeBytes` fits
-   * under `maxSizeBytes`, then checkpoint. Returns the number of rows removed.
-   * A no-op when no size target is configured.
+   * under `targetBytes` (default: the store's `maxSizeBytes`), then checkpoint.
+   * A no-op when no size target is given or configured.
    */
-  async pruneToSize(maxSizeBytes = this.#maxSizeBytes): Promise<number> {
-    if (maxSizeBytes === undefined) return 0;
-    const CHUNK = 1000;
-    let removed = 0;
-    for (;;) {
+  async pruneToSize(
+    targetBytes: number | undefined = this.#maxSizeBytes,
+    chunkLedgers = 1000,
+  ): Promise<PruneToSizeResult> {
+    const sizeNow = async (): Promise<number> => {
       const stats = await this.getStats();
-      const size = (stats.sizeBytes ?? 0) + (stats.walSizeBytes ?? 0);
-      if (size <= maxSizeBytes) break;
-      const { rows } = await this.#pool.query(
-        'SELECT ledger FROM events ORDER BY ledger ASC LIMIT 1',
-      );
+      return (stats.sizeBytes ?? 0) + (stats.walSizeBytes ?? 0);
+    };
+    if (targetBytes === undefined) {
+      const size = await sizeNow();
+      return { rowsRemoved: 0, ledgersRemoved: 0, highestPrunedLedger: null, sizeBytesAfter: size, withinTarget: true };
+    }
+    const chunk = Math.max(1, chunkLedgers);
+    let rowsRemoved = 0;
+    let ledgersRemoved = 0;
+    let highestPrunedLedger: number | null = null;
+    for (;;) {
+      const size = await sizeNow();
+      if (size <= targetBytes) break;
+      const { rows } = await this.#pool.query('SELECT MIN(ledger) AS ledger FROM events');
       const oldest = rows[0]?.['ledger'];
       if (oldest === null || oldest === undefined) break;
-      const nextRow = await this.#pool.query(
-        'SELECT ledger FROM events WHERE ledger > $1 ORDER BY ledger ASC LIMIT 1',
-        [Number(oldest)],
-      );
-      const next = nextRow.rows[0]?.['ledger'];
-      const upper = next === null || next === undefined ? Number(oldest) + 1 : Number(next);
+      const cutoff = Number(oldest) + chunk;
+      // Whole ledgers only: a half-pruned ledger would leave a gap mid-history.
       const result = await this.#pool.query(
-        'DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ledger < $1 ORDER BY ledger ASC, id ASC LIMIT $2)',
-        [upper, CHUNK],
+        'WITH gone AS (DELETE FROM events WHERE ledger < $1 RETURNING ledger) ' +
+          'SELECT COUNT(*) AS n, COUNT(DISTINCT ledger) AS l, MAX(ledger) AS top FROM gone',
+        [cutoff],
       );
-      const deleted = result.rowCount ?? 0;
-      removed += deleted;
+      const row = result.rows[0] ?? {};
+      const deleted = Number(row['n'] ?? 0);
+      if (deleted === 0) break;
+      rowsRemoved += deleted;
+      ledgersRemoved += Number(row['l'] ?? 0);
+      highestPrunedLedger = row['top'] === null || row['top'] === undefined ? highestPrunedLedger : Number(row['top']);
       this.#log.info(
         'prune_by_size',
-        `pruned ${deleted} event(s) below ledger ${upper} to fit ${maxSizeBytes} bytes`,
-        { removed: deleted, ledger: upper, sizeBytes: size, maxSizeBytes },
+        `pruned ${deleted} event(s) below ledger ${cutoff} to fit ${targetBytes} bytes`,
+        { removed: deleted, ledger: cutoff, sizeBytes: size, maxSizeBytes: targetBytes },
       );
-      if (deleted === 0) break;
     }
-    if (removed > 0) await this.checkpoint();
-    return removed;
+    if (rowsRemoved > 0) await this.checkpoint();
+    const sizeBytesAfter = await sizeNow();
+    return { rowsRemoved, ledgersRemoved, highestPrunedLedger, sizeBytesAfter, withinTarget: sizeBytesAfter <= targetBytes };
   }
 
   async redecode(all = false): Promise<number> {

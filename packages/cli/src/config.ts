@@ -94,7 +94,7 @@ export function resolveConfig(
     fetchSpecs: !/^(0|false|no|off)$/i.test((env.LENS_FETCH_SPECS ?? '').trim()),
     clockSkewThresholdSeconds: resolveClockSkewThreshold(env.LENS_CLOCK_SKEW_THRESHOLD_SECONDS),
     maxDbSizeBytes: overrides.maxDbSize ?? optionalNumber(env.LENS_MAX_DB_SIZE_BYTES),
-    pruneIntervalMs: overrides.pruneInterval ?? numberOr(env.LENS_PRUN_INTERVAL_MS, 60_000),
+    pruneIntervalMs: overrides.pruneInterval ?? numberOr(env.LENS_PRUNE_INTERVAL_MS, 60_000),
   };
 }
 

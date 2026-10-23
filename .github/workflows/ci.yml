@@ -146,8 +146,13 @@ jobs:
             curl -sf http://localhost:8080/health && break
             sleep 2
           done
-          curl -sf http://localhost:8080/health | tee /dev/stderr | grep -q '"status": "ok"'
-          curl -sf "http://localhost:8080/contracts" | grep -q CDLZFC3S
+          # Capture before matching: with pipefail, `curl | grep -q` fails with
+          # curl exit 23 when grep exits early on a match.
+          health=$(curl -sf http://localhost:8080/health)
+          echo "$health"
+          grep -q '"status": "ok"' <<<"$health"
+          contracts=$(curl -sf "http://localhost:8080/contracts")
+          grep -q CDLZFC3S <<<"$contracts"
 
       - name: Service logs on failure
         if: failure()

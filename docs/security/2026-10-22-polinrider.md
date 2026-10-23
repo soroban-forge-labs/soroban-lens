@@ -63,11 +63,13 @@ credentials were exposed through CI.
   on the paths, settings, npm hooks, whitespace-hidden code and network
   indicators used by this campaign. It only reads files and never installs or
   runs repo code.
-- **Branch protection.** Force pushes and deletion of `main` are blocked.
-- **Open pull requests.** Every open PR that had merged the infected `main`
-  was asked to rebase onto the cleaned `main`. Such PRs fail the guard until
-  they do.
+- **Branch protection (in progress).** Force pushes and deletion of `main`
+  are being blocked, and the malware guard made a required check.
+- **Open pull requests.** Open PRs that merged the infected `main` (#241,
+  #242, #243, #244, #248, #249, #251, #253) must rebase onto the cleaned
+  `main` before they can be merged. They fail the guard until they do.
 - **Maintainer credentials** are being rotated from a clean device.
+- **GitHub Support** has been asked to purge the old commits and PR refs.
 
 ## If you have an open PR or a local clone
 
