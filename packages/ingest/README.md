@@ -112,6 +112,7 @@ larger sets across multiple filters automatically.
 | `--start-ledger` | — | oldest retained ledger |
 | `--page-size` | — | `200` (max `10000`) |
 | `--poll-interval` | — | `2000` ms |
+| `--poll-max-interval` | `LENS_POLL_MAX_INTERVAL_MS` | `30000` ms |
 | `--stalled-threshold` | `LENS_STALLED_THRESHOLD_MS` | `60000` ms |
 | `--once` | — | off — exit once caught up |
 | `--no-resume` | — | off — ignore stored cursors |
@@ -119,6 +120,11 @@ larger sets across multiple filters automatically.
 
 `mainnet` has no free public RPC with useful retention. Set `LENS_RPC_URL` to
 your own node or a provider before pointing this at mainnet.
+
+The base poll interval is used after a page containing events. Consecutive
+empty pages double the idle wait, capped at `--poll-max-interval`. An event
+resets the wait to the base interval. Set the cap equal to the base interval
+to retain the fixed-interval behaviour.
 
 ## Tests
 

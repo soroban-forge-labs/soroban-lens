@@ -24,7 +24,8 @@ export {
   defaultCursorKey,
   ingestionLag,
   APPROX_LEDGER_SECONDS,
-  DEFAULT_CHUNK_CONCURRENCY,
+  DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_MAX_POLL_INTERVAL_MS,
 } from './poller.js';
 export type { PollerDeps, PollerProgress } from './poller.js';
 
@@ -64,7 +65,6 @@ export {
 export type { RetryOptions } from './retry.js';
 
 export { IngestMetrics } from './metrics.js';
-
 export { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';
 
 export { FailoverRpcClient } from './rpc-pool.js';

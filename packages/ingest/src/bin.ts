@@ -74,17 +74,11 @@ function numeric<K extends string>(key: K, raw: string | undefined): Partial<Rec
 }
 
 /** Validate CLI numbers before they can be passed to the poller or RPC client. */
-function parseNumericFlag(
-  flag: string,
-  raw: string | undefined,
-  min: number,
-  max = Infinity,
-): number | undefined {
+function parseNumericFlag(flag: string, raw: string | undefined, min: number, max = Infinity): number | undefined {
   if (raw === undefined) return undefined;
   const value = Number(raw);
-  if (!Number.isInteger(value) || value < min || value > max) {
-    const range = max === Infinity ? `at least ${min}` : `between ${min} and ${max}`;
-    throw new Error(`error: ${flag} must be an integer ${range}, got "${raw}"`);
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`error: ${flag} must be a finite number between ${min} and ${max}`);
   }
   return value;
 }
@@ -102,6 +96,7 @@ Options:
       --start-ledger <n>   First ledger to read when no cursor is stored.
       --page-size <n>      Events per RPC page, 1-10000 (default: 200).
       --poll-interval <ms> Wait after catching up to the tip (default: 2000).
+      --poll-max-interval <ms> Maximum idle wait after repeated empty polls (default: 30000).
       --stalled-threshold <ms> Warn if the RPC tip does not advance (default: 60000).
       --end-ledger <n>     Last ledger to read. Exits cleanly once passed.
       --type <kind>        contract | system | diagnostic (default: contract).
@@ -124,6 +119,7 @@ Options:
 
 Environment:
   LENS_NETWORK, LENS_RPC_URL, LENS_CONTRACT_IDS (comma separated), LENS_DATA_DIR
+  LENS_POLL_INTERVAL_MS, LENS_POLL_MAX_INTERVAL_MS
   LENS_RPC_HEADERS (comma separated 'Name: value' pairs)
   LENS_RETRY_ATTEMPTS, LENS_RETRY_BASE_DELAY_MS, LENS_RETRY_MAX_DELAY_MS
   LENS_STALLED_THRESHOLD_MS
@@ -145,6 +141,7 @@ async function main(argv: string[]): Promise<number> {
       'start-ledger': { type: 'string' },
       'page-size': { type: 'string' },
       'poll-interval': { type: 'string' },
+      'poll-max-interval': { type: 'string' },
       'stalled-threshold': { type: 'string' },
       'end-ledger': { type: 'string' },
       type: { type: 'string' },
@@ -169,6 +166,19 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  const contractIds =
+    values.contract ??
+    (process.env.LENS_CONTRACT_IDS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+  if (contractIds.length === 0) {
+    process.stderr.write('error: at least one --contract is required\n');
+    process.stderr.write(`${USAGE}\n`);
+    return 2;
+  }
+
   let startLedger: number | undefined;
   let endLedger: number | undefined;
   let pageSize: number | undefined;
@@ -182,19 +192,6 @@ async function main(argv: string[]): Promise<number> {
     maxEvents = parseNumericFlag('--max-events', values['max-events'], 1);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    return 2;
-  }
-
-  const contractIds =
-    values.contract ??
-    (process.env.LENS_CONTRACT_IDS ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-  if (contractIds.length === 0) {
-    process.stderr.write('error: at least one --contract is required\n');
-    process.stderr.write(`${USAGE}\n`);
     return 2;
   }
 
@@ -271,19 +268,6 @@ async function main(argv: string[]): Promise<number> {
   const dataDir = values['cursor-dir'] ?? process.env.LENS_DATA_DIR ?? './data';
   const cursors = values['no-resume'] ? new MemoryCursorStore() : new FileCursorStore(dataDir);
 
-  const abortController = new AbortController();
-  let shutdownRequested = false;
-  const handleSignal = (signal: NodeJS.Signals): void => {
-    if (shutdownRequested) process.exit(1);
-    shutdownRequested = true;
-    process.stderr.write(`[ingest] received ${signal}; finishing current batch\n`);
-    abortController.abort();
-  };
-  const onSigint = (): void => handleSignal('SIGINT');
-  const onSigterm = (): void => handleSignal('SIGTERM');
-  process.on('SIGINT', onSigint);
-  process.on('SIGTERM', onSigterm);
-
   const poller = new EventPoller(
     {
       contractIds,
@@ -293,13 +277,15 @@ async function main(argv: string[]): Promise<number> {
       ...(startLedger !== undefined ? { startLedger } : {}),
       ...(pageSize !== undefined ? { pageSize } : {}),
       ...(pollInterval !== undefined ? { pollIntervalMs: pollInterval } : {}),
+      ...(values['poll-max-interval'] || process.env.LENS_POLL_MAX_INTERVAL_MS
+        ? { maxPollIntervalMs: Number(values['poll-max-interval'] ?? process.env.LENS_POLL_MAX_INTERVAL_MS) }
+        : {}),
       ...numeric('stalledThresholdMs', values['stalled-threshold'] ?? process.env.LENS_STALLED_THRESHOLD_MS),
     },
     {
       client,
       cursors,
       metrics,
-      signal: abortController.signal,
       log: (m) => process.stderr.write(`[ingest] ${m}\n`),
     },
   );
@@ -320,7 +306,6 @@ async function main(argv: string[]): Promise<number> {
 
   const metricsServer = port === undefined ? undefined : await startMetricsServer(
     metrics, port, values['metrics-host'] ?? process.env.LENS_METRICS_HOST ?? '127.0.0.1',
-    Math.max((pollInterval ?? 2000) * 3, 1000),
   );
   try {
     for await (const batch of poller.stream()) {
@@ -343,9 +328,6 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   } finally {
     if (metricsServer) await closeMetricsServer(metricsServer);
-    if (shutdownRequested) process.stderr.write('[ingest] shutdown complete\n');
-    process.off('SIGINT', onSigint);
-    process.off('SIGTERM', onSigterm);
   }
 }
 

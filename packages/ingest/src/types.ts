@@ -99,6 +99,8 @@ export interface PollerOptions {
   pageSize?: number;
   /** Milliseconds to wait after catching up to the tip. Defaults to 2000. */
   pollIntervalMs?: number;
+  /** Maximum idle-poll interval after repeated empty pages. Defaults to 30000. */
+  maxPollIntervalMs?: number;
   /** Milliseconds without RPC tip advancement before reporting a stall. Defaults to 60000. */
   stalledThresholdMs?: number;
   /** Extra topic filters, base64 ScVal segments or "*". */

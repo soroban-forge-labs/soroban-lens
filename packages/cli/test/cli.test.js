@@ -28,6 +28,7 @@ test('config falls back to documented defaults', () => {
   assert.equal(config.apiPort, 8080);
   assert.equal(config.pageSize, 200);
   assert.equal(config.pollIntervalMs, 2000);
+  assert.equal(config.maxPollIntervalMs, 30000);
   assert.deepEqual(config.contractIds, []);
   assert.equal(config.startLedger, undefined);
 });
@@ -39,12 +40,14 @@ test('environment overrides defaults', () => {
     LENS_API_PORT: '9000',
     LENS_CONTRACT_IDS: `${SAC}, ${SAC}`,
     LENS_START_LEDGER: '4695317',
+    LENS_POLL_MAX_INTERVAL_MS: '12000',
   });
   assert.equal(config.network.name, 'futurenet');
   assert.equal(config.dbPath, '/data/x.db');
   assert.equal(config.apiPort, 9000);
   assert.equal(config.contractIds.length, 2);
   assert.equal(config.startLedger, 4695317);
+  assert.equal(config.maxPollIntervalMs, 12000);
 });
 
 test('flags override environment', () => {
@@ -69,6 +72,12 @@ test('non-numeric env values fall back instead of becoming NaN', () => {
   assert.equal(config.apiPort, 8080);
   assert.equal(config.pageSize, 200);
   assert.equal(config.startLedger, undefined);
+});
+
+test('the default cap follows a custom base interval when it is longer', () => {
+  const config = resolveConfig({ pollInterval: 45_000 }, {});
+  assert.equal(config.pollIntervalMs, 45_000);
+  assert.equal(config.maxPollIntervalMs, 45_000);
 });
 
 test('splitList trims and drops empty entries', () => {

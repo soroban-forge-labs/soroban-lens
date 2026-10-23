@@ -28,6 +28,8 @@ export interface PollerDeps {
  * estimate everywhere it is surfaced.
  */
 export const APPROX_LEDGER_SECONDS = 5;
+export const DEFAULT_POLL_INTERVAL_MS = 2000;
+export const DEFAULT_MAX_POLL_INTERVAL_MS = 30_000;
 export const DEFAULT_STALLED_THRESHOLD_MS = 60_000;
 
 /** Emitted alongside batches so callers can show progress without extra RPC calls. */
@@ -157,7 +159,10 @@ export class EventPoller {
   /** Yields pages of events until aborted. */
   async *stream(): AsyncGenerator<EventBatch & { progress: PollerProgress }> {
     const pageSize = this.#options.pageSize ?? 200;
-    const idleMs = this.#options.pollIntervalMs ?? 2000;
+    const baseIdleMs = this.#options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    const maxIdleMs = this.#options.maxPollIntervalMs ?? Math.max(baseIdleMs, DEFAULT_MAX_POLL_INTERVAL_MS);
+    assertIdlePollingIntervals(baseIdleMs, maxIdleMs);
+    let idleMs = baseIdleMs;
     const filters = buildFilters(
       this.#options.contractIds,
       this.#options.topics,
@@ -297,11 +302,24 @@ export class EventPoller {
 
       cursor = batch.cursor;
       startLedger = undefined;
+      if (batch.events.length > 0) idleMs = baseIdleMs;
 
       // End the generator rather than idling forever on a finished range.
       if (reachedEndLedger) return;
-      if (caughtUp) await this.#sleep(idleMs);
+      if (caughtUp) {
+        await this.#sleep(idleMs);
+        if (batch.events.length === 0) idleMs = Math.min(maxIdleMs, Math.max(baseIdleMs, idleMs * 2));
+      }
     }
+  }
+}
+
+function assertIdlePollingIntervals(baseMs: number, maxMs: number): void {
+  if (!Number.isFinite(baseMs) || baseMs < 0) {
+    throw new RangeError('pollIntervalMs must be a finite, non-negative number');
+  }
+  if (!Number.isFinite(maxMs) || maxMs < baseMs) {
+    throw new RangeError('maxPollIntervalMs must be a finite number at least as large as pollIntervalMs');
   }
 }
 

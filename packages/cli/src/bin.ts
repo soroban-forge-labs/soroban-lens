@@ -59,6 +59,7 @@ Options:
       --start-ledger <n>  First ledger when no cursor is stored. (env LENS_START_LEDGER)
       --page-size <n>     Events per RPC page, 1-10000. (env LENS_PAGE_SIZE)
       --poll-interval <n> Milliseconds to wait at the tip. (env LENS_POLL_INTERVAL_MS)
+      --poll-max-interval <n> Maximum idle wait after repeated empty polls. (env LENS_POLL_MAX_INTERVAL_MS)
       --once              index: stop once caught up to the network tip.
       --max-events <n>    index: stop after this many events.
       --fixture <path>    seed: file to load (default fixtures/testnet-events.json).
@@ -92,6 +93,7 @@ async function main(argv: string[]): Promise<number> {
       'start-ledger': { type: 'string' },
       'page-size': { type: 'string' },
       'poll-interval': { type: 'string' },
+      'poll-max-interval': { type: 'string' },
       'rpc-header': { type: 'string', multiple: true },
       'retry-attempts': { type: 'string' },
       'retry-base-delay': { type: 'string' },
@@ -125,6 +127,7 @@ async function main(argv: string[]): Promise<number> {
     ...(values['start-ledger'] !== undefined ? { startLedger: Number(values['start-ledger']) } : {}),
     ...(values['page-size'] !== undefined ? { pageSize: Number(values['page-size']) } : {}),
     ...(values['poll-interval'] !== undefined ? { pollInterval: Number(values['poll-interval']) } : {}),
+    ...(values['poll-max-interval'] !== undefined ? { maxPollInterval: Number(values['poll-max-interval']) } : {}),
     ...(values['rpc-header'] !== undefined ? { rpcHeaders: values['rpc-header'] } : {}),
     ...(values['retry-attempts'] !== undefined ? { retryAttempts: Number(values['retry-attempts']) } : {}),
     ...(values['retry-base-delay'] !== undefined ? { retryBaseDelay: Number(values['retry-base-delay']) } : {}),

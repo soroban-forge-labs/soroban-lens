@@ -12,6 +12,7 @@ export interface LensConfig {
   startLedger: number | undefined;
   pageSize: number;
   pollIntervalMs: number;
+  maxPollIntervalMs: number;
   /** Extra headers for every RPC request. Values are secrets — never log them. */
   rpcHeaders: Record<string, string>;
   /** Retry tuning passed straight to the ingest client. */
@@ -49,6 +50,7 @@ export interface ConfigOverrides {
   startLedger?: number | undefined;
   pageSize?: number | undefined;
   pollInterval?: number | undefined;
+  maxPollInterval?: number | undefined;
   rpcHeaders?: string[] | undefined;
   retryAttempts?: number | undefined;
   retryBaseDelay?: number | undefined;
@@ -70,6 +72,11 @@ export function resolveConfig(
     overrides.contracts && overrides.contracts.length > 0
       ? overrides.contracts
       : splitList(env.LENS_CONTRACT_IDS);
+  const pollIntervalMs = overrides.pollInterval ?? numberOr(env.LENS_POLL_INTERVAL_MS, 2000);
+  const maxPollIntervalMs = overrides.maxPollInterval ?? Math.max(
+    pollIntervalMs,
+    numberOr(env.LENS_POLL_MAX_INTERVAL_MS, 30_000),
+  );
 
   return {
     network: resolveNetwork(
@@ -84,7 +91,8 @@ export function resolveConfig(
     apiPort: overrides.port ?? numberOr(env.LENS_API_PORT, 8080),
     startLedger: overrides.startLedger ?? optionalNumber(env.LENS_START_LEDGER),
     pageSize: overrides.pageSize ?? numberOr(env.LENS_PAGE_SIZE, 200),
-    pollIntervalMs: overrides.pollInterval ?? numberOr(env.LENS_POLL_INTERVAL_MS, 2000),
+    pollIntervalMs,
+    maxPollIntervalMs,
     rpcHeaders: parseHeaders(overrides.rpcHeaders, env.LENS_RPC_HEADERS),
     retry: {
       attempts: overrides.retryAttempts ?? numberOr(env.LENS_RETRY_ATTEMPTS, 5),

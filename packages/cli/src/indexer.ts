@@ -136,6 +136,7 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       contractIds: config.contractIds,
       pageSize: config.pageSize,
       pollIntervalMs: config.pollIntervalMs,
+      maxPollIntervalMs: config.maxPollIntervalMs,
       ...(config.startLedger !== undefined ? { startLedger: config.startLedger } : {}),
     },
     {
