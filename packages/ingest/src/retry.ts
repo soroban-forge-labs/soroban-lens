@@ -25,6 +25,46 @@ export interface RetryOptions {
   onRetry?: (attempt: number, delayMs: number, error: unknown) => void;
   /** Clock for interpreting an HTTP-date `Retry-After`. Swappable in tests. */
   now?: () => number;
+  /** Whether a rejection is worth another attempt. Defaults to {@link classifyRpcError}. */
+  shouldRetry?: (error: unknown) => boolean;
+}
+
+/** Bounded error kind, shared by the retry decision and `lens_rpc_errors_total`. */
+export type RpcErrorKind = 'rate_limit' | 'http' | 'timeout' | 'json_rpc' | 'transport';
+
+export interface RpcErrorClass {
+  kind: RpcErrorKind;
+  /** False when retrying cannot change the outcome. */
+  retryable: boolean;
+}
+
+/**
+ * JSON-RPC 2.0 codes that reject the request itself — parse error, invalid
+ * request, method not found, invalid params. The same request fails the same
+ * way every time. `-32603` (internal error) and the `-32000..-32099` server
+ * range can be transient, so they still retry.
+ */
+const JSONRPC_REQUEST_ERRORS = new Set([-32700, -32600, -32601, -32602]);
+
+/**
+ * Classify an RPC rejection once, for both retrying and metrics, so the two
+ * cannot disagree. Transport failures, timeouts, `429`, `408` and `5xx`
+ * retry; JSON-RPC request errors and every other `4xx` (a bad provider key,
+ * a malformed request) fail on the first attempt.
+ */
+export function classifyRpcError(error: unknown): RpcErrorClass {
+  const status = statusOf(error);
+  const code = (error as { code?: unknown } | null)?.code;
+
+  if (status === 429) return { kind: 'rate_limit', retryable: true };
+  if (status !== undefined) {
+    return { kind: 'http', retryable: status >= 500 || status === 408 };
+  }
+  if (code === 'ETIMEDOUT' || code === 'ECONNABORTED') return { kind: 'timeout', retryable: true };
+  if (typeof code === 'number') {
+    return { kind: 'json_rpc', retryable: !JSONRPC_REQUEST_ERRORS.has(code) };
+  }
+  return { kind: 'transport', retryable: true };
 }
 
 export const sleep = (ms: number): Promise<void> =>
@@ -72,7 +112,7 @@ function clampRetryAfter(ms: number): number {
 /** HTTP status, wherever the transport happened to put it. */
 function statusOf(error: unknown): number | undefined {
   const e = error as { status?: unknown; statusCode?: unknown; response?: { status?: unknown } };
-  for (const candidate of [e?.status, e?.statusCode, e?.response?.status]) {
+  for (const candidate of [e?.response?.status, e?.status, e?.statusCode]) {
     if (typeof candidate === 'number') return candidate;
   }
   return undefined;
@@ -120,19 +160,25 @@ export function backoffDelay(attempt: number, opts: RetryOptions = {}): number {
   return Math.floor(random() * ceiling);
 }
 
-/** Retry `fn` with exponential backoff until it resolves or attempts run out. */
+/**
+ * Retry `fn` with exponential backoff until it resolves or attempts run out.
+ * A rejection that cannot succeed on retry (see {@link classifyRpcError}) is
+ * rethrown as-is on the first attempt, not wrapped in RetryExhaustedError.
+ */
 export async function withRetry<T>(
   fn: (attempt: number) => Promise<T>,
   opts: RetryOptions = {},
 ): Promise<T> {
   const attempts = opts.attempts ?? 5;
   const doSleep = opts.sleep ?? sleep;
+  const shouldRetry = opts.shouldRetry ?? ((error: unknown) => classifyRpcError(error).retryable);
   let lastError: unknown;
 
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       return await fn(attempt);
     } catch (error) {
+      if (!shouldRetry(error)) throw error;
       lastError = error;
       if (attempt === attempts - 1) break;
       // A rate limiter that tells us how long to wait knows better than our

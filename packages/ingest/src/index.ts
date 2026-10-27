@@ -63,8 +63,9 @@ export {
   retryAfterMs,
   MAX_RETRY_AFTER_MS,
   RetryExhaustedError,
+  classifyRpcError,
 } from './retry.js';
-export type { RetryOptions } from './retry.js';
+export type { RetryOptions, RpcErrorKind, RpcErrorClass } from './retry.js';
 
 export { IngestMetrics } from './metrics.js';
 export { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';

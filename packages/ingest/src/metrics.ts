@@ -1,3 +1,4 @@
+import { classifyRpcError } from './retry.js';
 const BUCKETS = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30];
 /** Distinct `contract` label values before further contracts fold into `other`. */
 export const MAX_CONTRACT_LABELS = 50;
@@ -19,12 +20,8 @@ export class IngestMetrics {
   #errors = new Map<string, number>();
 
   rpcError(method: RpcMethod, error: unknown): void {
-    const e = error as { code?: unknown; status?: unknown; response?: { status?: unknown } } | null;
-    const status = e?.response?.status ?? e?.status;
-    const kind = status === 429 ? 'rate_limit'
-      : typeof status === 'number' ? 'http'
-      : e?.code === 'ETIMEDOUT' || e?.code === 'ECONNABORTED' ? 'timeout'
-      : typeof e?.code === 'number' ? 'json_rpc' : 'transport';
+    // Same classifier the retry decision uses, so the two never disagree.
+    const { kind } = classifyRpcError(error);
     const key = `method="${method}",kind="${kind}"`;
     this.#errors.set(key, (this.#errors.get(key) ?? 0) + 1);
   }

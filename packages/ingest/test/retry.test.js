@@ -6,6 +6,7 @@ import {
   retryAfterMs,
   MAX_RETRY_AFTER_MS,
   RetryExhaustedError,
+  classifyRpcError,
 } from '../dist/index.js';
 
 const noSleep = async () => {};
@@ -167,4 +168,70 @@ test('a 429 without Retry-After still uses jittered backoff', async () => {
     { sleep: async (ms) => void slept.push(ms), random: () => 0.5, baseDelayMs: 200 },
   );
   assert.deepEqual(slept, [100]);
+});
+
+const jsonRpcError = (code, message = 'invalid request') => Object.assign(new Error(message), { code });
+const httpError = (status) => Object.assign(new Error(`HTTP ${status}`), { response: { status } });
+
+test('classifyRpcError: what retries and what fails fast', () => {
+  const cases = [
+    [new Error('socket hang up'), 'transport', true],
+    [Object.assign(new Error('ECONNREFUSED'), { code: 'ECONNREFUSED' }), 'transport', true],
+    [Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }), 'timeout', true],
+    [httpError(429), 'rate_limit', true],
+    [httpError(503), 'http', true],
+    [httpError(500), 'http', true],
+    [httpError(408), 'http', true],
+    [httpError(400), 'http', false],
+    [httpError(401), 'http', false],
+    [httpError(404), 'http', false],
+    [jsonRpcError(-32700), 'json_rpc', false],
+    [jsonRpcError(-32600), 'json_rpc', false],
+    [jsonRpcError(-32601), 'json_rpc', false],
+    [jsonRpcError(-32602), 'json_rpc', false],
+    [jsonRpcError(-32603), 'json_rpc', true],
+    [jsonRpcError(-32001), 'json_rpc', true],
+  ];
+  for (const [error, kind, retryable] of cases) {
+    assert.deepEqual(classifyRpcError(error), { kind, retryable }, error.message);
+  }
+});
+
+test('a JSON-RPC -32600 rejects on the first attempt with the original error', async () => {
+  let calls = 0;
+  const sleeps = [];
+  const error = jsonRpcError(-32600, 'startLedger must be between the oldest ledger: 10 and the latest ledger: 20');
+  await assert.rejects(
+    withRetry(async () => { calls++; throw error; }, { sleep: async (ms) => sleeps.push(ms) }),
+    (thrown) => thrown === error,
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(sleeps, []);
+});
+
+test('a 400 or a 401 from a bad provider key is not retried', async () => {
+  for (const status of [400, 401]) {
+    let calls = 0;
+    await assert.rejects(withRetry(async () => { calls++; throw httpError(status); }, { sleep: noSleep }));
+    assert.equal(calls, 1, `status ${status}`);
+  }
+});
+
+test('a 503 still retries until it succeeds', async () => {
+  let calls = 0;
+  const value = await withRetry(async () => {
+    calls++;
+    if (calls < 3) throw httpError(503);
+    return 'ok';
+  }, { sleep: noSleep });
+  assert.equal(value, 'ok');
+  assert.equal(calls, 3);
+});
+
+test('shouldRetry overrides the default classification', async () => {
+  let calls = 0;
+  await assert.rejects(
+    withRetry(async () => { calls++; throw new Error('transport'); }, { sleep: noSleep, shouldRetry: () => false }),
+  );
+  assert.equal(calls, 1);
 });

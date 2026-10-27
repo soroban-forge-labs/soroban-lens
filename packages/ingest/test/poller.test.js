@@ -10,6 +10,7 @@ import {
   IngestMetrics,
   isContractId,
   RetryExhaustedError,
+  withRetry,
 } from '../dist/index.js';
 
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -790,4 +791,31 @@ test('topic filters are passed through to the RPC filter', async () => {
   );
   await take(poller.stream(), 1);
   assert.deepEqual(client.requests[0].filters[0].topics, topics);
+});
+
+test('the retention-gap restart does not wait through retry backoff', async () => {
+  // The real client wraps getEvents in withRetry; do the same here so the
+  // out-of-range rejection goes through the retry decision before the poller.
+  const sleeps = [];
+  const outOfRange = Object.assign(
+    new Error('cursor is outside the retention window: must be between the oldest ledger 4576358 and the latest'),
+    { code: -32600 },
+  );
+  const inner = fakeClient([outOfRange, { events: [rawEvent(4576358, 0)], cursor: 'fresh' }]);
+  const client = {
+    ...inner,
+    requests: inner.requests,
+    getEvents: (args) => withRetry(() => inner.getEvents(args), { sleep: async (ms) => sleeps.push(ms) }),
+  };
+  const cursors = new MemoryCursorStore();
+  await cursors.save('gap', { cursor: 'ancient', ledger: 100, updatedAt: '' });
+
+  const [batch] = await take(new EventPoller({ contractIds: [SAC] }, {
+    client, cursors, cursorKey: 'gap', sleep: async (ms) => sleeps.push(ms),
+  }).stream(), 1);
+
+  assert.equal(batch.events.length, 1);
+  assert.equal(inner.requests.length, 2, 'one rejected request, then the restart');
+  assert.equal(inner.requests[1].startLedger, 4576358);
+  assert.deepEqual(sleeps, [], 'no backoff before the restart');
 });
