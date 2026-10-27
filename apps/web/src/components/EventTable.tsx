@@ -5,6 +5,9 @@ import { useLocale } from '../i18n/index.js';
 // Props for the EventTable component
 interface Props {
   events: LensEvent[];
+  network: string;
+  expandedEventIds: Set<string>;
+  onToggleExpanded: (eventId: string) => void;
   showContract: boolean;
   onTopicClick: (topic: string) => void;
   loading: boolean;
@@ -16,7 +19,7 @@ interface Props {
 }
 
 export function EventTable({
-  events, showContract, onTopicClick, loading, emptyMessage, selectedIds, onToggleSelect, absolute,
+  events, network, expandedEventIds, onToggleExpanded, showContract, onTopicClick, loading, emptyMessage, selectedIds, onToggleSelect, absolute,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
 
@@ -46,6 +49,9 @@ export function EventTable({
           <EventRow
             key={event.id}
             event={event}
+            network={network}
+            expanded={expandedEventIds.has(event.id)}
+            onToggleExpanded={onToggleExpanded}
             showContract={showContract}
             onTopicClick={onTopicClick}
             selected={selectedIds.has(event.id)}

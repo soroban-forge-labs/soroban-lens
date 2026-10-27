@@ -1,11 +1,17 @@
-import { useState } from 'react';
 import type { LensEvent } from '../types.js';
 import { absoluteTime, prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
 import { useLocale } from '../i18n/index.js';
 import { CopyButton } from './CopyButton.js';
+import { ExplorerLink } from './ExplorerLink.js';
+
+/** A StrKey that names an account or a contract, as opposed to any other string. */
+const ADDRESS_ID = /^[GC][A-Z2-7]{55}$/;
 
 interface Props {
   event: LensEvent;
+  network: string;
+  expanded: boolean;
+  onToggleExpanded: (eventId: string) => void;
   showContract: boolean;
   onTopicClick: (topic: string) => void;
   selected: boolean;
@@ -15,16 +21,38 @@ interface Props {
 }
 
 /** One table row, expanding in place to show the full decoded payload. */
-export function EventRow({ event, showContract, onTopicClick, selected, onToggleSelect, absolute }: Props): React.JSX.Element {
+export function EventRow({
+  event, network, expanded, onToggleExpanded, showContract, onTopicClick, selected, onToggleSelect, absolute,
+}: Props): React.JSX.Element {
   const { t } = useLocale();
-  const [expanded, setExpanded] = useState(false);
   const firstTopic = event.topics[0];
   const topicLabel = firstTopic ? summarise(firstTopic) : '—';
+  const onKeyDown = (keyEvent: React.KeyboardEvent<HTMLTableRowElement>): void => {
+    if (keyEvent.target !== keyEvent.currentTarget) return;
+
+    if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
+      keyEvent.preventDefault();
+      const rows = Array.from(
+        keyEvent.currentTarget.closest('tbody')?.querySelectorAll<HTMLTableRowElement>('.event-row') ?? [],
+      );
+      const index = rows.indexOf(keyEvent.currentTarget);
+      rows[index + (keyEvent.key === 'ArrowDown' ? 1 : -1)]?.focus();
+    } else if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
+      keyEvent.preventDefault();
+      onToggleExpanded(event.id);
+    } else if (keyEvent.key === 'Escape' && expanded) {
+      keyEvent.preventDefault();
+      onToggleExpanded(event.id);
+    }
+  };
 
   return (
     <>
       <tr
         className={`event-row${expanded ? ' is-expanded' : ''}${event.inSuccessfulContractCall ? '' : ' is-failed'}`}
+        onKeyDown={onKeyDown}
+        role="row"
+        tabIndex={0}
       >
         <td className="col-select" onClick={(e) => e.stopPropagation()}>
           <input
@@ -40,7 +68,7 @@ export function EventRow({ event, showContract, onTopicClick, selected, onToggle
             type="button"
             aria-label={expanded ? 'Collapse event details' : 'Expand event details'}
             aria-expanded={expanded}
-            onClick={() => setExpanded((v) => !v)}
+            onClick={() => onToggleExpanded(event.id)}
           >
             {expanded ? '▾' : '▸'}
           </button>
@@ -100,7 +128,9 @@ export function EventRow({ event, showContract, onTopicClick, selected, onToggle
           )}
         </td>
         <td className="col-tx" title={event.txHash}>
-          <span className="mono">{truncate(event.txHash, 6, 6)}</span>
+          <ExplorerLink network={network} entity="tx" value={event.txHash} title="Open this transaction in a block explorer">
+            <span className="mono">{truncate(event.txHash, 6, 6)}</span>
+          </ExplorerLink>
           <CopyButton value={event.txHash} label="transaction hash" />
         </td>
       </tr>
@@ -118,10 +148,26 @@ export function EventRow({ event, showContract, onTopicClick, selected, onToggle
 
               <dl className="detail-meta">
                 <div><dt>{t('detailEventId')}</dt><dd className="mono">{event.id} <CopyButton value={event.id} label="event ID" /></dd></div>
-                <div><dt>{t('detailContract')}</dt><dd className="mono">{event.contractId} <CopyButton value={event.contractId} label="contract ID" /></dd></div>
+                <div>
+                  <dt>{t('detailContract')}</dt>
+                  <dd className="mono">
+                    <ExplorerLink network={network} entity="contract" value={event.contractId}>
+                      {event.contractId}
+                    </ExplorerLink>{' '}
+                    <CopyButton value={event.contractId} label="contract ID" />
+                  </dd>
+                </div>
                 <div><dt>{t('detailLedger')}</dt><dd className="mono">{event.ledger}</dd></div>
                 <div><dt>{t('detailClosedAt')}</dt><dd className="mono">{event.ledgerClosedAt}</dd></div>
-                <div><dt>{t('detailTransaction')}</dt><dd className="mono">{event.txHash} <CopyButton value={event.txHash} label="transaction hash" /></dd></div>
+                <div>
+                  <dt>{t('detailTransaction')}</dt>
+                  <dd className="mono">
+                    <ExplorerLink network={network} entity="tx" value={event.txHash}>
+                      {event.txHash}
+                    </ExplorerLink>{' '}
+                    <CopyButton value={event.txHash} label="transaction hash" />
+                  </dd>
+                </div>
                 <div>
                   <dt>{t('detailPosition')}</dt>
                   <dd className="mono">
@@ -165,12 +211,29 @@ export function EventRow({ event, showContract, onTopicClick, selected, onToggle
               <section>
                 <h4>{t('topicsHeading')}</h4>
                 <ol className="topic-list">
-                  {event.topics.map((topic, i) => (
-                    <li key={i}>
-                      <span className="type-tag">{topic.type}</span>
-                      <code>{prettyJson(topic.value)}</code>
-                    </li>
-                  ))}
+                  {event.topics.map((topic, i) => {
+                    // Account and contract addresses are the identifiers worth
+                    // leaving the app for; everything else is just data.
+                    const address = typeof topic.value === 'string' && ADDRESS_ID.test(topic.value)
+                      ? topic.value
+                      : null;
+                    return (
+                      <li key={i}>
+                        <span className="type-tag">{topic.type}</span>
+                        <code>
+                          {address ? (
+                            <ExplorerLink
+                              network={network}
+                              entity={address.startsWith('G') ? 'account' : 'contract'}
+                              value={address}
+                            >
+                              {address}
+                            </ExplorerLink>
+                          ) : prettyJson(topic.value)}
+                        </code>
+                      </li>
+                    );
+                  })}
                 </ol>
               </section>
 

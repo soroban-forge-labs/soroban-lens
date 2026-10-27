@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiRequestError, buildStreamPath, configuredNetworks } from './api.js';
-import type { Health, LensEvent, TopicCount } from './types.js';
-import { Filters, type FilterState } from './components/Filters.js';
+import type { ContractActivity, ContractSummary, Health, LensEvent, TopicCount } from './types.js';
+import { Filters } from './components/Filters.js';
+import type { FilterState } from './route.js';
+import { ActivityChart } from './components/ActivityChart.js';
 import { EventTable } from './components/EventTable.js';
 import { EventCompare } from './components/EventCompare.js';
 import { StatusBar } from './components/StatusBar.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
-import { usePersistentState, usePolling, useDebounced, useEventStream, useTheme } from './hooks.js';
+import { usePolling, useDebounced, useEventStream, usePersistentState, useUrlState, useTheme } from './hooks.js';
 import { LocaleProvider, useLocale, LOCALE_CODES, LOCALE_LABELS } from './i18n/index.js';
 
 /** Testnet Stellar Asset Contract for native XLM — always emitting events. */
@@ -14,6 +16,15 @@ const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMPQVUU2HHGC
 const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
+const ACTIVITY_DAYS = 30;
+const SECONDS_PER_DAY = 24 * 60 * 60;
+
+interface ActivityRange {
+  fromTime: string;
+  toTime: string;
+  fromLedger: number;
+  toLedger: number;
+}
 
 /** The `?compare=<id1>,<id2>` deep link, which opens two events in the diff view. */
 function readCompareParam(): string[] {
@@ -31,64 +42,45 @@ function readCompareParam(): string[] {
 function AppInner(): React.JSX.Element {
   const { t, locale, setLocale } = useLocale();
   const networks = useMemo(configuredNetworks, []);
-  const [networkLabel, setNetworkLabel] = usePersistentState('lens.network', networks[0]!.label);
+
+  // Filter/network/expanded-event state lives in the URL so a link reproduces
+  // the exact view. localStorage is the fallback for a bare visit only.
+  const [urlState, setUrlState] = useUrlState(
+    {
+      filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+      network: networks[0]!.label,
+      expandedEventId: null,
+    },
+    { filters: 'lens.filters', network: 'lens.network' },
+  );
+  const { filters, network: networkLabel, expandedEventId } = urlState;
   const selected = networks.find((n) => n.label === networkLabel) ?? networks[0]!;
 
-  // ---------- URL-based shareable state (#63, #68) ----------
-  // On first load, prefer URL search params over localStorage so that a shared
-  // link always wins. After that, keep URL and localStorage in sync.
-  const [filters, setFiltersRaw] = usePersistentState<FilterState>('lens.filters', (() => {
-    const sp = new URLSearchParams(window.location.search);
-    return {
-      contractId: sp.get('contractId') ?? '',
-      topic: sp.get('topic') ?? '',
-      successfulOnly: sp.get('successfulOnly') === 'true',
-      live: sp.has('live') ? sp.get('live') === 'true' : true,
-      fromLedger: sp.get('fromLedger') ?? '',
-      toLedger: sp.get('toLedger') ?? '',
-    };
-  })());
-
-  /** Update filter state and push the new params into the URL bar. */
   const setFilters = useCallback(
-    (next: FilterState) => {
-      setFiltersRaw(next);
-      const sp = new URLSearchParams();
-      if (next.contractId) sp.set('contractId', next.contractId);
-      if (next.topic) sp.set('topic', next.topic);
-      if (next.successfulOnly) sp.set('successfulOnly', 'true');
-      if (!next.live) sp.set('live', 'false');
-      if (next.fromLedger) sp.set('fromLedger', next.fromLedger);
-      if (next.toLedger) sp.set('toLedger', next.toLedger);
-      const qs = sp.toString();
-      const newUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
-      window.history.pushState(null, '', newUrl);
-    },
-    [setFiltersRaw],
+    (next: FilterState): void => setUrlState({ ...urlState, filters: next }),
+    [urlState, setUrlState],
   );
 
-  // Restore filter state when the user navigates with back/forward.
-  useEffect(() => {
-    const onPopState = (): void => {
-      const sp = new URLSearchParams(window.location.search);
-      setFiltersRaw({
-        contractId: sp.get('contractId') ?? '',
-        topic: sp.get('topic') ?? '',
-        successfulOnly: sp.get('successfulOnly') === 'true',
-        live: sp.has('live') ? sp.get('live') === 'true' : true,
-        fromLedger: sp.get('fromLedger') ?? '',
-        toLedger: sp.get('toLedger') ?? '',
-      });
-    };
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
-  }, [setFiltersRaw]);
 
   const [events, setEvents] = useState<LensEvent[]>([]);
+  const [expandedEventIds, setExpandedEventIds] = useState<Set<string>>(
+    () => new Set(expandedEventId ? [expandedEventId] : []),
+  );
+  // A deep link (or back/forward) to /events/{id} opens that row.
+  useEffect(() => {
+    if (!expandedEventId) return;
+    setExpandedEventIds((current) => (current.has(expandedEventId) ? current : new Set(current).add(expandedEventId)));
+  }, [expandedEventId]);
   const [total, setTotal] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [topics, setTopics] = useState<TopicCount[]>([]);
+  const [contracts, setContracts] = useState<ContractSummary[]>([]);
+  const [contractsError, setContractsError] = useState<string | null>(null);
+  const [activity, setActivity] = useState<ContractActivity | null>(null);
+  const [activityError, setActivityError] = useState<string | null>(null);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityRange, setActivityRange] = useState<ActivityRange | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -107,6 +99,45 @@ function AppInner(): React.JSX.Element {
   const [selectedIds, setSelectedIds] = useState<string[]>(readCompareParam);
   const [comparePair, setComparePair] = useState<[LensEvent, LensEvent] | null>(null);
   const [compareError, setCompareError] = useState<string | null>(null);
+  const contractInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== '/' || event.altKey || event.ctrlKey || event.metaKey) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+      ) {
+        return;
+      }
+      event.preventDefault();
+      contractInputRef.current?.focus();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setContracts([]);
+    setContractsError(null);
+    api.contracts(selected.baseUrl, controller.signal)
+      .then(({ contracts: available }) => {
+        setContracts(available);
+        setContractsError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setContracts([]);
+        setContractsError(err instanceof ApiRequestError ? err.message : String(err));
+      });
+    return () => controller.abort();
+  }, [selected.baseUrl]);
+
+  useEffect(() => {
+    setActivityRange(null);
+  }, [selected.baseUrl]);
 
   // Typing a 56-character contract id should not fire 56 requests.
   const debouncedContractId = useDebounced(filters.contractId, 300);
@@ -134,13 +165,82 @@ function AppInner(): React.JSX.Element {
       ...(contractIdValid && debouncedContractId ? { contractId: debouncedContractId } : {}),
       ...(debouncedTopic ? { topics: [debouncedTopic] } : {}),
       ...(filters.successfulOnly ? { successfulOnly: true } : {}),
-      ...(fromLedgerNum !== undefined ? { fromLedger: fromLedgerNum } : {}),
-      ...(toLedgerNum !== undefined ? { toLedger: toLedgerNum } : {}),
+      ...(activityRange
+        ? {
+            fromLedger: activityRange.fromLedger,
+            toLedger: activityRange.toLedger,
+            fromTime: activityRange.fromTime,
+            toTime: activityRange.toTime,
+          }
+        : {
+            ...(fromLedgerNum !== undefined ? { fromLedger: fromLedgerNum } : {}),
+            ...(toLedgerNum !== undefined ? { toLedger: toLedgerNum } : {}),
+          }),
       limit: PAGE_SIZE,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly, fromLedgerNum, toLedgerNum],
+    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly, fromLedgerNum, toLedgerNum, activityRange],
   );
+
+  const contractSummary = contracts.find((contract) => contract.contractId === debouncedContractId);
+  const activityWindow = useMemo(() => {
+    if (!contractSummary) return null;
+    const lastSeen = Date.parse(contractSummary.lastSeenAt);
+    if (!Number.isFinite(lastSeen)) return null;
+    const finalDay = Math.floor(lastSeen / (SECONDS_PER_DAY * 1000)) * SECONDS_PER_DAY;
+    return {
+      from: finalDay - (ACTIVITY_DAYS - 1) * SECONDS_PER_DAY,
+      to: finalDay + SECONDS_PER_DAY - 1,
+    };
+  }, [contractSummary]);
+
+  useEffect(() => {
+    if (!contractIdValid || !debouncedContractId || !activityWindow) {
+      setActivity(null);
+      setActivityError(
+        contractSummary && !activityWindow ? 'The indexed contract has an invalid last-activity time.' : null,
+      );
+      setActivityLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setActivityLoading(true);
+    setActivity(null);
+    setActivityError(null);
+    api.activity(
+      selected.baseUrl,
+      debouncedContractId,
+      {
+        bucket: 'day',
+        ...activityWindow,
+        ...(debouncedTopic ? { topics: [debouncedTopic] } : {}),
+        ...(filters.successfulOnly ? { successfulOnly: true } : {}),
+      },
+      controller.signal,
+    )
+      .then((result) => {
+        setActivity(result);
+        setActivityError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setActivity(null);
+        setActivityError(err instanceof ApiRequestError ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setActivityLoading(false);
+      });
+    return () => controller.abort();
+  }, [
+    selected.baseUrl,
+    contractIdValid,
+    debouncedContractId,
+    debouncedTopic,
+    filters.successfulOnly,
+    activityWindow,
+    contractSummary,
+  ]);
 
   // Guards against a slow earlier response overwriting a newer one.
   const requestId = useRef(0);
@@ -160,8 +260,10 @@ function AppInner(): React.JSX.Element {
     const url = new URL(window.location.href);
     if (selectedIds.length === 2) url.searchParams.set('compare', selectedIds.join(','));
     else url.searchParams.delete('compare');
-    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
-  }, [selectedIds]);
+    // Keep the router's history state, and re-apply after any URL change,
+    // since filter and expand updates rewrite the query string.
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  }, [selectedIds, urlState]);
 
   // Both events come from the loaded page when they can; a deep link fetches
   // them by id, since the two being compared are often far outside page one.
@@ -248,6 +350,17 @@ function AppInner(): React.JSX.Element {
     }
   }, [selected.baseUrl, query, nextCursor, loadingMore]);
 
+  const toggleEventExpanded = useCallback((eventId: string) => {
+    const opening = !expandedEventIds.has(eventId);
+    const next = new Set(expandedEventIds);
+    if (opening) next.add(eventId);
+    else next.delete(eventId);
+    setExpandedEventIds(next);
+    // The URL names the most recently opened event, so a copied link opens it.
+    if (opening) setUrlState({ ...urlState, expandedEventId: eventId });
+    else if (urlState.expandedEventId === eventId) setUrlState({ ...urlState, expandedEventId: null });
+  }, [expandedEventIds, urlState, setUrlState]);
+
   // When the query or network changes, fetch fresh data but keep the old rows
   // on screen until the new ones arrive.
   useEffect(() => {
@@ -264,7 +377,9 @@ function AppInner(): React.JSX.Element {
   // stream is not open (before it connects, while the browser retries a drop,
   // or against an API that does not offer it).
   const streamUrl =
-    filters.live && contractIdValid ? `${selected.baseUrl}${buildStreamPath(query)}` : null;
+    filters.live && contractIdValid && !activityRange
+      ? `${selected.baseUrl}${buildStreamPath(query)}`
+      : null;
   const streaming = useEventStream(
     streamUrl,
     (data) => {
@@ -290,7 +405,7 @@ function AppInner(): React.JSX.Element {
       void loadFirstPage();
     },
     LIVE_INTERVAL_MS,
-    filters.live && !streaming,
+    filters.live && !streaming && !activityRange,
   );
 
   useEffect(() => {
@@ -324,6 +439,51 @@ function AppInner(): React.JSX.Element {
   }, [selected.baseUrl, debouncedContractId, contractIdValid]);
 
   const showContract = !filters.contractId;
+  const changeFilters = (next: FilterState): void => {
+    if (
+      next.contractId !== filters.contractId ||
+      next.topic !== filters.topic ||
+      next.successfulOnly !== filters.successfulOnly
+    ) {
+      setActivityRange(null);
+    }
+    setFilters(next);
+  };
+
+  const filterActivityBucket = (start: number, firstLedger: number, lastLedger: number): void => {
+    const fromTime = new Date(start * 1000).toISOString();
+    if (activityRange?.fromTime === fromTime) {
+      setActivityRange(null);
+      return;
+    }
+    setActivityRange({
+      fromTime,
+      toTime: new Date((start + SECONDS_PER_DAY - 1) * 1000).toISOString(),
+      fromLedger: firstLedger,
+      toLedger: lastLedger,
+    });
+  };
+
+  // When the URL is `/events/{id}`, fetch that event so it can be shown
+  // expanded even if it is not in the current page (e.g. a deep link to an
+  // older event that is not in the first 50 results).
+  useEffect(() => {
+    if (!expandedEventId) return;
+    const controller = new AbortController();
+    api
+      .event(selected.baseUrl, expandedEventId, controller.signal)
+      .then((event) => {
+        setEvents((current) => {
+          if (current.some((e) => e.id === event.id)) return current;
+          return [event, ...current];
+        });
+      })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        // A missing event does not break the table; the row simply is not there.
+      });
+    return () => controller.abort();
+  }, [selected.baseUrl, expandedEventId]);
 
   const exportJson = useCallback(() => {
     if (events.length === 0) return;
@@ -426,7 +586,7 @@ function AppInner(): React.JSX.Element {
         <StatusBar
           networks={networks}
           selected={selected}
-          onSelect={(n) => setNetworkLabel(n.label)}
+          onSelect={(n) => setUrlState({ ...urlState, network: n.label })}
           health={health}
           error={healthError}
           lastUpdated={lastUpdated}
@@ -436,9 +596,12 @@ function AppInner(): React.JSX.Element {
       <ErrorBoundary title="Filter Controls Error">
         <Filters
           value={filters}
-          onChange={setFilters}
+          onChange={changeFilters}
           knownTopics={topics}
-          onUseExample={() => setFilters({ ...filters, contractId: EXAMPLE_CONTRACT })}
+          knownContracts={contracts}
+          contractsError={contractsError}
+          contractInputRef={contractInputRef}
+          onUseExample={() => changeFilters({ ...filters, contractId: EXAMPLE_CONTRACT })}
         />
       </ErrorBoundary>
 
@@ -455,7 +618,7 @@ function AppInner(): React.JSX.Element {
       <div className="result-meta">
         <div className="result-meta-left">
           <span aria-live="polite" aria-atomic="true">{eventCountText}</span>
-          {filters.live && (
+          {filters.live && !activityRange && (
             <span
               className="live-dot"
               title={streaming ? t('streamingLive') : t('pollingFallback')}
@@ -529,14 +692,35 @@ function AppInner(): React.JSX.Element {
         </ErrorBoundary>
       )}
 
+      {contractIdValid && debouncedContractId && activityWindow && (
+        <section className="activity-panel" aria-label="Event activity">
+          {activityError ? (
+            <p className="warning" role="alert">Could not load activity chart: {activityError}</p>
+          ) : activityLoading && !activity ? (
+            <p className="muted small" role="status">Loading activity…</p>
+          ) : activity ? (
+            <ActivityChart
+              activity={activity}
+              from={activityWindow.from}
+              to={activityWindow.to}
+              selectedFrom={activityRange?.fromTime ?? null}
+              onBucketClick={filterActivityBucket}
+            />
+          ) : null}
+        </section>
+      )}
+
       <ErrorBoundary title="Event Table Error">
         <EventTable
           events={events}
+          network={selected.label}
+          expandedEventIds={expandedEventIds}
+          onToggleExpanded={toggleEventExpanded}
           showContract={showContract}
           loading={loading}
           selectedIds={selectedIdSet}
           onToggleSelect={toggleSelect}
-          onTopicClick={(topic) => setFilters({ ...filters, topic })}
+          onTopicClick={(topic) => changeFilters({ ...filters, topic })}
           absolute={absoluteTime}
           emptyMessage={emptyMessage}
         />

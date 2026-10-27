@@ -68,6 +68,19 @@ export interface ContractSummary {
   lastSeenAt: string;
 }
 
+export interface ActivityBucket {
+  start: string;
+  count: number;
+  firstLedger: number;
+  lastLedger: number;
+}
+
+export interface ContractActivity {
+  contractId: string;
+  bucket: 'minute' | 'hour' | 'day';
+  buckets: ActivityBucket[];
+}
+
 export interface Health {
   status: 'ok' | 'degraded';
   detail: string;

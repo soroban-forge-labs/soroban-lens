@@ -152,11 +152,11 @@ body {
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field-grow { flex: 1 1 380px; }
 .field label { font-size: 12px; font-weight: 600; color: var(--muted); }
-.field input[type="text"], .field input:not([type]) {
+.field input[type="text"], .field input:not([type]), .field select {
   font: inherit; padding: 7px 10px;
   border: 1px solid var(--border); border-radius: 4px; background: var(--bg);
 }
-.field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.field input:focus-visible, .field select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .field-checks { flex-direction: column; gap: 6px; font-size: 13px; }
 .field-checks label { display: flex; align-items: center; gap: 6px; font-weight: 400; color: var(--text); }
 
@@ -180,6 +180,29 @@ body {
   transition: all 0.15s ease;
 }
 .btn-export:hover { border-color: var(--accent); color: var(--accent); }
+
+.activity-panel {
+  margin: 10px 0 16px;
+  padding: 12px 14px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.activity-chart-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.activity-chart-heading h2 { margin: 0; font-size: 13px; font-weight: 600; }
+.activity-chart-bars { display: flex; align-items: stretch; gap: 3px; height: 86px; margin-top: 10px; }
+.activity-bar {
+  position: relative; flex: 1 1 0; min-width: 2px; height: 100%; padding: 0;
+  overflow: hidden; border: 0; border-radius: 2px; background: transparent; cursor: pointer;
+}
+.activity-bar-fill {
+  position: absolute; right: 0; bottom: 0; left: 0; min-height: 2px;
+  border-radius: 2px 2px 0 0; background: var(--accent); opacity: 0.55;
+}
+.activity-bar:hover .activity-bar-fill, .activity-bar.is-selected .activity-bar-fill { opacity: 1; }
+.activity-bar.is-selected .activity-bar-fill { background: var(--error); }
+.activity-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.activity-chart-axis { display: flex; justify-content: space-between; margin-top: 4px; color: var(--muted); font-size: 11px; }
 
 .live-dot {
   display: inline-flex; align-items: center; gap: 5px;
@@ -234,6 +257,7 @@ body {
 .event-row { cursor: pointer; }
 .event-row:hover { background: var(--accent-soft); }
 .event-row.is-expanded { background: var(--accent-soft); }
+.event-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .event-row.is-failed .col-ledger .mono { text-decoration: line-through; color: var(--muted); }
 
 .timestamp { cursor: help; white-space: nowrap; }
@@ -245,6 +269,13 @@ body {
   background: var(--bg); color: var(--text); cursor: pointer;
 }
 .topic-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Outbound explorer links inherit whatever colour their cell already uses, and
+   the dotted underline is the only signal that they leave the app — a table
+   full of solid blue links would be much harder to scan. */
+.explorer-link { color: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }
+.explorer-link:hover { color: var(--accent); text-decoration-style: solid; }
+.explorer-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .type-tag {
   display: inline-block; margin-right: 6px; padding: 0 6px;

@@ -85,6 +85,9 @@ services:
         # so it is localhost — the host's port mapping — not the compose service
         # name, which only resolves inside the network.
         VITE_LENS_NETWORKS: ${LENS_WEB_NETWORKS:-{"testnet":"http://localhost:8080"}}
+        # Block-explorer links per network label; empty keeps the Stellar Expert
+        # defaults. Set LENS_WEB_EXPLORERS for a self-hosted explorer.
+        VITE_LENS_EXPLORERS: ${LENS_WEB_EXPLORERS:-}
     depends_on:
       api:
         condition: service_healthy

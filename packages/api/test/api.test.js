@@ -1162,14 +1162,25 @@ test('GET /contracts/{id}/activity returns correct counts per bucket', async () 
     const expected = new Map();
     for (const e of mine) {
       const start = Math.floor(Date.parse(e.ledgerClosedAt) / 1000 / 3600) * 3600;
-      expected.set(start, (expected.get(start) ?? 0) + 1);
+      const bucket = expected.get(start) ?? {
+        count: 0,
+        firstLedger: e.ledger,
+        lastLedger: e.ledger,
+      };
+      bucket.count += 1;
+      bucket.firstLedger = Math.min(bucket.firstLedger, e.ledger);
+      bucket.lastLedger = Math.max(bucket.lastLedger, e.ledger);
+      expected.set(start, bucket);
     }
 
     const { res, body } = await get(`/contracts/${SAC}/activity?bucket=hour`);
     assert.equal(res.status, 200);
     assert.equal(body.contractId, SAC);
     assert.equal(body.bucket, 'hour');
-    const actual = new Map(body.buckets.map((b) => [Date.parse(b.start) / 1000, b.count]));
+    const actual = new Map(body.buckets.map((b) => [
+      Date.parse(b.start) / 1000,
+      { count: b.count, firstLedger: b.firstLedger, lastLedger: b.lastLedger },
+    ]));
     assert.deepEqual(actual, expected);
     assert.equal(body.buckets.reduce((n, b) => n + b.count, 0), mine.length);
     const starts = body.buckets.map((b) => b.start);

@@ -1,20 +1,14 @@
-import type { TopicCount } from '../types.js';
+import type { ContractSummary, TopicCount } from '../types.js';
+import type { FilterState } from '../route.js';
 import { useLocale } from '../i18n/index.js';
-
-// Filter state interface for event filtering
-export interface FilterState {
-  contractId: string;
-  topic: string;
-  successfulOnly: boolean;
-  live: boolean;
-  fromLedger: string;
-  toLedger: string;
-}
 
 interface Props {
   value: FilterState;
   onChange: (next: FilterState) => void;
   knownTopics: TopicCount[];
+  knownContracts: ContractSummary[];
+  contractsError: string | null;
+  contractInputRef: React.RefObject<HTMLInputElement | null>;
   onUseExample: () => void;
 }
 
@@ -23,10 +17,21 @@ function isValidLedger(v: string): boolean {
   return v === '' || (/^\d+$/.test(v) && Number.isInteger(Number(v)) && Number(v) >= 0);
 }
 
-export function Filters({ value, onChange, knownTopics, onUseExample }: Props): React.JSX.Element {
+export function Filters({
+  value,
+  onChange,
+  knownTopics,
+  knownContracts,
+  contractsError,
+  contractInputRef,
+  onUseExample,
+}: Props): React.JSX.Element {
   const { t } = useLocale();
   const set = <K extends keyof FilterState>(key: K, v: FilterState[K]): void =>
     onChange({ ...value, [key]: v });
+  const selectedContract = knownContracts.some((contract) => contract.contractId === value.contractId)
+    ? value.contractId
+    : '';
 
   const fromInvalid = !isValidLedger(value.fromLedger);
   const toInvalid = !isValidLedger(value.toLedger);
@@ -42,6 +47,7 @@ export function Filters({ value, onChange, knownTopics, onUseExample }: Props): 
       <div className="field field-grow">
         <label htmlFor="contractId">{t('contractIdLabel')}</label>
         <input
+          ref={contractInputRef}
           id="contractId"
           name="contractId"
           className="mono"
@@ -51,6 +57,26 @@ export function Filters({ value, onChange, knownTopics, onUseExample }: Props): 
           value={value.contractId}
           onChange={(e) => set('contractId', e.target.value.trim())}
         />
+        <label htmlFor="indexedContract">Indexed contracts</label>
+        <select
+          id="indexedContract"
+          className="mono"
+          value={selectedContract}
+          onChange={(e) => set('contractId', e.target.value)}
+        >
+          <option value="">Choose an indexed contract…</option>
+          {knownContracts.map((contract) => (
+            <option key={contract.contractId} value={contract.contractId}>
+              {contract.contractId} · {contract.eventCount.toLocaleString()} events · Last activity{' '}
+              {new Date(contract.lastSeenAt).toLocaleString()}
+            </option>
+          ))}
+        </select>
+        {contractsError && (
+          <span className="muted small" role="status">
+            Could not load indexed contracts: {contractsError}
+          </span>
+        )}
         <button type="button" className="link-button" onClick={onUseExample}>
           {t('useTestnetExample')}
         </button>
