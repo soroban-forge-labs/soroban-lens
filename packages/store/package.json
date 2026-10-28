@@ -19,7 +19,7 @@
     "bench:address-index": "npm run build && node bench/address-index.bench.js",
     "bench:fts-search": "npm run build && node bench/fts-search.bench.js"
   },
-  "dependencies": { "@stellar/stellar-sdk": "^17.2.1" },
+  "dependencies": { "@stellar/stellar-sdk": "^17.3.0" },
   "peerDependencies": { "pg": "^8.13.0" },
   "peerDependenciesMeta": { "pg": { "optional": true } },
   "devDependencies": { "typescript": "^7.0.2", "@types/node": "^26.6.5" }
