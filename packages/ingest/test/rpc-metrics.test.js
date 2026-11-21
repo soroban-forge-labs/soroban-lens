@@ -53,7 +53,7 @@ test('RPC metrics include failed retries and successful calls without timing ret
     assert.equal(await client.latestLedger(), 20);
     assert.equal((await client.getEvents({ filters: [], startLedger: 10 })).cursor, 'cursor');
     const text = metrics.render();
-    assert.match(text, /lens_rpc_errors_total\{method="getEvents",kind="http"\} 1\n/);
+    assert.match(text, /lens_rpc_errors_total\{method="getEvents",kind="http_5xx"\} 1\n/);
     assert.match(text, /duration_seconds_count\{method="getEvents"\} 2\n/);
     for (const method of ['getHealth', 'getLatestLedger']) {
       assert.ok(text.includes(`duration_seconds_count{method="${method}"} 1\n`));
