@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiRequestError, buildStreamPath, configuredNetworks } from './api.js';
 import type { ContractActivity, ContractSummary, Health, LensEvent, TopicCount } from './types.js';
+import { createLatestGate } from './requests.js';
 import { Filters } from './components/Filters.js';
 import type { FilterState } from './route.js';
 import { ActivityChart } from './components/ActivityChart.js';
@@ -242,8 +243,8 @@ function AppInner(): React.JSX.Element {
     contractSummary,
   ]);
 
-  // Guards against a slow earlier response overwriting a newer one.
-  const requestId = useRef(0);
+  // Stops a slow response for an old filter overwriting a newer one.
+  const requestGate = useRef(createLatestGate());
 
   const toggleSelect = useCallback((id: string): void => {
     setSelectedIds((current) => {
@@ -301,10 +302,10 @@ function AppInner(): React.JSX.Element {
 
   const loadFirstPage = useCallback(async (): Promise<void> => {
     if (!contractIdValid || !ledgerRangeValid) return;
-    const id = ++requestId.current;
+    const isCurrent = requestGate.current.begin();
     try {
       const page = await api.events(selected.baseUrl, query);
-      if (id !== requestId.current) return;
+      if (!isCurrent()) return;
       setEvents(page.events);
       setTotal(page.total);
       setNextCursor(page.nextCursor);
@@ -313,7 +314,7 @@ function AppInner(): React.JSX.Element {
       setError(null);
       setLastUpdated(Date.now());
     } catch (err) {
-      if (id !== requestId.current) return;
+      if (!isCurrent()) return;
       if (err instanceof ApiRequestError && err.status === 404 && query.contractId) {
         setEvents([]);
         setTotal(0);
@@ -326,7 +327,7 @@ function AppInner(): React.JSX.Element {
       }
       setError(err instanceof ApiRequestError ? err.message : String(err));
     } finally {
-      if (id === requestId.current) setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid]);
 

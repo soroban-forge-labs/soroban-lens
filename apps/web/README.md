@@ -159,7 +159,41 @@ measured increase is accepted.
 Explorer links are built in [`src/explorer.ts`](./src/explorer.ts), which is
 pure and covered by `test/explorer.test.js`.
 
-`npm test -w @soroban-lens/web` runs the production build, which type-checks
-every component under `strict` with `noUnusedLocals`. There is no component test
-runner in v0.1 — adding one is [ISSUES.md #62](../../ISSUES.md), and it is the
-most valuable thing anyone could contribute to this module.
+`npm test -w @soroban-lens/web` runs, in order:
+
+1. the production build, which type-checks every component under `strict` with
+   `noUnusedLocals`;
+2. `node --test` over the pure modules in `test/*.test.js`, compiled to
+   `.test-build/` by `tsconfig.test.json`;
+3. **component tests** (#62): Vitest with Testing Library in jsdom, under
+   `test/components/`. `npm run test:components -w @soroban-lens/web` runs just
+   these. They cover `summarise()`/`truncate()`, the topic-prefix query builder,
+   row expansion and keyboard navigation, the request versioning that stops a
+   slow response overwriting a newer one (`src/requests.ts`), the
+   network-mismatch warning, and the table's windowing.
+
+jsdom has no layout, so anything that depends on real heights is tested through
+the pure arithmetic in `src/virtual.ts` rather than through the DOM.
+
+## Large result sets (#64)
+
+Above 200 loaded rows the table renders only the rows near the viewport, between
+two spacer rows sized to what they replace ([`src/virtual.ts`](./src/virtual.ts)).
+Heights are measured as rows render (an expanded row is many times a collapsed
+one) and estimated until then. The page still scrolls as a whole, so layout,
+find-the-button-below and the scrollbar behave as before. Arrow-key navigation
+(#69) is owned by the table, so it can bring an unrendered row into view before
+focusing it; rows carry `aria-rowindex` and the table `aria-rowcount`, so a
+screen reader still hears "row 4 812 of 10 001".
+
+Measured 2026-11-21 with 10 000 loaded rows:
+
+| | rendered rows | DOM elements | first render |
+|---|---:|---:|---:|
+| before (every row) | 10 000 | 300 012 | 2 499 ms |
+| windowed | 33 | 1 004 | 41 ms |
+
+Recomputing the window on a scroll frame takes about 3 µs for 10 000 rows
+(`computeWindow`, averaged over 2 000 calls). Render times are from jsdom, which
+is slower than a browser, so read them as a ratio rather than as milliseconds; the
+DOM size is the same in both.
