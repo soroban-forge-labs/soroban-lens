@@ -92,7 +92,12 @@ export class EventPoller {
     this.#options = options;
     this.#client = deps.client;
     this.#cursors = deps.cursors ?? new MemoryCursorStore();
-    this.#key = deps.cursorKey ?? defaultCursorKey(deps.client.rpcUrl, options.contractIds);
+    this.#key =
+      deps.cursorKey ??
+      defaultCursorKey(deps.client.rpcUrl, options.contractIds, {
+        ...(options.eventType !== undefined ? { eventType: options.eventType } : {}),
+        ...(options.topics !== undefined ? { topics: options.topics } : {}),
+      });
     this.#sleep = deps.sleep ?? defaultSleep;
     this.#now = deps.now ?? Date.now;
     this.#signal = deps.signal;
@@ -325,11 +330,30 @@ function assertIdlePollingIntervals(baseMs: number, maxMs: number): void {
   }
 }
 
-/** Stable, readable cursor key so restarts with the same config resume. */
-export function defaultCursorKey(rpcUrl: string, contractIds: string[]): string {
+/**
+ * Stable, readable cursor key so restarts with the same config resume.
+ *
+ * The event type and topic filters are part of what was fetched, so they are
+ * part of the key (#127): a `--topic`-filtered run never saw the events the
+ * filter excluded, and an unfiltered run resuming its cursor would silently
+ * skip them. With the defaults — `contract` events, no topic filter — the key
+ * is exactly the one earlier versions produced, so upgrading does not restart
+ * anybody's indexer from the oldest retained ledger.
+ */
+export function defaultCursorKey(
+  rpcUrl: string,
+  contractIds: string[],
+  filters: { eventType?: string | undefined; topics?: readonly (readonly string[])[] | undefined } = {},
+): string {
   const host = safeHost(rpcUrl);
   const ids = [...contractIds].sort().join(',') || 'all-contracts';
-  return `${host}-${shortHash(ids)}`;
+  const eventType = filters.eventType ?? 'contract';
+  const topics = filters.topics ?? [];
+  if (eventType === 'contract' && topics.length === 0) return `${host}-${shortHash(ids)}`;
+  // Topic filters are order-sensitive within a filter (positional) but not
+  // between filters (any may match), so each is kept as is and the list sorted.
+  const topicPart = topics.map((t) => t.join('/')).sort().join('|');
+  return `${host}-${shortHash(`${ids};type=${eventType};topics=${topicPart}`)}`;
 }
 
 function safeHost(url: string): string {
