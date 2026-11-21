@@ -89,6 +89,9 @@ const noopLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
  * so `npm install` works identically on a laptop, in CI, and in an Alpine
  * container. That is what makes the "zero setup" promise in the README true.
  */
+/** Ids per DELETE in `deleteEvents`, well under SQLite's 32 766 bound-parameter ceiling. */
+const DELETE_CHUNK = 500;
+
 export class SqliteEventStore implements EventStore {
   readonly #db: DatabaseSync;
   readonly #path: string;
@@ -639,6 +642,29 @@ export class SqliteEventStore implements EventStore {
     } catch (error) {
       return { ok: false, detail: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  async deleteEvents(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    let removed = 0;
+    this.#db.exec('BEGIN');
+    try {
+      // Chunked under SQLite's bound-parameter limit. event_addresses goes by
+      // ON DELETE CASCADE and events_fts by its delete trigger, as for prune.
+      for (let i = 0; i < ids.length; i += DELETE_CHUNK) {
+        const chunk = ids.slice(i, i + DELETE_CHUNK);
+        const result = this.#db
+          .prepare(`DELETE FROM events WHERE id IN (${chunk.map(() => '?').join(',')})`)
+          .run(...chunk);
+        removed += Number(result.changes);
+      }
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+    this.#countCache.clear();
+    return removed;
   }
 
   async pruneBefore(ledger: number): Promise<number> {

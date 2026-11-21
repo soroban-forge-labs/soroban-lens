@@ -18,11 +18,20 @@ interface Props {
   onToggleSelect: (id: string) => void;
   /** Show the ledger close time as an absolute timestamp instead of "3h ago". */
   absolute: boolean;
+  /**
+   * Move focus `delta` rows from this one (#69). The table owns this rather
+   * than the row walking its siblings, because with windowing (#64) the next
+   * row may not be in the DOM yet.
+   */
+  onNavigate: (eventId: string, delta: 1 | -1) => void;
+  /** 1-based position among all loaded rows, for screen readers when only some are rendered. */
+  rowIndex?: number | undefined;
 }
 
 /** One table row, expanding in place to show the full decoded payload. */
 export function EventRow({
   event, network, expanded, onToggleExpanded, showContract, onTopicClick, selected, onToggleSelect, absolute,
+  onNavigate, rowIndex,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
   const firstTopic = event.topics[0];
@@ -32,11 +41,7 @@ export function EventRow({
 
     if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
       keyEvent.preventDefault();
-      const rows = Array.from(
-        keyEvent.currentTarget.closest('tbody')?.querySelectorAll<HTMLTableRowElement>('.event-row') ?? [],
-      );
-      const index = rows.indexOf(keyEvent.currentTarget);
-      rows[index + (keyEvent.key === 'ArrowDown' ? 1 : -1)]?.focus();
+      onNavigate(event.id, keyEvent.key === 'ArrowDown' ? 1 : -1);
     } else if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
       keyEvent.preventDefault();
       onToggleExpanded(event.id);
@@ -53,6 +58,8 @@ export function EventRow({
         onKeyDown={onKeyDown}
         role="row"
         tabIndex={0}
+        data-event-id={event.id}
+        {...(rowIndex !== undefined ? { 'aria-rowindex': rowIndex } : {})}
       >
         <td className="col-select" onClick={(e) => e.stopPropagation()}>
           <input
@@ -136,7 +143,7 @@ export function EventRow({
       </tr>
 
       {expanded && (
-        <tr className="detail-row">
+        <tr className="detail-row" data-detail-for={event.id}>
           <td colSpan={showContract ? 7 : 6}>
             <div className="detail">
               {!event.inSuccessfulContractCall && (

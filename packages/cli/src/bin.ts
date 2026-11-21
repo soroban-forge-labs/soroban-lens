@@ -63,6 +63,9 @@ Options:
       --data-dir <path>   Working directory for state. (env LENS_DATA_DIR)
       --start-ledger <n>  First ledger when no cursor is stored. (env LENS_START_LEDGER)
       --page-size <n>     Events per RPC page, 1-10000. (env LENS_PAGE_SIZE)
+      --page-size-min <n> Let the page size adapt, no lower than this. (env LENS_PAGE_SIZE_MIN)
+      --page-size-max <n> Let the page size adapt, no higher than this. (env LENS_PAGE_SIZE_MAX)
+      --reorg-depth <n>   Recent ledgers re-read to catch reorgs; 0 is off. (env LENS_REORG_DEPTH, default 3)
       --poll-interval <n> Milliseconds to wait at the tip. (env LENS_POLL_INTERVAL_MS)
       --poll-max-interval <n> Maximum idle wait after repeated empty polls. (env LENS_POLL_MAX_INTERVAL_MS)
       --once              index: stop once caught up to the network tip.
@@ -98,6 +101,9 @@ async function main(argv: string[]): Promise<number> {
       'data-dir': { type: 'string' },
       'start-ledger': { type: 'string' },
       'page-size': { type: 'string' },
+      'page-size-min': { type: 'string' },
+      'page-size-max': { type: 'string' },
+      'reorg-depth': { type: 'string' },
       'poll-interval': { type: 'string' },
       'poll-max-interval': { type: 'string' },
       'rpc-header': { type: 'string', multiple: true },
@@ -161,6 +167,9 @@ async function main(argv: string[]): Promise<number> {
     ...(values['data-dir'] !== undefined ? { dataDir: values['data-dir'] } : {}),
     ...(values['start-ledger'] !== undefined ? { startLedger: Number(values['start-ledger']) } : {}),
     ...(values['page-size'] !== undefined ? { pageSize: Number(values['page-size']) } : {}),
+    ...(values['page-size-min'] !== undefined ? { pageSizeMin: Number(values['page-size-min']) } : {}),
+    ...(values['page-size-max'] !== undefined ? { pageSizeMax: Number(values['page-size-max']) } : {}),
+    ...(values['reorg-depth'] !== undefined ? { reorgDepth: Number(values['reorg-depth']) } : {}),
     ...(values['poll-interval'] !== undefined ? { pollInterval: Number(values['poll-interval']) } : {}),
     ...(values['poll-max-interval'] !== undefined ? { maxPollInterval: Number(values['poll-max-interval']) } : {}),
     ...(values['rpc-header'] !== undefined ? { rpcHeaders: values['rpc-header'] } : {}),
