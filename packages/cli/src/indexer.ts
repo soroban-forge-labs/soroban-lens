@@ -31,7 +31,13 @@ export class StoreBackedCursors implements CursorStore {
     return { cursor: state.cursor, ledger: state.ledger, updatedAt: state.updatedAt };
   }
   async save(key: string, state: CursorState): Promise<void> {
-    await this.#store.saveStreamState({ key, ...state });
+    const { retention, ...position } = state;
+    await this.#store.saveStreamState({
+      key,
+      ...position,
+      // The RPC's tip and when it was seen, so /status can report lag (#181).
+      ...(retention ? { latestLedger: retention.latestLedger, latestLedgerSeenAt: state.updatedAt } : {}),
+    });
   }
   async clear(key: string): Promise<void> {
     await this.#store.saveStreamState({ key, cursor: '', ledger: 0, updatedAt: new Date().toISOString() });
@@ -284,11 +290,14 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
 
       // Lag comes from the poller rather than being recomputed here, so the
       // CLI, the metrics endpoint and the API all report the same number.
-      const { lagLedgers, lagSeconds } = batch.progress;
+      const { lagLedgers, lagSeconds, measuredLagSeconds } = batch.progress;
+      // Measured from the last event's close time when there is one (#134);
+      // the ~5 s-per-ledger estimate only stands in when there is not.
+      const lagText = measuredLagSeconds !== null ? `${measuredLagSeconds}s` : `~${lagSeconds}s est.`;
       log(
         `ledger ${batch.progress.ledger}/${batch.progress.latestLedger}: ` +
           `+${added} new of ${batch.events.length} (${inserted} total)` +
-          (lagLedgers > 0 ? `, ~${lagLedgers} ledgers behind (~${lagSeconds}s)` : ', caught up'),
+          (lagLedgers > 0 ? `, ~${lagLedgers} ledgers behind (${lagText})` : ', caught up'),
       );
 
       if (options.maxEvents !== undefined && seen >= options.maxEvents) {

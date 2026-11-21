@@ -7,7 +7,7 @@ export type { RateLimitOptions, RateLimitDecision } from './rate-limit.js';
 export { ApiKeyAuthenticator } from './auth.js';
 export { EventStreamHub } from './stream.js';
 export type { EventStreamOptions } from './stream.js';
-export type { ApiErrorBody } from './errors.js';
+export type { ApiErrorBody, ProblemDetails } from './errors.js';
 export {
   parseEventQuery,
   parseTopics,
