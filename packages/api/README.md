@@ -227,6 +227,15 @@ responses are `Cache-Control: no-cache` (store, but revalidate), so a browser
 sends the validator on its own. The tag tracks new events: pruning or
 re-decoding rows without indexing anything new does not change it.
 
+**Which routes are cacheable.** `GET /events/{id}` and `/openapi.json` send
+`Cache-Control: public, max-age=60` (an event never changes short of a
+redecode; the spec changes only with a deploy). `/events` and
+`/contracts/{id}/events` are `no-cache` (ETag revalidation, above); every other
+route, including `/status` and `/health`, is `no-store`. Browsers can read
+`X-Request-Id` and `Retry-After` cross-origin. Responses are compressed with
+`br`, `gzip` or `deflate` above 1 KB. `soroban-lens-api` opens the database
+read-only, so it needs an already-migrated file (otherwise 503).
+
 **Or don't poll: `GET /events/stream`.** A Server-Sent Events stream that takes
 the same filters as `/events` (and `contractId`) and writes each newly indexed
 event as it appears. Every message's `id` is the event id, so a dropped

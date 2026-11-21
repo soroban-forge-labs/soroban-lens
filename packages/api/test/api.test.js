@@ -1989,3 +1989,85 @@ test('a JSON ETag never validates a CSV request for the same URL', async () => {
     await csv.text();
   });
 });
+
+test('X-Request-Id and Retry-After are exposed to browsers (#172)', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/health`);
+    const exposed = res.headers.get('access-control-expose-headers') ?? '';
+    assert.match(exposed, /X-Request-Id/);
+    assert.match(exposed, /Retry-After/);
+  });
+});
+
+test('cache headers: immutable routes get max-age, the rest stay no-store (#173)', async () => {
+  await withServer(async ({ base }) => {
+    const id = fixture.events[0].id;
+    const one = await fetch(`${base}/events/${encodeURIComponent(id)}`);
+    assert.equal(one.status, 200);
+    assert.match(one.headers.get('cache-control'), /max-age=\d+/);
+    const spec = await fetch(`${base}/openapi.json`);
+    assert.match(spec.headers.get('cache-control'), /max-age=\d+/);
+    for (const path of ['/status', '/health', '/contracts', '/events/nope-missing']) {
+      const res = await fetch(base + path);
+      assert.equal(res.headers.get('cache-control'), 'no-store', path);
+    }
+    const list = await fetch(`${base}/events`);
+    assert.equal(list.headers.get('cache-control'), 'no-cache');
+  });
+});
+
+test('a client that accepts brotli gets Content-Encoding: br (#174)', async () => {
+  await withServer(async ({ base }) => {
+    const { request } = await import('node:http');
+    const { brotliDecompressSync } = await import('node:zlib');
+    const { res, body } = await new Promise((resolve, reject) => {
+      request(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'br, gzip' } }, (r) => {
+        const chunks = [];
+        r.on('data', (c) => chunks.push(c));
+        r.on('end', () => resolve({ res: r, body: Buffer.concat(chunks) }));
+      }).on('error', reject).end();
+    });
+    assert.equal(res.headers['content-encoding'], 'br');
+    assert.ok(JSON.parse(brotliDecompressSync(body).toString()).events);
+  });
+});
+
+test('the API serves from a read-only connection; an unmigrated db gives 503 (#175)', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'lens-ro-'));
+  const path = join(dir, 'lens.db');
+  try {
+    const rw = new SqliteEventStore({ path });
+    await rw.insertEvents(fixture.events);
+    await rw.close();
+
+    const ro = new SqliteEventStore({ path, readOnly: true });
+    const server = createApiServer({ store: ro });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const base = `http://127.0.0.1:${server.address().port}`;
+    assert.equal((await fetch(`${base}/events`)).status, 200);
+    assert.equal((await fetch(`${base}/health`)).status, 200);
+    server.close();
+    await once(server, 'close');
+    await ro.close();
+
+    const empty = join(dir, 'empty.db');
+    const { DatabaseSync } = await import('node:sqlite');
+    new DatabaseSync(empty).close();
+    const raw = new SqliteEventStore({ path: empty, readOnly: true });
+    const server2 = createApiServer({ store: raw });
+    server2.listen(0, '127.0.0.1');
+    await once(server2, 'listening');
+    const res = await fetch(`http://127.0.0.1:${server2.address().port}/events`);
+    assert.equal(res.status, 503);
+    assert.ok(res.headers.get('retry-after'));
+    server2.close();
+    await once(server2, 'close');
+    await raw.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
