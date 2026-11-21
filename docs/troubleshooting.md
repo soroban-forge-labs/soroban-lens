@@ -169,13 +169,20 @@ data ends up being read as mainnet.
 
 ## Changing the API URL does not affect the UI
 
-Vite inlines `VITE_*` variables at **build time**. In Docker:
+Vite inlines `VITE_*` variables at **build time**, so a dev server or a
+hand-built bundle needs rebuilding after a change.
+
+In Docker the network list is the exception: the web container writes
+`/networks.json` from `LENS_WEB_NETWORKS` when it starts, so recreating it is
+enough:
 
 ```bash
-docker compose build web && docker compose up -d web
+docker compose up -d web
 ```
 
-Restarting alone will not pick it up.
+If the switcher still shows the old list, open `http://localhost:5173/networks.json`
+— it is what the UI loaded — and check `docker compose logs web` for the
+`lens:` lines that say what was listed and why.
 
 ---
 
