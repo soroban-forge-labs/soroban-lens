@@ -24,7 +24,7 @@ An invalid port or occupied bind address fails startup.
 | `lens_rpc_stalled` | 1 when the RPC-reported tip has not advanced for the configured threshold; resets to 0 when it advances |
 | `lens_metrics_ready` | 1 after the first acknowledged page; 0 before that |
 | `lens_rpc_request_duration_seconds` | Histogram per `method`, covering every successful or failed attempt, excluding retry waits |
-| `lens_rpc_errors_total` | Failed attempts by `method` and `kind`: `rate_limit`, `http`, `timeout`, `json_rpc`, or `transport` |
+| `lens_rpc_errors_total` | Failed attempts by `method` and `kind`: `rate_limit` (429), `http_4xx` (other client errors: a 401/403 is usually a wrong provider key), `http_5xx` (provider outage), `timeout`, `json_rpc`, or `transport` |
 | `lens_cursor_restarts_total` | Successful cursor clears following a retention gap |
 
 The same server exposes `/healthz` and `/readyz` as JSON endpoints. Liveness
@@ -63,7 +63,18 @@ default; configure the threshold with `--stalled-threshold` or
 `LENS_STALLED_THRESHOLD_MS`.
 Ledger lag measures the most recent event on nonempty pages, so a quiet contract
 can show lag even when the poller has caught up. Inspect the workload before
-choosing an alert threshold. Error labels never contain provider messages,
+choosing an alert threshold.
+
+Lag in seconds (#134), in the indexer's log line and `PollerProgress`, is
+*measured*: the gap between the last event's ledger close time and now
+(`measuredLagSeconds`). `lagSeconds` stays as the old ~5 s-per-ledger estimate,
+and is what the log shows (marked `est.`) on an empty page, where no close time
+is known.
+
+`http_4xx` and `http_5xx` are separate error kinds. A 401 or 403 almost always
+means a wrong or expired provider key, and retrying will not help. A 503 means
+the provider is down. `docs/ingestion-alerts.yml` alerts on each separately.
+Error labels never contain provider messages,
 headers, URLs, cursors, or contract IDs.
 
 Run Prometheus with `--config.file=docs/prometheus.yml` from the repository root.

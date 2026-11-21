@@ -16,3 +16,20 @@ groups:
           severity: warning
         annotations:
           summary: 'Soroban Lens metrics endpoint is unavailable'
+      # Split by HTTP class (#136): they need different responses.
+      - alert: SorobanLensRpcClientErrors
+        expr: sum by (instance) (rate(lens_rpc_errors_total{kind="http_4xx"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Soroban Lens RPC requests are being rejected (4xx)'
+          description: 'Usually a wrong or expired provider key in LENS_RPC_HEADERS, or a wrong LENS_RPC_URL. Retrying will not fix it; fix the configuration.'
+      - alert: SorobanLensRpcServerErrors
+        expr: sum by (instance) (rate(lens_rpc_errors_total{kind="http_5xx"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Soroban Lens RPC provider is failing (5xx)'
+          description: 'The provider is degraded or down. The indexer retries on its own; add a failover URL (LENS_RPC_URLS) if this persists.'
