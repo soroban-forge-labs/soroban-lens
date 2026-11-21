@@ -554,11 +554,21 @@ export class PostgresEventStore implements EventStore {
 
   async saveStreamState(state: StreamState): Promise<void> {
     await this.#pool.query(
-      `INSERT INTO stream_state (key, cursor, ledger, updated_at) VALUES ($1, $2, $3, $4)
+      `INSERT INTO stream_state (key, cursor, ledger, updated_at, latest_ledger, latest_ledger_seen_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (key) DO UPDATE SET cursor = EXCLUDED.cursor,
                                        ledger = EXCLUDED.ledger,
-                                       updated_at = EXCLUDED.updated_at`,
-      [state.key, state.cursor, state.ledger, state.updatedAt],
+                                       updated_at = EXCLUDED.updated_at,
+                                       latest_ledger = EXCLUDED.latest_ledger,
+                                       latest_ledger_seen_at = EXCLUDED.latest_ledger_seen_at`,
+      [
+        state.key,
+        state.cursor,
+        state.ledger,
+        state.updatedAt,
+        state.latestLedger ?? null,
+        state.latestLedgerSeenAt ?? null,
+      ],
     );
   }
 
@@ -967,6 +977,8 @@ function streamState(row: Record<string, unknown>): StreamState {
     cursor: String(row['cursor']),
     ledger: Number(row['ledger']),
     updatedAt: String(row['updated_at']),
+    ...(row['latest_ledger'] != null ? { latestLedger: Number(row['latest_ledger']) } : {}),
+    ...(row['latest_ledger_seen_at'] != null ? { latestLedgerSeenAt: String(row['latest_ledger_seen_at']) } : {}),
   };
 }
 

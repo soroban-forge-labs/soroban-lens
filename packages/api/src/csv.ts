@@ -125,8 +125,16 @@ export function wantsCsv(params: URLSearchParams, accept: string | string[] | un
     throw ApiError.badRequest(`"format" must be "json" or "csv", got "${format}".`, 'format');
   }
 
+  return acceptQuality(accept, 'text/csv') > acceptQuality(accept, 'application/json');
+}
+
+/**
+ * The q-value an `Accept` header gives `type`: that of the most specific
+ * matching range, or 0 when none matches (or the header is absent).
+ */
+export function acceptQuality(accept: string | string[] | undefined, type: string): number {
   const header = Array.isArray(accept) ? accept.join(',') : (accept ?? '');
-  if (header.trim() === '') return false;
+  if (header.trim() === '') return 0;
 
   const ranges = header.split(',').map((part) => {
     const [range = '', ...rest] = part.trim().split(';');
@@ -135,15 +143,10 @@ export function wantsCsv(params: URLSearchParams, accept: string | string[] | un
     return { range: range.trim().toLowerCase(), q: Number.isFinite(q) ? q : 0 };
   });
 
-  /** The q of the most specific range matching `type`, or 0 when none does. */
-  const qualityOf = (type: string): number => {
-    const [major = ''] = type.split('/');
-    const exact = ranges.find((r) => r.range === type);
-    if (exact) return exact.q;
-    const wildcard = ranges.find((r) => r.range === `${major}/*`);
-    if (wildcard) return wildcard.q;
-    return ranges.find((r) => r.range === '*/*')?.q ?? 0;
-  };
-
-  return qualityOf('text/csv') > qualityOf('application/json');
+  const [major = ''] = type.split('/');
+  const exact = ranges.find((r) => r.range === type);
+  if (exact) return exact.q;
+  const wildcard = ranges.find((r) => r.range === `${major}/*`);
+  if (wildcard) return wildcard.q;
+  return ranges.find((r) => r.range === '*/*')?.q ?? 0;
 }

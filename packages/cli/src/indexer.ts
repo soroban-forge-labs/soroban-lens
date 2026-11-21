@@ -31,7 +31,13 @@ export class StoreBackedCursors implements CursorStore {
     return { cursor: state.cursor, ledger: state.ledger, updatedAt: state.updatedAt };
   }
   async save(key: string, state: CursorState): Promise<void> {
-    await this.#store.saveStreamState({ key, ...state });
+    const { retention, ...position } = state;
+    await this.#store.saveStreamState({
+      key,
+      ...position,
+      // The RPC's tip and when it was seen, so /status can report lag (#181).
+      ...(retention ? { latestLedger: retention.latestLedger, latestLedgerSeenAt: state.updatedAt } : {}),
+    });
   }
   async clear(key: string): Promise<void> {
     await this.#store.saveStreamState({ key, cursor: '', ledger: 0, updatedAt: new Date().toISOString() });
