@@ -65,9 +65,17 @@ for (const theme of ['light', 'dark']) {
     });
     await context.route(`${apiOrigin}/**`, async (route) => {
       const pathname = new URL(route.request().url()).pathname;
-      const body = pathname === '/health'
-        ? { status: 'ok', detail: '', version: 'test', network: 'testnet', uptimeSeconds: 1, events: 1, contracts: 1, schemaVersion: 1 }
-        : eventPage;
+      // Each route gets its own shape: answering everything with an event page
+      // left /contracts without a `contracts` array, and the app never rendered rows.
+      const bodies = {
+        '/health': { status: 'ok', detail: '', version: 'test', network: 'testnet', uptimeSeconds: 1, events: 1, contracts: 1, schemaVersion: 1 },
+        '/status': {
+          eventCount: 1, contractCount: 1, minLedger: 4695317, maxLedger: 4695317, schemaVersion: 1,
+          streams: [{ key: 'test', cursor: 'event-1', ledger: 4695317, updatedAt: '2026-09-15T19:22:52Z' }],
+        },
+        '/contracts': { contracts: [] },
+      };
+      const body = bodies[pathname] ?? eventPage;
       await route.fulfill({
         status: 200,
         contentType: 'application/json',

@@ -384,6 +384,37 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     }
   });
 
+  test(`[${name}] a filter on a topic past the fourth position finds the event (#164)`, async () => {
+    const store = await seeded();
+    const deep = fixtureEvents.find((e) => e.topic.length >= 5);
+    assert.ok(deep, 'fixtureEvents needs an event with at least 5 topics');
+    const page = await store.queryEvents({ topics: [null, null, null, null, null, ], limit: 1000 });
+    const probe = (await store.getEvent(deep.id))!;
+    const value = (probe.topics[4] as { value: unknown }).value;
+    const hit = await store.queryEvents({ topics: [null, null, null, null, String(value)], limit: 1000 });
+    assert.ok(hit.events.some((e) => e.id === deep.id), 'the 5-topic event is returned');
+    assert.ok(hit.events.every((e) => e.topics[4] && String((e.topics[4] as { value: unknown }).value) === String(value)));
+    const miss = await store.queryEvents({ topics: [null, null, null, null, 'no-such-topic'] });
+    assert.equal(miss.events.length, 0);
+    assert.ok(page.events.length > 0);
+    await store.close();
+  });
+
+  test(`[${name}] indexedAfter returns only events indexed after the timestamp (#165)`, async () => {
+    const store = await createStore();
+    const half = Math.floor(fixtureEvents.length / 2);
+    await store.insertEvents(fixtureEvents.slice(0, half));
+    await new Promise((r) => setTimeout(r, 20));
+    const cutoff = new Date().toISOString();
+    await new Promise((r) => setTimeout(r, 20));
+    await store.insertEvents(fixtureEvents.slice(half));
+    const page = await store.queryEvents({ indexedAfter: cutoff, limit: 1000 });
+    const second = new Set(fixtureEvents.slice(half).map((e) => e.id));
+    assert.equal(page.events.length, second.size);
+    assert.ok(page.events.every((e) => second.has(e.id)));
+    await store.close();
+  });
+
   test(`[${name}] close() does not throw`, async () => {
     const store = await createStore();
     await assert.doesNotReject(() => store.close());

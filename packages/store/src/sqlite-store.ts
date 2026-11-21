@@ -35,6 +35,12 @@ export interface SqliteStoreOptions {
   /** Run migrations on construction. Defaults to true. */
   migrateOnOpen?: boolean;
   /**
+   * Open the file read-only: no migration, no WAL setup, no checkpoint timer,
+   * and SQLite refuses every write. For consumers that never write (the API).
+   * An unmigrated database is then reported by getStats/health, not fixed.
+   */
+  readOnly?: boolean;
+  /**
    * Structured logger for migration events — the store and the API share the
    * same `Logger` shape from ./logger.js. Defaults to a no-op, so passing
    * nothing keeps a library consumer's stderr silent, exactly as before this
@@ -113,23 +119,24 @@ export class SqliteEventStore implements EventStore {
     this.#countCacheTtlMs = options.countCacheTtlMs ?? 2000;
     this.#now = options.now ?? Date.now;
     this.#sizeTargetBytes = options.sizeTargetBytes;
-    if (options.path !== ':memory:') mkdirSync(dirname(options.path), { recursive: true });
-    this.#db = new DatabaseSync(options.path);
+    const readOnly = options.readOnly === true && options.path !== ':memory:';
+    if (options.path !== ':memory:' && !readOnly) mkdirSync(dirname(options.path), { recursive: true });
+    this.#db = new DatabaseSync(options.path, readOnly ? { readOnly: true } : {});
 
     // WAL lets the API read while the indexer writes, which is the whole point
     // of running both against one file. NORMAL trades an fsync per commit for
     // throughput; on a crash the worst case is replaying the last batch, which
     // is already the delivery guarantee we have from Module 1.
-    if (options.path !== ':memory:') this.#db.exec('PRAGMA journal_mode = WAL');
-    this.#db.exec('PRAGMA synchronous = NORMAL');
+    if (options.path !== ':memory:' && !readOnly) this.#db.exec('PRAGMA journal_mode = WAL');
+    if (!readOnly) this.#db.exec('PRAGMA synchronous = NORMAL');
     this.#db.exec('PRAGMA foreign_keys = ON');
     // Wait rather than fail when the indexer holds the write lock.
     this.#db.exec('PRAGMA busy_timeout = 5000');
 
     this.#searchAvailable = options.forceDisableFts5 ? false : this.#hasFts5();
-    if (options.migrateOnOpen !== false) this.#migrateSync();
+    if (options.migrateOnOpen !== false && !readOnly) this.#migrateSync();
 
-    const defaultInterval = options.path === ':memory:' ? 0 : 60_000;
+    const defaultInterval = options.path === ':memory:' || readOnly ? 0 : 60_000;
     const checkpointIntervalMs = options.checkpointIntervalMs ?? defaultInterval;
     if (checkpointIntervalMs > 0) {
       // unref(): a scheduled checkpoint must never be the reason a process
@@ -304,6 +311,12 @@ export class SqliteEventStore implements EventStore {
       for (const address of extractAddresses(topicXdr)) stmt.run(eventId, address, position);
     });
     for (const address of extractAddresses(e.valueXdr)) stmt.run(eventId, address, 'value');
+    // Topics at position 4+ go to the event_topics side table (#164).
+    const deep = this.#prepared().insertDeepTopic;
+    e.topics.forEach((topic, i) => {
+      const key = i >= INDEXED_TOPIC_DEPTH ? topicKey(topic) : null;
+      if (key !== null) deep.run(eventId, i, key);
+    });
   }
 
   async getEvent(id: string): Promise<LensEvent | null> {
@@ -962,6 +975,7 @@ export class SqliteEventStore implements EventStore {
   /** Replace one event's address-index rows with a fresh extraction. */
   #refreshAddresses(eventId: string, event: LensEvent): void {
     this.#db.prepare('DELETE FROM event_addresses WHERE event_id = ?').run(eventId);
+    this.#db.prepare('DELETE FROM event_topics WHERE event_id = ?').run(eventId);
     this.#insertAddresses(eventId, event);
   }
 
@@ -1191,6 +1205,7 @@ interface Statements {
   insert: StatementSync;
   byId: StatementSync;
   insertAddress: StatementSync;
+  insertDeepTopic: StatementSync;
 }
 
 function buildStatements(db: DatabaseSync): Statements {
@@ -1208,6 +1223,9 @@ function buildStatements(db: DatabaseSync): Statements {
     byId: db.prepare('SELECT * FROM events WHERE id = ?'),
     insertAddress: db.prepare(
       'INSERT OR IGNORE INTO event_addresses (event_id, address, position) VALUES (?, ?, ?)',
+    ),
+    insertDeepTopic: db.prepare(
+      'INSERT OR IGNORE INTO event_topics (event_id, position, topic) VALUES (?, ?, ?)',
     ),
   };
 }
@@ -1326,6 +1344,10 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
     conditions.push('closed_at_unix <= ?');
     values.push(query.toTime);
   }
+  if (query.indexedAfter !== undefined) {
+    conditions.push('indexed_at > ?');
+    values.push(query.indexedAfter);
+  }
   if (query.successfulOnly === true) {
     conditions.push('in_successful_call = 1');
   }
@@ -1337,7 +1359,12 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
   query.topics?.forEach((topic, i) => {
     if (topic === null || topic === undefined) return;
     const column = columns[i];
-    if (!column) return;
+    if (!column) {
+      // Position 4+: the event_topics side table (#164).
+      conditions.push('id IN (SELECT event_id FROM event_topics WHERE position = ? AND topic = ?)');
+      values.push(i, topic);
+      return;
+    }
     conditions.push(`${column} = ?`);
     values.push(topic);
   });

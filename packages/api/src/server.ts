@@ -1,6 +1,11 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { gzipSync, deflateSync, createGzip, createDeflate } from 'node:zlib';
+import { gzip, deflate, brotliCompress, createGzip, createDeflate, createBrotliCompress } from 'node:zlib';
+import { promisify } from 'node:util';
+
+const gzipAsync = promisify(gzip);
+const deflateAsync = promisify(deflate);
+const brotliAsync = promisify(brotliCompress);
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createHash, randomUUID } from 'node:crypto';
@@ -29,6 +34,7 @@ import {
   assertTxHash,
   parseActivityQuery,
   parseEventQuery,
+  parseLimit,
   parseFields,
   parseIds,
   selectFields,
@@ -187,7 +193,19 @@ const MIGRATION_RETRY_AFTER_SECONDS = 5;
  * unavailable — the rows would look plausible and be wrong.
  */
 async function assertSchemaCurrent(store: EventStore): Promise<void> {
-  const { schemaVersion } = await store.getStats();
+  let schemaVersion: number;
+  try {
+    ({ schemaVersion } = await store.getStats());
+  } catch (error) {
+    // A read-only connection cannot migrate, so a fresh file has no tables yet.
+    if (/no such table/i.test(error instanceof Error ? error.message : String(error))) {
+      throw ApiError.unavailable(
+        'The database has not been migrated yet; run the indexer or `lens migrate` first.',
+        MIGRATION_RETRY_AFTER_SECONDS,
+      );
+    }
+    throw error;
+  }
   if (schemaVersion === LATEST_SCHEMA_VERSION) return;
   throw ApiError.unavailable(
     `The database is at schema v${schemaVersion}, expected v${LATEST_SCHEMA_VERSION}. ` +
@@ -374,7 +392,7 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/contracts$/,
     handler: async ({ store, query }) => {
-      const limit = query.get('limit') ? Number(query.get('limit')) : undefined;
+      const limit = parseLimit(query);
       const cursor = query.get('cursor') || undefined;
       if (cursor) {
         try {
@@ -560,7 +578,7 @@ const routes: Route[] = [
     pattern: /^\/contracts\/([^/]+)\/topics$/,
     handler: async ({ params, query, store }) => {
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
-      const limit = query.get('limit') ? Number(query.get('limit')) : undefined;
+      const limit = parseLimit(query);
       return { body: { contractId, topics: await store.listTopics(contractId, limit) } };
     },
   },
@@ -1119,7 +1137,7 @@ export function createApiServer(options: ApiServerOptions): Server {
       }
 
       if (!result.handled) {
-        send(
+        await send(
           res,
           result.status ?? 200,
           result.body,
@@ -1127,6 +1145,7 @@ export function createApiServer(options: ApiServerOptions): Server {
           isHead,
           req.headers['accept-encoding'],
           etag && (result.status ?? 200) === 200 ? { etag } : undefined,
+          cacheControlFor(req.method, path),
         );
       }
       const status = result.status ?? 200;
@@ -1177,7 +1196,7 @@ export function createApiServer(options: ApiServerOptions): Server {
         );
       }
       const problem = wantsProblemJson(req.headers.accept);
-      send(
+      await send(
         res,
         apiError.status,
         problem ? apiError.toProblem(requestId) : apiError.toBody(requestId),
@@ -1189,13 +1208,25 @@ export function createApiServer(options: ApiServerOptions): Server {
   }
 }
 
+// An event fetched by id never changes (short of a redecode) and the spec only
+// changes with a deploy; everything else stays no-store.
+const IMMUTABLE_CACHE_CONTROL = 'public, max-age=60';
+function cacheControlFor(method: string | undefined, path: string): string | undefined {
+  if (method !== 'GET' && method !== 'HEAD') return undefined;
+  if (path === '/openapi.json') return IMMUTABLE_CACHE_CONTROL;
+  if (/^\/events\/(?!stream$)[^/]+$/.test(path)) return IMMUTABLE_CACHE_CONTROL;
+  return undefined;
+}
+
 // Below this, gzip/deflate's own framing overhead can cost more than it
 // saves — matches the same "measure before compressing unconditionally"
 // finding #35 made for the raw-XDR columns, applied here rather than assumed.
 const COMPRESSION_THRESHOLD_BYTES = 1024;
 
-function pickEncoding(acceptEncoding: string | string[] | undefined): 'gzip' | 'deflate' | undefined {
+function pickEncoding(acceptEncoding: string | string[] | undefined): 'br' | 'gzip' | 'deflate' | undefined {
   const header = Array.isArray(acceptEncoding) ? acceptEncoding.join(',') : (acceptEncoding ?? '');
+  // Brotli first: smaller than gzip, and what browsers prefer when offered.
+  if (/(?:^|,)\s*br\s*(?:;|,|$)/i.test(header)) return 'br';
   // Order of preference, not the client's — gzip is at least as well
   // supported as deflate and typically compresses slightly better, so it
   // wins when a client (correctly) advertises both with no explicit q-values.
@@ -1234,12 +1265,13 @@ async function sendStream(
   }
 
   const source = Readable.from(chunks);
-  if (encoding === 'gzip') await pipeline(source, createGzip(), res);
+  if (encoding === 'br') await pipeline(source, createBrotliCompress(), res);
+  else if (encoding === 'gzip') await pipeline(source, createGzip(), res);
   else if (encoding === 'deflate') await pipeline(source, createDeflate(), res);
   else await pipeline(source, res);
 }
 
-function send(
+async function send(
   res: ServerResponse,
   status: number,
   body: unknown,
@@ -1247,14 +1279,23 @@ function send(
   headOnly = false,
   acceptEncoding?: string | string[],
   validator?: { etag: string },
-): void {
+  cacheControl?: string,
+): Promise<void> {
   // A handler that already produced a JSON string (the OpenAPI document) passes
   // it through untouched rather than being re-serialised.
   const payload = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
   const rawBytes = Buffer.byteLength(payload);
 
   const encoding = rawBytes >= COMPRESSION_THRESHOLD_BYTES ? pickEncoding(acceptEncoding) : undefined;
-  const compressed = encoding === 'gzip' ? gzipSync(payload) : encoding === 'deflate' ? deflateSync(payload) : undefined;
+  // Async, so a large page does not stall every other request on the loop.
+  const compressed =
+    encoding === 'br'
+      ? await brotliAsync(payload)
+      : encoding === 'gzip'
+        ? await gzipAsync(payload)
+        : encoding === 'deflate'
+          ? await deflateAsync(payload)
+          : undefined;
 
   res.writeHead(status, {
     'Content-Type': contentType ?? 'application/json; charset=utf-8',
@@ -1270,7 +1311,7 @@ function send(
     Vary: varyHeader(res, 'Accept, Accept-Encoding'),
     ...(validator
       ? { ETag: validator.etag, 'Cache-Control': 'no-cache' }
-      : { 'Cache-Control': 'no-store' }),
+      : { 'Cache-Control': status === 200 && cacheControl ? cacheControl : 'no-store' }),
   });
   res.end(headOnly ? undefined : (compressed ?? payload));
 }

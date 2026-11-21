@@ -88,10 +88,25 @@ function timeParam(params: URLSearchParams, name: string): number | undefined {
  * A caller who asks for `limit=5000` has a wrong mental model of the API, and a
  * 400 teaches them faster than a quietly truncated page.
  */
-export function parseEventQuery(params: URLSearchParams): EventQuery {
+export function parseLimit(params: URLSearchParams): number | undefined {
   const limit = intParam(params, 'limit');
   if (limit !== undefined && (limit < 1 || limit > MAX_QUERY_LIMIT)) {
     throw ApiError.badRequest(`"limit" must be between 1 and ${MAX_QUERY_LIMIT}, got ${limit}.`, 'limit');
+  }
+  return limit;
+}
+
+export function parseEventQuery(params: URLSearchParams): EventQuery {
+  const limit = parseLimit(params);
+
+  const indexedAfterRaw = params.get('indexedAfter');
+  let indexedAfter: string | undefined;
+  if (indexedAfterRaw !== null && indexedAfterRaw !== '') {
+    const t = Date.parse(indexedAfterRaw);
+    if (Number.isNaN(t)) {
+      throw ApiError.badRequest(`"indexedAfter" must be an ISO-8601 timestamp, got "${indexedAfterRaw}".`, 'indexedAfter');
+    }
+    indexedAfter = new Date(t).toISOString();
   }
 
   const order = params.get('order') ?? undefined;
@@ -177,6 +192,7 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     ...(cursor ? { cursor } : {}),
     ...(successfulOnly !== undefined ? { successfulOnly } : {}),
     ...(topics ? { topics } : {}),
+    ...(indexedAfter !== undefined ? { indexedAfter } : {}),
   };
 }
 
@@ -220,19 +236,12 @@ export function parseIds(params: URLSearchParams): string[] | undefined {
 /**
  * Repeated `?topic=` parameters form a topic *prefix*, positionally.
  * `*` is a wildcard for one position: `?topic=*&topic=order` matches any event
- * whose second topic is `order`.
+ * whose second topic is `order`. Any depth works: positions 4+ are served by
+ * the event_topics side table (#164).
  */
 export function parseTopics(params: URLSearchParams): (string | null)[] | undefined {
   const topics = params.getAll('topic');
   if (topics.length === 0) return undefined;
-  if (topics.length > 4) {
-    throw ApiError.badRequest(
-      'At most 4 "topic" parameters are supported, because only the first four ' +
-        'topic positions are indexed. Events may carry more topics than that; ' +
-        'filter on the prefix and narrow client-side.',
-      'topic',
-    );
-  }
   return topics.map((t) => (t === '*' || t === '' ? null : t));
 }
 
