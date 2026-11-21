@@ -87,7 +87,8 @@ for (const theme of ['light', 'dark']) {
     const page = await context.newPage();
     await page.goto(origin);
     await page.locator('.event-row').waitFor();
-    await page.getByText('1 event indexed').waitFor();
+    // The status bar text moved into the i18n catalogue (healthStats) in #253.
+    await page.getByText('1 events \u00b7 1 contracts').waitFor();
     assert.equal(await page.locator('html').getAttribute('data-theme'), theme);
     assert.equal(await page.locator('[aria-live="polite"]').count(), 1);
 
