@@ -23,6 +23,7 @@ import {
   assertContractId,
   parseActivityQuery,
   parseEventQuery,
+  parseLimit,
   parseFields,
   parseIds,
   selectFields,
@@ -294,7 +295,7 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/contracts$/,
     handler: async ({ store, query }) => {
-      const limit = query.get('limit') ? Number(query.get('limit')) : undefined;
+      const limit = parseLimit(query);
       return { body: { contracts: await store.listContracts(limit) } };
     },
   },
@@ -409,7 +410,7 @@ const routes: Route[] = [
     pattern: /^\/contracts\/([^/]+)\/topics$/,
     handler: async ({ params, query, store }) => {
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
-      const limit = query.get('limit') ? Number(query.get('limit')) : undefined;
+      const limit = parseLimit(query);
       return { body: { contractId, topics: await store.listTopics(contractId, limit) } };
     },
   },
