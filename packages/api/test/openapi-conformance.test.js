@@ -34,6 +34,11 @@ const CASES = [
   ['/events/{eventId}', `/events/${EVENT_ID}`, 200],
   ['/events/{eventId}', '/events/does-not-exist', 404],
   ['/events/stream', '/events/stream?limit=abc', 400],
+  ['/transactions/{txHash}', `/transactions/${fixture.events[0].txHash}`, 200],
+  ['/transactions/{txHash}', `/transactions/${'0'.repeat(64)}`, 404],
+  ['/transactions/{txHash}', '/transactions/nope', 400],
+  ['/addresses/{address}', `/addresses/G${'A'.repeat(55)}`, 200],
+  ['/addresses/{address}', '/addresses/bogus', 400],
 ];
 
 async function withServer(run) {

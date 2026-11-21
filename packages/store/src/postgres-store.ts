@@ -1,4 +1,5 @@
 import { createReadStream, createWriteStream } from 'node:fs';
+import { decodeContractCursor, encodeContractCursor } from './contract-cursor.js';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { decodeEvent, topicKey, extractAddresses } from './decode.js';
@@ -8,6 +9,8 @@ import { POSTGRES_MIGRATIONS } from './postgres-schema.js';
 import { normaliseLimit, type EventStore, type PruneToSizeResult } from './store.js';
 import type {
   ContractSpecRecord,
+  AddressContractSummary,
+  ContractPage,
   ContractSummary,
   DecodedValue,
   EventPage,
@@ -465,6 +468,63 @@ export class PostgresEventStore implements EventStore {
       firstLedger: Number(r['first_ledger']),
       lastLedger: Number(r['last_ledger']),
       lastSeenAt: String(r['last_seen_at']),
+    }));
+  }
+
+  async listContractsPage(limit = 100, cursor?: string): Promise<ContractPage> {
+    const size = normaliseLimit(limit);
+    const c = cursor ? decodeContractCursor(cursor) : undefined;
+    const snapshot =
+      c?.snapshot ??
+      Number((await this.#pool.query('SELECT COALESCE(MAX(ledger), 0) AS m FROM events')).rows[0]?.['m'] ?? 0);
+    const { rows } = await this.#pool.query(
+      `SELECT contract_id,
+              COUNT(*)::int         AS event_count,
+              MIN(ledger)           AS first_ledger,
+              MAX(ledger)           AS last_ledger,
+              MAX(ledger_closed_at) AS last_seen_at
+       FROM events
+       WHERE ledger <= $1
+       GROUP BY contract_id
+       ${c ? 'HAVING MAX(ledger) < $3 OR (MAX(ledger) = $3 AND contract_id COLLATE "C" > $4)' : ''}
+       ORDER BY last_ledger DESC, contract_id COLLATE "C" ASC
+       LIMIT $2`,
+      c ? [snapshot, size + 1, c.lastLedger, c.contractId] : [snapshot, size + 1],
+    );
+    const page = rows.slice(0, size).map((r) => ({
+      contractId: String(r['contract_id']),
+      eventCount: Number(r['event_count']),
+      firstLedger: Number(r['first_ledger']),
+      lastLedger: Number(r['last_ledger']),
+      lastSeenAt: String(r['last_seen_at']),
+    }));
+    const last = page[page.length - 1];
+    return {
+      contracts: page,
+      nextCursor:
+        rows.length > size && last
+          ? encodeContractCursor({ snapshot, lastLedger: last.lastLedger, contractId: last.contractId })
+          : null,
+    };
+  }
+
+  async summarizeAddress(address: string): Promise<AddressContractSummary[]> {
+    const { rows } = await this.#pool.query(
+      `SELECT e.contract_id,
+              COUNT(DISTINCT e.id)::int AS event_count,
+              MIN(e.ledger) AS first_ledger,
+              MAX(e.ledger) AS last_ledger
+       FROM event_addresses a JOIN events e ON e.id = a.event_id
+       WHERE a.address = $1
+       GROUP BY e.contract_id
+       ORDER BY event_count DESC, e.contract_id COLLATE "C" ASC`,
+      [address],
+    );
+    return rows.map((r) => ({
+      contractId: String(r['contract_id']),
+      eventCount: Number(r['event_count']),
+      firstLedger: Number(r['first_ledger']),
+      lastLedger: Number(r['last_ledger']),
     }));
   }
 

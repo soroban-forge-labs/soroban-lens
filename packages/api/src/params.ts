@@ -10,6 +10,23 @@ const TX_HASH = /^[0-9a-fA-F]{64}$/;
 // Both are valid ScVal addresses, and #23's index does not distinguish them.
 const ADDRESS = /^[GC][A-Z2-7]{55}$/;
 
+export function assertAddress(value: string): string {
+  if (!ADDRESS.test(value)) {
+    throw ApiError.badRequest(
+      `"${value}" is not an address. Expected a StrKey starting with G or C, 56 characters long.`,
+      'address',
+    );
+  }
+  return value;
+}
+
+export function assertTxHash(value: string): string {
+  if (!TX_HASH.test(value)) {
+    throw ApiError.badRequest('The transaction hash must be a 64-character hex string.', 'txHash');
+  }
+  return value;
+}
+
 export function assertContractId(value: string): string {
   if (!CONTRACT_ID.test(value)) {
     throw ApiError.badRequest(

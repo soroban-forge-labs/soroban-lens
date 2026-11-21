@@ -1,4 +1,5 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import { decodeContractCursor, encodeContractCursor } from './contract-cursor.js';
 import { existsSync, mkdirSync, statSync, createWriteStream } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
@@ -13,6 +14,8 @@ import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
 import { normaliseLimit, type EventStore, type PruneToSizeResult } from './store.js';
 import type {
   ContractSpecRecord,
+  AddressContractSummary,
+  ContractPage,
   ContractSummary,
   DecodedValue,
   EventPage,
@@ -454,6 +457,71 @@ export class SqliteEventStore implements EventStore {
       firstLedger: r.first_ledger,
       lastLedger: r.last_ledger,
       lastSeenAt: r.last_seen_at,
+    }));
+  }
+
+  async listContractsPage(limit = 100, cursor?: string): Promise<ContractPage> {
+    const size = normaliseLimit(limit);
+    const c = cursor ? decodeContractCursor(cursor) : undefined;
+    const snapshot =
+      c?.snapshot ??
+      ((this.#db.prepare('SELECT COALESCE(MAX(ledger), 0) AS m FROM events').get() as { m: number }).m);
+    const rows = this.#db
+      .prepare(
+        `SELECT contract_id,
+                COUNT(*)        AS event_count,
+                MIN(ledger)     AS first_ledger,
+                MAX(ledger)     AS last_ledger,
+                MAX(ledger_closed_at) AS last_seen_at
+         FROM events
+         WHERE ledger <= ?
+         GROUP BY contract_id
+         ${c ? 'HAVING MAX(ledger) < ? OR (MAX(ledger) = ? AND contract_id > ?)' : ''}
+         ORDER BY last_ledger DESC, contract_id ASC
+         LIMIT ?`,
+      )
+      .all(...(c ? [snapshot, c.lastLedger, c.lastLedger, c.contractId] : [snapshot]), size + 1) as {
+      contract_id: string;
+      event_count: number;
+      first_ledger: number;
+      last_ledger: number;
+      last_seen_at: string;
+    }[];
+    const page = rows.slice(0, size).map((r) => ({
+      contractId: r.contract_id,
+      eventCount: r.event_count,
+      firstLedger: r.first_ledger,
+      lastLedger: r.last_ledger,
+      lastSeenAt: r.last_seen_at,
+    }));
+    const last = page[page.length - 1];
+    return {
+      contracts: page,
+      nextCursor:
+        rows.length > size && last
+          ? encodeContractCursor({ snapshot, lastLedger: last.lastLedger, contractId: last.contractId })
+          : null,
+    };
+  }
+
+  async summarizeAddress(address: string): Promise<AddressContractSummary[]> {
+    const rows = this.#db
+      .prepare(
+        `SELECT e.contract_id AS contract_id,
+                COUNT(DISTINCT e.id) AS event_count,
+                MIN(e.ledger) AS first_ledger,
+                MAX(e.ledger) AS last_ledger
+         FROM event_addresses a JOIN events e ON e.id = a.event_id
+         WHERE a.address = ?
+         GROUP BY e.contract_id
+         ORDER BY event_count DESC, e.contract_id ASC`,
+      )
+      .all(address) as { contract_id: string; event_count: number; first_ledger: number; last_ledger: number }[];
+    return rows.map((r) => ({
+      contractId: r.contract_id,
+      eventCount: r.event_count,
+      firstLedger: r.first_ledger,
+      lastLedger: r.last_ledger,
     }));
   }
 
