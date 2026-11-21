@@ -22,6 +22,7 @@ lens doctor    # preflight: Node, data dir, database, RPC, contract ids
 lens index     # run the pipeline: ingest -> decode -> store
 lens seed      # load the committed testnet fixture
 lens stats     # what is in the database
+lens tail      # follow new events as they are indexed
 lens spec      # contract specs for typed events: list | fetch | import
 ```
 
@@ -55,6 +56,45 @@ That is what lets `docker-compose.yml` gate the indexer and API behind
 The database check performs a real **write** probe, not a read: a read-only
 volume or a full disk only shows up on write, and that is exactly the failure
 worth catching before the indexer starts.
+
+#### `lens doctor --fix`
+
+Applies the failures that have one obvious remedy, prints each action, then
+runs the usual report:
+
+```
+lens doctor --fix
+
+  +  created .env from .env.example (docker compose reads it; review LENS_CONTRACT_IDS)
+  +  created data directory ./data
+```
+
+It only ever adds what is missing: `.env` is never overwritten, the database is
+only migrated forward, and nothing is deleted. Network settings — RPC URL,
+headers, contracts — are choices rather than fixes, so it leaves those to the
+report's advice. A fresh clone reaches a passing report from this one command.
+
+### `lens tail`
+
+Follows events as the indexer writes them, without the API or a browser:
+
+```bash
+lens tail -c CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC --topic transfer
+# 12:01:07  L4695317  CDLZ…GCYSC  transfer  GBYR…JQHHT  GDVF…B5GSA  "native"  =  11000000
+
+lens tail --topic transfer --json | jq -r '.value.value'
+```
+
+Filters are the API's, with the API's rules: `--topic` (positional prefix,
+repeatable, `*` for any one position), `--address`, `--tx-hash`, `--search`,
+`--successful-only`. It starts at the newest event; `--from-ledger` or
+`--from-time` replays matching history from that point first. `--json` writes
+one complete event per line; the readable form is coloured on a terminal and
+honours `NO_COLOR`/`FORCE_COLOR`. `--max-events <n>` stops after `n`.
+
+It reads the database directly (`--db`, `LENS_DB_PATH`), so it runs wherever
+the indexer's database is reachable: next to `lens index`, or inside the
+container with `docker compose exec indexer node packages/cli/dist/bin.js tail`.
 
 ## Configuration precedence
 

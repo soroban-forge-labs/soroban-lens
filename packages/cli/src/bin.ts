@@ -6,13 +6,16 @@
  *   lens index    run the ingest -> store pipeline
  *   lens seed     load the committed testnet fixture
  *   lens stats    what is in the database
+ *   lens tail     follow new events as they are indexed
  */
 import { parseArgs } from 'node:util';
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { SqliteEventStore } from '@soroban-lens/store';
 import type { ContractSpecRecord, RawEventInput } from '@soroban-lens/store';
 import { resolveConfig } from './config.js';
 import { formatReport, runDoctor } from './doctor.js';
+import { applyFixes, formatFixes } from './fix.js';
+import { buildTailQuery, followEvents, formatEvent, formatEventJson, TailUsageError, wantsColor } from './tail.js';
 import { runIndexer } from './indexer.js';
 import { restoreBackup } from './backup.js';
 import { assertContractIds, loadContractIdsFromFile, ContractFileParseError } from '@soroban-lens/ingest';
@@ -28,10 +31,12 @@ lens — soroban-lens operator CLI
 
 Usage:
   lens doctor [options]              Preflight: Node, data dir, database, RPC, clock skew, contract ids.
+  lens doctor --fix                  Apply the safe remedies first: .env, data dir, pending migrations.
   lens index  [options]              Run the indexer (ingest -> decode -> store).
   lens seed   [--fixture <path>]     Load a captured getEvents response (and, by default, its
                                      contracts' specs) into the database.
   lens stats  [options]              Print database statistics.
+  lens tail   [filters] [--json]     Follow events as they are indexed, colourised or as NDJSON.
   lens prune --before-ledger <n>     Delete events below a ledger and reclaim disk space.
   lens redecode [--all]              Re-run the decoder over previously-failed rows.
   lens verify [--repair]             Check stored-row invariants; optionally fix them.
@@ -76,12 +81,28 @@ Options:
       --repair            verify: recompute derived columns for any bad row found.
       --down              migrate: roll back rather than apply forward.
       --to <n>            migrate --down: target schema version.
+      --fix               doctor: create .env and data/, run pending migrations. Never
+                          deletes anything, never touches network settings.
+
+tail filters (the API's, by the same rules):
+  -c, --contract <id>     Follow one contract. Omit to follow every indexed contract.
+      --topic <t>         Topic prefix, positional and repeatable; '*' matches any one position.
+      --address <G…|C…>   Events mentioning this address anywhere.
+      --tx-hash <hex>     Events from one transaction.
+      --search <text>     Substring match on decoded topics and value (3+ characters).
+      --successful-only   Skip events from failed contract calls.
+      --from-ledger <n>   Replay matching history from this ledger, then keep following.
+      --from-time <t>     Replay from an ISO-8601 time or epoch seconds, then keep following.
+      --json              One full event per line (NDJSON), for piping into jq.
+      --max-events <n>    Stop after this many matching events.
   -h, --help              Show this help.
 
 Examples:
   lens doctor -c CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
   lens index  -c CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC --once
   lens seed
+  lens tail   -c CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC --topic transfer
+  lens tail   --topic transfer --json | jq .value
 `;
 
 async function main(argv: string[]): Promise<number> {
@@ -119,6 +140,15 @@ async function main(argv: string[]): Promise<number> {
       'max-events': { type: 'string' },
       fixture: { type: 'string' },
       'before-ledger': { type: 'string' },
+      fix: { type: 'boolean' },
+      topic: { type: 'string', multiple: true },
+      address: { type: 'string' },
+      'tx-hash': { type: 'string' },
+      search: { type: 'string' },
+      'successful-only': { type: 'boolean' },
+      'from-ledger': { type: 'string' },
+      'from-time': { type: 'string' },
+      json: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true, // 'export <path>', 'import <path>', 'completion <shell>'
@@ -180,9 +210,84 @@ async function main(argv: string[]): Promise<number> {
 
   switch (command) {
     case 'doctor': {
+      // Fixes run first, so the report that follows describes the result.
+      if (values.fix) process.stdout.write(formatFixes(await applyFixes(config)));
       const { text, exitCode } = formatReport(await runDoctor(config));
       process.stdout.write(text);
       return exitCode;
+    }
+
+    case 'tail': {
+      let built: ReturnType<typeof buildTailQuery>;
+      try {
+        // -c straight from the flags, not config.contractIds: LENS_CONTRACT_IDS
+        // is what the indexer watches, and may name several contracts, whereas
+        // tail follows the one you asked for or, with none, all of them.
+        built = buildTailQuery({
+          contract: values.contract,
+          topic: values.topic,
+          address: values.address,
+          txHash: values['tx-hash'],
+          search: values.search,
+          successfulOnly: values['successful-only'],
+          fromLedger: values['from-ledger'],
+          fromTime: values['from-time'],
+        });
+      } catch (error) {
+        if (error instanceof TailUsageError) {
+          process.stderr.write(`error: ${error.message}\n`);
+          return 2;
+        }
+        throw error;
+      }
+      let maxEvents: number | undefined;
+      if (values['max-events'] !== undefined) {
+        maxEvents = Number(values['max-events']);
+        if (!Number.isInteger(maxEvents) || maxEvents < 1) {
+          process.stderr.write(`error: --max-events must be a positive integer, got "${values['max-events']}"\n`);
+          return 2;
+        }
+      }
+      try {
+        await access(config.dbPath);
+      } catch {
+        // Opening a missing path would quietly create an empty database and
+        // then follow it forever, which looks exactly like a quiet contract.
+        process.stderr.write(`error: no database at ${config.dbPath}. Run \`lens index\` (or \`lens seed\`) first, or pass --db.\n`);
+        return 1;
+      }
+
+      const controller = new AbortController();
+      for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => controller.abort());
+      // `| head` closing the pipe is a normal way to stop tailing, not a crash.
+      process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+        if (error.code === 'EPIPE') controller.abort();
+      });
+
+      const color = !values.json && wantsColor(process.stdout);
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        if (!values.json) {
+          process.stderr.write(
+            `[lens] following ${built.query.contractId ?? 'every contract'} in ${config.dbPath}` +
+              `${built.fromStart ? ', from history' : ''} (Ctrl-C to stop)\n`,
+          );
+        }
+        await followEvents({
+          store,
+          query: built.query,
+          fromStart: built.fromStart,
+          signal: controller.signal,
+          maxEvents,
+          ...(values['poll-interval'] !== undefined ? { pollIntervalMs: Number(values['poll-interval']) } : {}),
+          onEvent: (event) => {
+            process.stdout.write(`${values.json ? formatEventJson(event) : formatEvent(event, { color })}\n`);
+          },
+        });
+      } finally {
+        await store.close();
+      }
+      return 0;
     }
 
     case 'index': {
@@ -482,8 +587,8 @@ function generateCompletion(shell: string): string {
   local cur prev commands options
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="doctor index seed stats prune redecode verify migrate export import backup restore spec completion"
-  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --poll-interval --once --max-events --fixture --before-ledger -h --help"
+  commands="doctor index seed stats tail prune redecode verify migrate export import backup restore spec completion"
+  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --page-size-min --page-size-max --reorg-depth --poll-interval --once --max-events --fixture --before-ledger --force --fix --topic --address --tx-hash --search --successful-only --from-ledger --from-time --json -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -516,6 +621,7 @@ _lens() {
     'index:Run the indexer pipeline'
     'seed:Load testnet events fixture'
     'stats:Print database statistics'
+    'tail:Follow events as they are indexed'
     'prune:Delete events below a ledger'
     'redecode:Re-run the decoder over failed rows'
     'verify:Check stored-row invariants'
@@ -538,6 +644,7 @@ complete -c lens -n "__fish_use_subcommand" -a doctor -d "Preflight checks"
 complete -c lens -n "__fish_use_subcommand" -a index -d "Run the indexer pipeline"
 complete -c lens -n "__fish_use_subcommand" -a seed -d "Load testnet events fixture"
 complete -c lens -n "__fish_use_subcommand" -a stats -d "Print database statistics"
+complete -c lens -n "__fish_use_subcommand" -a tail -d "Follow events as they are indexed"
 complete -c lens -n "__fish_use_subcommand" -a prune -d "Delete events below a ledger"
 complete -c lens -n "__fish_use_subcommand" -a redecode -d "Re-run the decoder over failed rows"
 complete -c lens -n "__fish_use_subcommand" -a verify -d "Check stored-row invariants"

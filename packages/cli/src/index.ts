@@ -14,3 +14,7 @@ export {
   rpcSpecSource,
 } from './specs.js';
 export type { SpecSource } from './specs.js';
+export { applyFixes, formatFixes } from './fix.js';
+export type { FixAction, FixOptions } from './fix.js';
+export { buildTailQuery, followEvents, formatEvent, formatEventJson, wantsColor, TailUsageError } from './tail.js';
+export type { TailFlags, FollowOptions } from './tail.js';
