@@ -161,4 +161,25 @@ export const POSTGRES_MIGRATIONS: PostgresMigration[] = [
       ALTER TABLE stream_state DROP COLUMN latest_ledger;
     `,
   },
+  {
+    version: 8,
+    name: 'event-deep-topics',
+    up: `
+      CREATE TABLE event_topics (
+        event_id TEXT COLLATE "C" NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        topic    TEXT NOT NULL,
+        PRIMARY KEY (event_id, position)
+      );
+      CREATE INDEX idx_event_topics_lookup ON event_topics (position, topic, event_id);
+
+      INSERT INTO event_topics (event_id, position, topic)
+      SELECT e.id, (j.ord - 1)::int,
+             CASE WHEN jsonb_typeof(j.val->'value') = 'string' THEN j.val->>'value' ELSE (j.val->'value')::text END
+        FROM events e, jsonb_array_elements(e.topics_json) WITH ORDINALITY AS j(val, ord)
+       WHERE j.ord > 4 AND jsonb_typeof(j.val->'value') IN ('string', 'number', 'boolean')
+      ON CONFLICT DO NOTHING;
+    `,
+    down: `DROP TABLE IF EXISTS event_topics;`,
+  },
 ];

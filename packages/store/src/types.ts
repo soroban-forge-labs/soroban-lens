@@ -132,6 +132,8 @@ export interface EventQuery {
   fromTime?: number | undefined;
   /** Inclusive upper bound on ledger close time, as seconds since the epoch. */
   toTime?: number | undefined;
+  /** Only events indexed strictly after this ISO timestamp (exclusive). Backed by idx_events_indexed_at. */
+  indexedAfter?: string | undefined;
   txHash?: string | undefined;
   /**
    * Match any event mentioning this address — anywhere: a topic segment

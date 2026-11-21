@@ -206,7 +206,10 @@ test('out-of-range and malformed parameters are rejected, not silently clamped',
       ['/events?fromLedger=200&toLedger=100', 'fromLedger'],
       ['/events?txHash=nothex', 'txHash'],
       ['/events?successfulOnly=maybe', 'successfulOnly'],
-      ['/events?topic=a&topic=b&topic=c&topic=d&topic=e', 'topic'],
+      ['/events?indexedAfter=notatime', 'indexedAfter'],
+      ...['/contracts', `/contracts/${SAC}/topics`].flatMap((r) =>
+        ['abc', '0', '-1', '100000'].map((l) => [`${r}?limit=${l}`, 'limit']),
+      ),
     ];
     for (const [path, parameter] of cases) {
       const { res, body } = await get(path);

@@ -301,6 +301,12 @@ export class SqliteEventStore implements EventStore {
       for (const address of extractAddresses(topicXdr)) stmt.run(eventId, address, position);
     });
     for (const address of extractAddresses(e.valueXdr)) stmt.run(eventId, address, 'value');
+    // Topics at position 4+ go to the event_topics side table (#164).
+    const deep = this.#prepared().insertDeepTopic;
+    e.topics.forEach((topic, i) => {
+      const key = i >= INDEXED_TOPIC_DEPTH ? topicKey(topic) : null;
+      if (key !== null) deep.run(eventId, i, key);
+    });
   }
 
   async getEvent(id: string): Promise<LensEvent | null> {
@@ -894,6 +900,7 @@ export class SqliteEventStore implements EventStore {
   /** Replace one event's address-index rows with a fresh extraction. */
   #refreshAddresses(eventId: string, event: LensEvent): void {
     this.#db.prepare('DELETE FROM event_addresses WHERE event_id = ?').run(eventId);
+    this.#db.prepare('DELETE FROM event_topics WHERE event_id = ?').run(eventId);
     this.#insertAddresses(eventId, event);
   }
 
@@ -1123,6 +1130,7 @@ interface Statements {
   insert: StatementSync;
   byId: StatementSync;
   insertAddress: StatementSync;
+  insertDeepTopic: StatementSync;
 }
 
 function buildStatements(db: DatabaseSync): Statements {
@@ -1140,6 +1148,9 @@ function buildStatements(db: DatabaseSync): Statements {
     byId: db.prepare('SELECT * FROM events WHERE id = ?'),
     insertAddress: db.prepare(
       'INSERT OR IGNORE INTO event_addresses (event_id, address, position) VALUES (?, ?, ?)',
+    ),
+    insertDeepTopic: db.prepare(
+      'INSERT OR IGNORE INTO event_topics (event_id, position, topic) VALUES (?, ?, ?)',
     ),
   };
 }
@@ -1258,6 +1269,10 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
     conditions.push('closed_at_unix <= ?');
     values.push(query.toTime);
   }
+  if (query.indexedAfter !== undefined) {
+    conditions.push('indexed_at > ?');
+    values.push(query.indexedAfter);
+  }
   if (query.successfulOnly === true) {
     conditions.push('in_successful_call = 1');
   }
@@ -1269,7 +1284,12 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
   query.topics?.forEach((topic, i) => {
     if (topic === null || topic === undefined) return;
     const column = columns[i];
-    if (!column) return;
+    if (!column) {
+      // Position 4+: the event_topics side table (#164).
+      conditions.push('id IN (SELECT event_id FROM event_topics WHERE position = ? AND topic = ?)');
+      values.push(i, topic);
+      return;
+    }
     conditions.push(`${column} = ?`);
     values.push(topic);
   });

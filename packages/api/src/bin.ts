@@ -57,7 +57,12 @@ if (values.help) {
 const log = createLogger({ prefix: '[api]' });
 
 const dbPath = values.db ?? process.env.LENS_DB_PATH ?? './data/lens.db';
-const port = Number(values.port ?? process.env.LENS_API_PORT ?? 8080);
+const rawPort = values.port ?? process.env.LENS_API_PORT ?? '8080';
+const port = Number(rawPort);
+if (!/^\d+$/.test(rawPort) || !Number.isInteger(port) || port < 1 || port > 65535) {
+  process.stderr.write(`soroban-lens-api: --port must be an integer from 1 to 65535, got "${rawPort}".\n`);
+  process.exit(2);
+}
 const host = values.host ?? process.env.LENS_API_HOST ?? '0.0.0.0';
 
 const shutdownTimeoutMs = Number(

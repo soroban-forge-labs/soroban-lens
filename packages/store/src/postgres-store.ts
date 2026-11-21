@@ -312,6 +312,14 @@ export class PostgresEventStore implements EventStore {
       for (const address of extractAddresses(topicXdr)) await insert(address, `topic${i}`);
     }
     for (const address of extractAddresses(e.valueXdr)) await insert(address, 'value');
+    for (const [i, topic] of e.topics.entries()) {
+      const key = i >= 4 ? topicKey(topic) : null;
+      if (key === null) continue;
+      await db.query(
+        'INSERT INTO event_topics (event_id, position, topic) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+        [eventId, i, key],
+      );
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -761,6 +769,7 @@ export class PostgresEventStore implements EventStore {
       ],
     );
     await db.query('DELETE FROM event_addresses WHERE event_id = $1', [raw.id]);
+    await db.query('DELETE FROM event_topics WHERE event_id = $1', [raw.id]);
     await this.#insertAddresses(db, raw.id, event);
   }
 
@@ -1012,13 +1021,19 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
   if (query.toLedger !== undefined) conditions.push(`ledger <= ${param(query.toLedger)}`);
   if (query.fromTime !== undefined) conditions.push(`closed_at_unix >= ${param(query.fromTime)}`);
   if (query.toTime !== undefined) conditions.push(`closed_at_unix <= ${param(query.toTime)}`);
+  if (query.indexedAfter !== undefined) conditions.push(`indexed_at > ${param(query.indexedAfter)}`);
   if (query.successfulOnly === true) conditions.push('in_successful_call = TRUE');
 
   const columns = ['topic0', 'topic1', 'topic2', 'topic3'] as const;
   query.topics?.forEach((topic, i) => {
     if (topic === null || topic === undefined) return;
     const column = columns[i];
-    if (!column) return;
+    if (!column) {
+      conditions.push(
+        `id IN (SELECT event_id FROM event_topics WHERE position = ${param(i)} AND topic = ${param(topic)})`,
+      );
+      return;
+    }
     conditions.push(`${column} = ${param(topic)}`);
   });
 
