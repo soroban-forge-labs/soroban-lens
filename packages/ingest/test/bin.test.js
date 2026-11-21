@@ -61,7 +61,7 @@ test('more than four --topic segments is rejected with the reason', async () => 
     '--topic', 'a', '--topic', 'b', '--topic', 'c', '--topic', 'd', '--topic', 'e',
   ]);
   assert.equal(code, 2);
-  assert.match(stderr, /at most 4 --topic segments/);
+  assert.match(stderr, /at most 4 segments per topic filter/);
 });
 
 // ── #7 --rpc-header ──────────────────────────────────────────────────────────
