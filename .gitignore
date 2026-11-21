@@ -33,3 +33,5 @@ bench/results/
 crash.log
 *.tfvars
 *.tfvars.json
+site/dist/
+site/.vitepress/cache/
