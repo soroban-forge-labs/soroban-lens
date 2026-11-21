@@ -17,9 +17,12 @@ import {
   type EventStore,
   type LensEvent,
   type Logger,
+  type StreamState,
 } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
 import { MIN_TOPIC_COLUMNS, eventCsvHeader, eventCsvRow, wantsCsv } from './csv.js';
+import { DEFAULT_NDJSON_MAX_ROWS, NDJSON_CONTENT_TYPE, trailerLine, wantsNdjson } from './ndjson.js';
+import { wantsProblemJson, PROBLEM_CONTENT_TYPE } from './errors.js';
 import {
   assertAddress,
   assertContractId,
@@ -67,6 +70,11 @@ export interface ApiServerOptions {
    * behind a proxy that sets it; the header is otherwise client-controlled.
    */
   trustProxy?: boolean;
+  /**
+   * Most events one NDJSON response may carry (#180). Past it the stream stops
+   * and its trailer line says `capped: true`. Defaults to 1,000,000.
+   */
+  ndjsonMaxRows?: number;
   /** Tuning for `GET /events/stream` (#42). */
   stream?: EventStreamOptions;
   /** Optional GraphQL endpoint at /graphql. Disabled unless `enabled: true` (#60). */
@@ -107,7 +115,10 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
  * preparing the export is still an ordinary JSON 500 rather than a truncated 200.
  */
 interface StreamedCsv {
-  filename: string;
+  /** Sent as an attachment name; omitted for formats that are not downloads. */
+  filename?: string;
+  /** Defaults to CSV. */
+  contentType?: string;
   open: () => Promise<AsyncIterable<string>>;
 }
 
@@ -254,6 +265,65 @@ function varyHeader(res: ServerResponse, value: string): string {
   return existing ? `${String(existing)}, ${value}` : value;
 }
 
+/** Whether this request wants NDJSON: an explicit `?format=` always wins over `Accept`. */
+function negotiatesNdjson(query: URLSearchParams, accept: string | string[] | undefined): boolean {
+  return !query.get('format') && wantsNdjson(accept);
+}
+
+/**
+ * Stream a filtered export as NDJSON (#180): keyset pages of `CSV_PAGE_SIZE`
+ * rows, each written and dropped before the next is read, so memory stays flat
+ * however long the range. One row past the cap is read to learn whether the
+ * cap actually truncated anything, and is never written.
+ */
+function ndjsonExport(
+  store: EventStore,
+  specs: SpecCache,
+  fields: ReturnType<typeof parseFields>,
+  query: EventQuery,
+  cap: number,
+): StreamedCsv {
+  return {
+    contentType: `${NDJSON_CONTENT_TYPE}; charset=utf-8`,
+    open: async () =>
+      (async function* () {
+        const wanted = Math.min(query.limit ?? Number.POSITIVE_INFINITY, cap + 1);
+        let rows = 0;
+        let capped = false;
+        outer: for await (const page of eachEventPage(store, { ...query, limit: wanted })) {
+          for (const event of selectFields(await specs.annotate(page), fields)) {
+            if (rows >= cap) {
+              capped = true;
+              break outer;
+            }
+            rows += 1;
+            yield `${JSON.stringify(event)}\n`;
+          }
+        }
+        yield trailerLine(rows, capped, cap);
+      })(),
+  };
+}
+
+/**
+ * A stream's state plus how far behind the network it was when last sampled
+ * (#181). Both numbers come from what the indexer saved, never from the RPC:
+ * `lagLedgers` is as of the sample, and `sampleAgeSeconds` says how stale that
+ * sample is — so a stopped indexer shows a growing age rather than a frozen
+ * "0 behind". Both are null for rows saved before the sample existed.
+ */
+function withLag(state: StreamState, now: number): StreamState & { lagLedgers: number | null; sampleAgeSeconds: number | null } {
+  if (state.latestLedger === undefined || state.latestLedgerSeenAt === undefined) {
+    return { ...state, lagLedgers: null, sampleAgeSeconds: null };
+  }
+  const seen = Date.parse(state.latestLedgerSeenAt);
+  return {
+    ...state,
+    lagLedgers: Math.max(0, state.latestLedger - state.ledger),
+    sampleAgeSeconds: Number.isFinite(seen) ? Math.max(0, Math.round((now - seen) / 1000)) : null,
+  };
+}
+
 const routes: Route[] = [
   {
     // Liveness plus a real write probe against the store, so a read-only volume
@@ -296,7 +366,8 @@ const routes: Route[] = [
     pattern: /^\/status$/,
     handler: async ({ store }) => {
       const [stats, streams] = await Promise.all([store.getStats(), store.listStreamStates()]);
-      return { body: { ...stats, streams } };
+      const now = Date.now();
+      return { body: { ...stats, streams: streams.map((s) => withLag(s, now)) } };
     },
   },
   {
@@ -377,10 +448,15 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/contracts\/([^/]+)\/events$/,
     etag: true,
-    handler: async ({ params, query, accept, store, specs }) => {
+    handler: async ({ params, query, accept, store, specs, options }) => {
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
       const fields = parseFields(query);
       const eventQuery = { ...parseEventQuery(query), contractId };
+      if (negotiatesNdjson(query, accept)) {
+        return {
+          stream: ndjsonExport(store, specs, fields, eventQuery, options.ndjsonMaxRows ?? DEFAULT_NDJSON_MAX_ROWS),
+        };
+      }
       if (wantsCsv(query, accept)) {
         return { stream: csvExport(store, eventQuery, `${contractId}-events.csv`) };
       }
@@ -492,8 +568,10 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/events$/,
     etag: true,
-    handler: async ({ query, accept, store, specs }) => {
+    handler: async ({ query, accept, store, specs, options }) => {
       const csv = wantsCsv(query, accept);
+      const ndjson = !csv && negotiatesNdjson(query, accept);
+      const ndjsonCap = options.ndjsonMaxRows ?? DEFAULT_NDJSON_MAX_ROWS;
       // ?ids= is a batch lookup, not a filter: it resolves a known list in one
       // round trip rather than N. It short-circuits the filter path entirely,
       // since mixing "these exact events" with "events matching X" has no
@@ -502,6 +580,22 @@ const routes: Route[] = [
       const ids = parseIds(query);
       if (ids) {
         const found = await Promise.all(ids.map((id) => store.getEvent(id)));
+        if (ndjson) {
+          const events = selectFields(
+            await specs.annotate(found.filter((e): e is NonNullable<typeof e> => e !== null)),
+            fields,
+          );
+          return {
+            stream: {
+              contentType: `${NDJSON_CONTENT_TYPE}; charset=utf-8`,
+              open: async () =>
+                (async function* () {
+                  for (const event of events) yield `${JSON.stringify(event)}\n`;
+                  yield trailerLine(events.length, false, ndjsonCap);
+                })(),
+            },
+          };
+        }
         if (csv) {
           const events = found.filter((e): e is NonNullable<typeof e> => e !== null);
           return { stream: { filename: 'events.csv', open: async () => csvRows(events, topicColumnsOf(events)) } };
@@ -520,6 +614,7 @@ const routes: Route[] = [
       }
       const eventQuery = parseEventQuery(query);
       if (csv) return { stream: csvExport(store, eventQuery, 'events.csv') };
+      if (ndjson) return { stream: ndjsonExport(store, specs, fields, eventQuery, ndjsonCap) };
       const page = await store.queryEvents(eventQuery);
       return { body: { ...page, events: selectFields(await specs.annotate(page.events), fields) } };
     },
@@ -978,7 +1073,11 @@ export function createApiServer(options: ApiServerOptions): Server {
             store,
             path,
             url.searchParams,
-            wantsCsv(url.searchParams, req.headers.accept) ? 'csv' : 'json',
+            wantsCsv(url.searchParams, req.headers.accept)
+              ? 'csv'
+              : negotiatesNdjson(url.searchParams, req.headers.accept)
+                ? 'ndjson'
+                : 'json',
           )
         : undefined;
       if (etag && matchesEntityTag(req.headers['if-none-match'], etag)) {
@@ -1009,11 +1108,11 @@ export function createApiServer(options: ApiServerOptions): Server {
       });
 
       if ('stream' in result) {
-        await sendCsv(res, result.stream, isHead, req.headers['accept-encoding']);
+        await sendStream(res, result.stream, isHead, req.headers['accept-encoding']);
         const durationMs = Date.now() - started;
         log.info(
           'request_handled',
-          `${req.method} ${url.pathname}${url.search} -> 200 csv (${durationMs}ms)`,
+          `${req.method} ${url.pathname}${url.search} -> 200 stream (${durationMs}ms)`,
           { method: req.method, path: url.pathname, status: 200, durationMs, requestId },
         );
         return;
@@ -1077,7 +1176,15 @@ export function createApiServer(options: ApiServerOptions): Server {
           { method: req.method, path: url.pathname, status: apiError.status, requestId },
         );
       }
-      send(res, apiError.status, apiError.toBody(requestId), undefined, isHead, req.headers['accept-encoding']);
+      const problem = wantsProblemJson(req.headers.accept);
+      send(
+        res,
+        apiError.status,
+        problem ? apiError.toProblem(requestId) : apiError.toBody(requestId),
+        problem ? PROBLEM_CONTENT_TYPE : undefined,
+        isHead,
+        req.headers['accept-encoding'],
+      );
     }
   }
 }
@@ -1098,13 +1205,13 @@ function pickEncoding(acceptEncoding: string | string[] | undefined): 'gzip' | '
 }
 
 /**
- * Write a streamed CSV body with backpressure, gzipped when the client allows.
+ * Write a streamed CSV or NDJSON body with backpressure, gzipped when the client allows.
  *
  * No Content-Length — the size is unknown until the last page — so Node uses
  * chunked transfer. HEAD gets the headers a GET would, without reading the
  * store at all: scanning a large export to answer a HEAD would defeat its point.
  */
-async function sendCsv(
+async function sendStream(
   res: ServerResponse,
   csv: StreamedCsv,
   headOnly: boolean,
@@ -1115,8 +1222,8 @@ async function sendCsv(
   const encoding = pickEncoding(acceptEncoding);
 
   res.writeHead(200, {
-    'Content-Type': 'text/csv; charset=utf-8',
-    'Content-Disposition': `attachment; filename="${csv.filename}"`,
+    'Content-Type': csv.contentType ?? 'text/csv; charset=utf-8',
+    ...(csv.filename ? { 'Content-Disposition': `attachment; filename="${csv.filename}"` } : {}),
     ...(encoding ? { 'Content-Encoding': encoding } : {}),
     Vary: varyHeader(res, 'Accept, Accept-Encoding'),
     'Cache-Control': 'no-store',

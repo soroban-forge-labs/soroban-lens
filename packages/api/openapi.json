@@ -273,6 +273,12 @@
                   "type": "string",
                   "description": "RFC 4180 CSV, streamed (chunked transfer, no Content-Length). Header row: id, contractId, type, ledger, ledgerClosedAt, txHash, transactionIndex, operationIndex, inSuccessfulContractCall, topic0..topicN, valueType, value, decodeError."
                 }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string",
+                  "description": "One event per line, then a final {\"trailer\":{rows,capped,cap}} line. See NdjsonTrailer."
+                }
               }
             },
             "headers": {
@@ -296,6 +302,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -395,6 +406,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
               }
             }
           },
@@ -443,6 +459,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -620,6 +641,12 @@
                 "schema": {
                   "type": "string",
                   "description": "RFC 4180 CSV, streamed (chunked transfer, no Content-Length). Header row: id, contractId, type, ledger, ledgerClosedAt, txHash, transactionIndex, operationIndex, inSuccessfulContractCall, topic0..topicN, valueType, value, decodeError."
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string",
+                  "description": "One event per line, then a final {\"trailer\":{rows,capped,cap}} line. See NdjsonTrailer."
                 }
               }
             },
@@ -904,6 +931,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -1614,6 +1646,11 @@
             "schema": {
               "$ref": "#/components/schemas/Error"
             }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
           }
         }
       },
@@ -1623,6 +1660,11 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/Error"
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
             }
           }
         }
@@ -1642,6 +1684,11 @@
             "schema": {
               "$ref": "#/components/schemas/Error"
             }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
           }
         }
       },
@@ -1659,6 +1706,11 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/Error"
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
             }
           }
         }
@@ -1678,6 +1730,11 @@
             "schema": {
               "$ref": "#/components/schemas/Error"
             }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
           }
         }
       },
@@ -1687,6 +1744,11 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/Error"
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
             }
           }
         }
@@ -2126,6 +2188,34 @@
           "updatedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "latestLedger": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The RPC's latest ledger when the indexer last saved this stream. Null before the first sample."
+          },
+          "latestLedgerSeenAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "lagLedgers": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "latestLedger minus ledger, as of the sample. Null without a sample."
+          },
+          "sampleAgeSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Seconds since the sample was taken. Grows while the indexer is stopped, so a stale lagLedgers is visible as stale."
           }
         }
       },
@@ -2521,6 +2611,71 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ActivityBucket"
+            }
+          }
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "description": "RFC 9457 problem details, served when the client sends Accept: application/problem+json.",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "parameter": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      },
+      "NdjsonTrailer": {
+        "type": "object",
+        "required": [
+          "trailer"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "trailer": {
+            "type": "object",
+            "required": [
+              "rows",
+              "capped",
+              "cap"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "rows": {
+                "type": "integer"
+              },
+              "capped": {
+                "type": "boolean",
+                "description": "True when more events matched than the row cap allowed."
+              },
+              "cap": {
+                "type": "integer"
+              }
             }
           }
         }

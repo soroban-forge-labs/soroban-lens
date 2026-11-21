@@ -30,7 +30,11 @@ export interface RetryOptions {
 }
 
 /** Bounded error kind, shared by the retry decision and `lens_rpc_errors_total`. */
-export type RpcErrorKind = 'rate_limit' | 'http' | 'timeout' | 'json_rpc' | 'transport';
+/**
+ * `http_4xx` and `http_5xx` are split (#136): a 401 from a mistyped provider key
+ * needs a config fix, a 503 needs waiting out, and one series hid which it was.
+ */
+export type RpcErrorKind = 'rate_limit' | 'http_4xx' | 'http_5xx' | 'timeout' | 'json_rpc' | 'transport';
 
 export interface RpcErrorClass {
   kind: RpcErrorKind;
@@ -58,7 +62,7 @@ export function classifyRpcError(error: unknown): RpcErrorClass {
 
   if (status === 429) return { kind: 'rate_limit', retryable: true };
   if (status !== undefined) {
-    return { kind: 'http', retryable: status >= 500 || status === 408 };
+    return { kind: status >= 400 && status < 500 ? 'http_4xx' : 'http_5xx', retryable: status >= 500 || status === 408 };
   }
   if (code === 'ETIMEDOUT' || code === 'ECONNABORTED') return { kind: 'timeout', retryable: true };
   if (typeof code === 'number') {

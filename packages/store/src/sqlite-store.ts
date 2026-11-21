@@ -650,26 +650,36 @@ export class SqliteEventStore implements EventStore {
   async saveStreamState(state: StreamState): Promise<void> {
     this.#db
       .prepare(
-        `INSERT INTO stream_state (key, cursor, ledger, updated_at) VALUES (?, ?, ?, ?)
+        `INSERT INTO stream_state (key, cursor, ledger, updated_at, latest_ledger, latest_ledger_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET cursor = excluded.cursor,
                                         ledger = excluded.ledger,
-                                        updated_at = excluded.updated_at`,
+                                        updated_at = excluded.updated_at,
+                                        latest_ledger = excluded.latest_ledger,
+                                        latest_ledger_seen_at = excluded.latest_ledger_seen_at`,
       )
-      .run(state.key, state.cursor, state.ledger, state.updatedAt);
+      .run(
+        state.key,
+        state.cursor,
+        state.ledger,
+        state.updatedAt,
+        state.latestLedger ?? null,
+        state.latestLedgerSeenAt ?? null,
+      );
   }
 
   async loadStreamState(key: string): Promise<StreamState | null> {
     const row = this.#db.prepare('SELECT * FROM stream_state WHERE key = ?').get(key) as
-      | { key: string; cursor: string; ledger: number; updated_at: string }
+      | StreamStateRow
       | undefined;
-    return row ? { key: row.key, cursor: row.cursor, ledger: row.ledger, updatedAt: row.updated_at } : null;
+    return row ? streamStateOf(row) : null;
   }
 
   async listStreamStates(): Promise<StreamState[]> {
     const rows = this.#db
       .prepare('SELECT * FROM stream_state ORDER BY key')
-      .all() as { key: string; cursor: string; ledger: number; updated_at: string }[];
-    return rows.map((r) => ({ key: r.key, cursor: r.cursor, ledger: r.ledger, updatedAt: r.updated_at }));
+      .all() as unknown as StreamStateRow[];
+    return rows.map(streamStateOf);
   }
 
   /** Read-only. Serves the API's `/health`, so it must not take the write lock. */
@@ -1382,5 +1392,25 @@ function specSummary(row: Omit<SpecRow, 'entries_xdr'>): Omit<ContractSpecRecord
     eventCount: row.event_count,
     ...(row.error !== null ? { error: row.error } : {}),
     fetchedAt: row.fetched_at,
+  };
+}
+
+interface StreamStateRow {
+  key: string;
+  cursor: string;
+  ledger: number;
+  updated_at: string;
+  latest_ledger: number | null;
+  latest_ledger_seen_at: string | null;
+}
+
+function streamStateOf(row: StreamStateRow): StreamState {
+  return {
+    key: row.key,
+    cursor: row.cursor,
+    ledger: row.ledger,
+    updatedAt: row.updated_at,
+    ...(row.latest_ledger !== null ? { latestLedger: row.latest_ledger } : {}),
+    ...(row.latest_ledger_seen_at !== null ? { latestLedgerSeenAt: row.latest_ledger_seen_at } : {}),
   };
 }
