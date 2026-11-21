@@ -57,20 +57,36 @@ export interface PollerProgress {
    * for a human-readable "about a minute behind", never for correctness.
    */
   lagSeconds: number;
+  /**
+   * Measured lag (#134): seconds between the last event's ledger close time
+   * and now. Null on an empty page, where no close time is known — use
+   * `lagSeconds` then.
+   */
+  measuredLagSeconds: number | null;
 }
 
 /**
  * One definition of lag, so the CLI, the metrics endpoint (#1) and the API
  * cannot each compute a slightly different number.
  */
-export function ingestionLag(ledger: number, latestLedger: number): {
+export function ingestionLag(
+  ledger: number,
+  latestLedger: number,
+  lastClosedAt?: string,
+  now: number = Date.now(),
+): {
   lagLedgers: number;
   lagSeconds: number;
+  measuredLagSeconds: number | null;
 } {
   // Clamped at zero: a node can report a latestLedger behind the page it just
   // served us, and negative lag would be nonsense in a gauge.
   const lagLedgers = Math.max(0, latestLedger - ledger);
-  return { lagLedgers, lagSeconds: lagLedgers * APPROX_LEDGER_SECONDS };
+  // Every event carries its ledger's close time, so the real age of the last
+  // event is free; the 5 s estimate is only the fallback for empty pages.
+  const closed = lastClosedAt ? Date.parse(lastClosedAt) : Number.NaN;
+  const measuredLagSeconds = Number.isNaN(closed) ? null : Math.max(0, Math.round((now - closed) / 1000));
+  return { lagLedgers, lagSeconds: lagLedgers * APPROX_LEDGER_SECONDS, measuredLagSeconds };
 }
 
 /**
@@ -352,7 +368,7 @@ export class EventPoller {
             latestLedger: batch.latestLedger,
             caughtUp,
             reachedEndLedger,
-            ...ingestionLag(lastLedger, batch.latestLedger),
+            ...ingestionLag(lastLedger, batch.latestLedger, batch.events.at(-1)?.ledgerClosedAt, this.#now()),
           },
         };
       }
