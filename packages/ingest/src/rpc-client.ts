@@ -238,7 +238,9 @@ function toRawEvent(e: rpc.Api.RawEventResponse): RawEvent {
     txHash: e.txHash,
     transactionIndex: e.transactionIndex,
     operationIndex: e.operationIndex,
-    inSuccessfulContractCall: e.inSuccessfulContractCall,
+    // stellar-sdk 17.4 makes this optional; RPC only returns events from
+    // successful calls, so a missing value means true.
+    inSuccessfulContractCall: e.inSuccessfulContractCall ?? true,
   };
 }
 
