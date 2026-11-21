@@ -1,5 +1,5 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { mkdirSync, statSync, createWriteStream } from 'node:fs';
+import { existsSync, mkdirSync, statSync, createWriteStream } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { createReadStream } from 'node:fs';
@@ -938,6 +938,18 @@ export class SqliteEventStore implements EventStore {
       this.#db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  /**
+   * Write a complete, consistent copy of the database to `destPath` (#91):
+   * events, stream cursors, contract specs and schema, so restoring it resumes
+   * indexing exactly where the backup was taken. Safe while the indexer runs —
+   * `VACUUM INTO` reads one snapshot — and refuses to overwrite an existing file.
+   */
+  async backupTo(destPath: string): Promise<void> {
+    if (this.#path === ':memory:') throw new Error('an in-memory database has nothing on disk to back up');
+    if (existsSync(destPath)) throw new Error(`${destPath} already exists; refusing to overwrite it`);
+    this.#db.prepare('VACUUM INTO ?').run(destPath);
   }
 
   async exportSnapshot(destPath: string): Promise<number> {

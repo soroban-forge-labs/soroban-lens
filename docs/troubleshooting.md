@@ -188,3 +188,7 @@ rm -rf data/
 ```
 
 The cursor lives in the same database, so this re-indexes from scratch.
+
+Anything older than the RPC's retention window (about seven days) cannot be
+re-indexed. Take a `lens backup` first if you might want it back. See
+[backup.md](./backup.md).
