@@ -14,6 +14,7 @@ import type { ContractSpecRecord, RawEventInput } from '@soroban-lens/store';
 import { resolveConfig } from './config.js';
 import { formatReport, runDoctor } from './doctor.js';
 import { runIndexer } from './indexer.js';
+import { restoreBackup } from './backup.js';
 import { assertContractIds, loadContractIdsFromFile, ContractFileParseError } from '@soroban-lens/ingest';
 import {
   describeSpecRecord,
@@ -36,6 +37,8 @@ Usage:
   lens verify [--repair]             Check stored-row invariants; optionally fix them.
   lens migrate --down --to <n>       Roll back migrations above version <n>.
   lens export <path>                 Write every event as NDJSON, backend-portable.
+  lens backup <path>                 Consistent copy of the whole database, safe while indexing.
+  lens restore <path> [--force]      Replace the database with a backup (stop the indexer first).
   lens import <path>                 Load an NDJSON snapshot written by 'lens export'.
   lens spec [list]                   Show which contracts have a spec for typed decoding.
   lens spec fetch -c <id>            Look a contract's spec up on-chain now (refreshes it).
@@ -104,6 +107,7 @@ async function main(argv: string[]): Promise<number> {
       once: { type: 'boolean' },
       all: { type: 'boolean' },
       repair: { type: 'boolean' },
+      force: { type: 'boolean' },
       down: { type: 'boolean' },
       to: { type: 'string' },
       'max-events': { type: 'string' },
@@ -335,6 +339,37 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'backup': {
+      const path = positionals[0];
+      if (!path) {
+        process.stderr.write('error: lens backup requires a destination path\n');
+        return 2;
+      }
+      const store = new SqliteEventStore({ path: config.dbPath });
+      try {
+        await store.backupTo(path);
+        const stats = await store.getStats();
+        process.stderr.write(`[lens] backed up ${config.dbPath} to ${path}: ${stats.eventCount} event(s), schema v${stats.schemaVersion}\n`);
+      } catch (error) {
+        process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
+        return 1;
+      } finally {
+        await store.close();
+      }
+      return 0;
+    }
+
+    case 'restore': {
+      const path = positionals[0];
+      if (!path) {
+        process.stderr.write('error: lens restore requires a backup path\n');
+        return 2;
+      }
+      const result = await restoreBackup(path, config.dbPath, { force: values.force ?? false });
+      process.stderr.write(result.ok ? `[lens] ${result.message}\n` : `error: ${result.message}\n`);
+      return result.ok ? 0 : 1;
+    }
+
     case 'export': {
       const path = positionals[0];
       if (!path) {
@@ -438,7 +473,7 @@ function generateCompletion(shell: string): string {
   local cur prev commands options
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="doctor index seed stats prune redecode verify migrate export import spec completion"
+  commands="doctor index seed stats prune redecode verify migrate export import backup restore spec completion"
   options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --poll-interval --once --max-events --fixture --before-ledger -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
