@@ -11,6 +11,7 @@ import {
   DEFAULT_MAX_QUERY_LIMIT,
   LATEST_SCHEMA_VERSION,
   ContractTypedDecoder,
+  decodeContractCursor,
   SpecCache,
   type EventQuery,
   type EventStore,
@@ -20,7 +21,9 @@ import {
 import { ApiError } from './errors.js';
 import { MIN_TOPIC_COLUMNS, eventCsvHeader, eventCsvRow, wantsCsv } from './csv.js';
 import {
+  assertAddress,
   assertContractId,
+  assertTxHash,
   parseActivityQuery,
   parseEventQuery,
   parseFields,
@@ -35,7 +38,7 @@ import { EventStreamHub, type EventStreamOptions } from './stream.js';
 
 export interface ApiServerOptions {
   store: EventStore;
-  /** Allowed CORS origin. Defaults to "*" — the API is read-only and unauthenticated. */
+  /** Allowed CORS origin(s), comma-separated. Defaults to "*" — the API is read-only and unauthenticated. */
   corsOrigin?: string;
   /** Build/version string reported by /health. */
   version?: string;
@@ -245,6 +248,12 @@ function csvExport(store: EventStore, query: EventQuery, filename: string): Stre
   };
 }
 
+/** Merge into any `Vary` already set (CORS sets `Origin`), since writeHead would replace it. */
+function varyHeader(res: ServerResponse, value: string): string {
+  const existing = res.getHeader('Vary');
+  return existing ? `${String(existing)}, ${value}` : value;
+}
+
 const routes: Route[] = [
   {
     // Liveness plus a real write probe against the store, so a read-only volume
@@ -295,7 +304,73 @@ const routes: Route[] = [
     pattern: /^\/contracts$/,
     handler: async ({ store, query }) => {
       const limit = query.get('limit') ? Number(query.get('limit')) : undefined;
-      return { body: { contracts: await store.listContracts(limit) } };
+      const cursor = query.get('cursor') || undefined;
+      if (cursor) {
+        try {
+          decodeContractCursor(cursor);
+        } catch {
+          throw ApiError.badRequest('"cursor" is not a valid contracts cursor.', 'cursor');
+        }
+      }
+      const page = await store.listContractsPage(limit, cursor);
+      return { body: { contracts: page.contracts, nextCursor: page.nextCursor } };
+    },
+  },
+  {
+    // Everything one transaction emitted, in the order it happened (#168).
+    method: 'GET',
+    pattern: /^\/transactions\/([^/]+)$/,
+    handler: async ({ params, store, specs }) => {
+      const txHash = assertTxHash(decodeURIComponent(params[0] as string));
+      // Event ids sort as (ledger, txIndex, opIndex, eventIndex), so ascending
+      // id order is operation index then event id.
+      const events: LensEvent[] = [];
+      let cursor: string | undefined;
+      for (;;) {
+        const page = await store.queryEvents({
+          txHash,
+          order: 'asc',
+          limit: MAX_QUERY_LIMIT,
+          skipTotal: true,
+          ...(cursor ? { cursor } : {}),
+        });
+        events.push(...page.events);
+        if (!page.nextCursor) break;
+        cursor = page.nextCursor;
+      }
+      const first = events[0];
+      if (!first) throw ApiError.notFound(`No indexed events for transaction "${txHash}".`);
+      return {
+        body: {
+          txHash: first.txHash,
+          summary: {
+            ledger: first.ledger,
+            closedAt: first.ledgerClosedAt,
+            contracts: [...new Set(events.map((e) => e.contractId))],
+            eventCount: events.length,
+            succeeded: events.every((e) => e.inSuccessfulContractCall),
+          },
+          events: await specs.annotate(events),
+        },
+      };
+    },
+  },
+  {
+    // First question about an address: which contracts, how often, when (#169).
+    method: 'GET',
+    pattern: /^\/addresses\/([^/]+)$/,
+    handler: async ({ params, store }) => {
+      const address = assertAddress(decodeURIComponent(params[0] as string));
+      const contracts = await store.summarizeAddress(address);
+      return {
+        body: {
+          address,
+          eventCount: contracts.reduce((n, c) => n + c.eventCount, 0),
+          firstLedger: contracts.length ? Math.min(...contracts.map((c) => c.firstLedger)) : null,
+          lastLedger: contracts.length ? Math.max(...contracts.map((c) => c.lastLedger)) : null,
+          contracts,
+        },
+      };
     },
   },
   {
@@ -764,6 +839,9 @@ export function createApiServer(options: ApiServerOptions): Server {
   const { store } = options;
   const log = options.log ?? { debug() {}, info() {}, warn() {}, error() {} };
   const corsOrigin = options.corsOrigin ?? '*';
+  // A comma-separated list: echo the request's Origin only when it is listed.
+  const corsAllowed = corsOrigin.split(',').map((o) => o.trim()).filter(Boolean);
+  const corsAny = corsAllowed.includes('*');
   const limiter = options.rateLimit ? new TokenBucketLimiter(options.rateLimit) : undefined;
   const auth = new ApiKeyAuthenticator(options.apiKeys ?? []);
   const trustProxy = options.trustProxy ?? false;
@@ -815,7 +893,13 @@ export function createApiServer(options: ApiServerOptions): Server {
       (Array.isArray(inbound) ? inbound[0] : inbound)?.trim().slice(0, 200) || randomUUID();
     res.setHeader('X-Request-Id', requestId);
 
-    res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    if (corsAny) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    } else {
+      res.setHeader('Vary', 'Origin');
+      const origin = req.headers.origin;
+      if (origin && corsAllowed.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
+    }
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, DELETE, OPTIONS');
     res.setHeader(
       'Access-Control-Allow-Headers',
@@ -898,7 +982,7 @@ export function createApiServer(options: ApiServerOptions): Server {
           )
         : undefined;
       if (etag && matchesEntityTag(req.headers['if-none-match'], etag)) {
-        res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache', Vary: 'Accept, Accept-Encoding' });
+        res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache', Vary: varyHeader(res, 'Accept, Accept-Encoding') });
         res.end();
         log.info(
           'request_handled',
@@ -1034,7 +1118,7 @@ async function sendCsv(
     'Content-Type': 'text/csv; charset=utf-8',
     'Content-Disposition': `attachment; filename="${csv.filename}"`,
     ...(encoding ? { 'Content-Encoding': encoding } : {}),
-    Vary: 'Accept, Accept-Encoding',
+    Vary: varyHeader(res, 'Accept, Accept-Encoding'),
     'Cache-Control': 'no-store',
   });
   if (!chunks) {
@@ -1076,7 +1160,7 @@ function send(
     // header, or it can serve a gzipped response to a client that never asked
     // for one (or vice versa).
     // Accept too: the event-list routes negotiate JSON versus CSV on it.
-    Vary: 'Accept, Accept-Encoding',
+    Vary: varyHeader(res, 'Accept, Accept-Encoding'),
     ...(validator
       ? { ETag: validator.etag, 'Cache-Control': 'no-cache' }
       : { 'Cache-Control': 'no-store' }),

@@ -1986,3 +1986,90 @@ test('a JSON ETag never validates a CSV request for the same URL', async () => {
     await csv.text();
   });
 });
+
+test('GET /transactions/{hash} returns the transaction events in order with a summary', async () => {
+  await withServer(async ({ get, store }) => {
+    const all = (await store.queryEvents({ limit: MAX_QUERY_LIMIT, order: 'asc' })).events;
+    const hash = all[0].txHash;
+    const expected = all.filter((e) => e.txHash === hash);
+    const { res, body } = await get(`/transactions/${hash}`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events.map((e) => e.id), expected.map((e) => e.id));
+    assert.equal(body.summary.ledger, expected[0].ledger);
+    assert.equal(body.summary.eventCount, expected.length);
+    assert.equal(body.summary.succeeded, expected.every((e) => e.inSuccessfulContractCall));
+    assert.deepEqual(body.summary.contracts, [...new Set(expected.map((e) => e.contractId))]);
+    assert.equal((await get(`/transactions/${'0'.repeat(64)}`)).res.status, 404);
+    assert.equal((await get('/transactions/nope')).res.status, 400);
+  });
+});
+
+test('GET /addresses/{address} counts per contract; unseen address is empty', async () => {
+  await withServer(async ({ get, store }) => {
+    const all = (await store.queryEvents({ limit: MAX_QUERY_LIMIT })).events;
+    const freq = new Map();
+    for (const e of all) {
+      for (const t of [...e.topics, e.value]) {
+        if (typeof t.value === 'string' && /^[GC][A-Z2-7]{55}$/.test(t.value)) freq.set(t.value, (freq.get(t.value) ?? 0) + 1);
+      }
+    }
+    const [busiest] = [...freq.entries()].sort((a, b) => b[1] - a[1])[0];
+    const { res, body } = await get(`/addresses/${busiest}`);
+    assert.equal(res.status, 200);
+    const mentioned = (await get(`/events?address=${busiest}&limit=1000`)).body.events;
+    assert.equal(body.eventCount, mentioned.length);
+    for (const c of body.contracts) {
+      const mine = mentioned.filter((e) => e.contractId === c.contractId);
+      assert.equal(c.eventCount, mine.length);
+      assert.equal(c.firstLedger, Math.min(...mine.map((e) => e.ledger)));
+      assert.equal(c.lastLedger, Math.max(...mine.map((e) => e.ledger)));
+    }
+    const unseen = await get(`/addresses/G${'A'.repeat(55)}`);
+    assert.equal(unseen.res.status, 200);
+    assert.deepEqual(unseen.body.contracts, []);
+    assert.equal((await get('/addresses/bogus')).res.status, 400);
+  });
+});
+
+test('GET /contracts pages through every contract exactly once, even while events arrive', async () => {
+  await withServer(async ({ get, store }) => {
+    const expected = (await get('/contracts?limit=1000')).body.contracts.map((c) => c.contractId);
+    assert.ok(expected.length >= 2);
+    const seen = [];
+    let path = '/contracts?limit=1';
+    for (let i = 0; i < 50; i++) {
+      const { body } = await get(path);
+      seen.push(...body.contracts.map((c) => c.contractId));
+      // New events land mid-walk: one on an already-listed contract, one on a brand-new one.
+      if (i === 0) {
+        const maxLedger = Math.max(...fixture.events.map((e) => e.ledger));
+        const base = fixture.events[0];
+        await store.insertEvents([
+          { ...base, id: '9'.repeat(30), ledger: maxLedger + 5, txHash: 'f'.repeat(64) },
+          { ...base, id: '9'.repeat(29) + '8', ledger: maxLedger + 6, contractId: SAC.replace('CDL', 'CDM'), txHash: 'e'.repeat(64) },
+        ]);
+      }
+      if (!body.nextCursor) break;
+      path = `/contracts?limit=1&cursor=${encodeURIComponent(body.nextCursor)}`;
+    }
+    assert.equal(new Set(seen).size, seen.length, 'no contract twice');
+    assert.deepEqual([...seen].sort(), [...expected].sort());
+    assert.equal((await get('/contracts?cursor=garbage')).res.status, 400);
+  });
+});
+
+test('CORS accepts a comma-separated origin list', async () => {
+  const origins = 'https://staging.example,https://app.example';
+  await withConfiguredServer({ options: { corsOrigin: origins } }, async ({ base }) => {
+    const ok = await fetch(`${base}/health`, { headers: { Origin: 'https://app.example' } });
+    assert.equal(ok.headers.get('access-control-allow-origin'), 'https://app.example');
+    assert.match(ok.headers.get('vary') ?? '', /Origin/);
+    const no = await fetch(`${base}/health`, { headers: { Origin: 'https://evil.example' } });
+    assert.equal(no.headers.get('access-control-allow-origin'), null);
+    assert.match(no.headers.get('vary') ?? '', /Origin/);
+  });
+  await withConfiguredServer({ options: { corsOrigin: '*' } }, async ({ base }) => {
+    const res = await fetch(`${base}/health`, { headers: { Origin: 'https://any.example' } });
+    assert.equal(res.headers.get('access-control-allow-origin'), '*');
+  });
+});

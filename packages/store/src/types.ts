@@ -213,6 +213,21 @@ export interface ContractSummary {
   lastSeenAt: string;
 }
 
+/** One page of contract summaries. */
+export interface ContractPage {
+  contracts: ContractSummary[];
+  /** Pass back as `cursor` for the next page. `null` on the last page. */
+  nextCursor: string | null;
+}
+
+/** What one address did with one contract, from the event_addresses index. */
+export interface AddressContractSummary {
+  contractId: string;
+  eventCount: number;
+  firstLedger: number;
+  lastLedger: number;
+}
+
 /** Progress of one ingest stream, mirrored into storage so the API can report it. */
 export interface StreamState {
   key: string;
