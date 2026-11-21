@@ -95,8 +95,20 @@ export interface PollerOptions {
    * possible without watching the log and killing the process.
    */
   endLedger?: number;
-  /** Events per RPC page, 1..10000. Defaults to 200. */
+  /** Events per RPC page, 1..10000. Defaults to 200. The starting size when `pageSizeBounds` is set. */
   pageSize?: number;
+  /**
+   * Let the page size adapt within these bounds (#14): doubling while pages
+   * come back full and fast, halving on slow pages and failed requests.
+   * Omitted, the page size stays fixed at `pageSize`.
+   */
+  pageSizeBounds?: { min: number; max: number; fastMs?: number; slowMs?: number };
+  /**
+   * How many of the most recent ledgers to re-read whenever the tip moves,
+   * comparing them with what was stored (#3). Defaults to 3; 0 turns it off.
+   * Only runs when the poller has a `reorgStore` to compare against.
+   */
+  reorgDepth?: number;
   /** Milliseconds to wait after catching up to the tip. Defaults to 2000. */
   pollIntervalMs?: number;
   /** Maximum idle-poll interval after repeated empty pages. Defaults to 30000. */

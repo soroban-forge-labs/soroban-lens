@@ -3,8 +3,8 @@ import {
   startMetricsServer, closeMetricsServer, parseMetricsPort,
 } from '@soroban-lens/ingest';
 import { existsSync, statSync } from 'node:fs';
-import type { CursorStore, CursorState } from '@soroban-lens/ingest';
-import { SqliteEventStore } from '@soroban-lens/store';
+import type { CursorStore, CursorState, ReorgDiff, ReorgStore, StoredEventRef } from '@soroban-lens/ingest';
+import { SqliteEventStore, MAX_QUERY_LIMIT } from '@soroban-lens/store';
 import type { EventStore } from '@soroban-lens/store';
 import type { LensConfig } from './config.js';
 import { SpecFetcher, rpcSpecSource } from './specs.js';
@@ -35,6 +35,56 @@ export class StoreBackedCursors implements CursorStore {
   }
   async clear(key: string): Promise<void> {
     await this.#store.saveStreamState({ key, cursor: '', ledger: 0, updatedAt: new Date().toISOString() });
+  }
+}
+
+/**
+ * Adapts the `EventStore` to Module 1's `ReorgStore` (#3): the poller reads
+ * back what was stored for its newest ledgers, and hands over repairs.
+ */
+export class StoreBackedReorgs implements ReorgStore {
+  readonly #store: EventStore;
+  readonly #contracts: Set<string> | null;
+  constructor(store: EventStore, contractIds: string[]) {
+    this.#store = store;
+    // Only this stream's contracts: rows another configuration indexed into
+    // the same database are not this poller's to judge.
+    this.#contracts = contractIds.length > 0 ? new Set(contractIds) : null;
+  }
+
+  async eventsInLedgers(fromLedger: number, toLedger: number): Promise<StoredEventRef[]> {
+    const out: StoredEventRef[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.#store.queryEvents({
+        fromLedger,
+        toLedger,
+        order: 'asc',
+        limit: MAX_QUERY_LIMIT,
+        skipTotal: true,
+        ...(cursor ? { cursor } : {}),
+      });
+      for (const e of page.events) {
+        if (this.#contracts && !this.#contracts.has(e.contractId)) continue;
+        out.push({
+          id: e.id,
+          ledger: e.ledger,
+          txHash: e.txHash,
+          inSuccessfulContractCall: e.inSuccessfulContractCall,
+          topicsXdr: e.topicsXdr,
+          valueXdr: e.valueXdr,
+        });
+      }
+      if (!page.nextCursor) return out;
+      cursor = page.nextCursor;
+    }
+  }
+
+  async applyReorg(diff: ReorgDiff): Promise<void> {
+    // Delete before insert: insertEvents is idempotent on id, so a changed row
+    // has to go before its corrected version can land.
+    await this.#store.deleteEvents([...diff.removed, ...diff.changed.map((e) => e.id)]);
+    await this.#store.insertEvents([...diff.added, ...diff.changed]);
   }
 }
 
@@ -131,12 +181,15 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       pageSize: config.pageSize,
       pollIntervalMs: config.pollIntervalMs,
       maxPollIntervalMs: config.maxPollIntervalMs,
+      reorgDepth: config.reorgDepth,
+      ...(config.pageSizeBounds ? { pageSizeBounds: config.pageSizeBounds } : {}),
       ...(config.startLedger !== undefined ? { startLedger: config.startLedger } : {}),
     },
     {
       client,
       metrics,
       cursors: new StoreBackedCursors(store),
+      reorgStore: new StoreBackedReorgs(store, config.contractIds),
       cursorKey,
       ...(options.signal ? { signal: options.signal } : {}),
       log,

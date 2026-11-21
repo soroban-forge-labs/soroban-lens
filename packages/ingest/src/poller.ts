@@ -6,6 +6,9 @@ import { compareRetention, describeRetentionGap } from './retention.js';
 import { RetryExhaustedError, sleep as defaultSleep } from './retry.js';
 import type { EventBatch, PollerOptions, RetentionState } from './types.js';
 import type { IngestMetrics } from './metrics.js';
+import { AdaptivePageSize } from './page-size.js';
+import { DEFAULT_REORG_DEPTH, describeReorg, diffLedgerWindow, isEmptyDiff, type ReorgStore } from './reorg.js';
+import type { RawEvent } from './types.js';
 
 export interface PollerDeps {
   client: LensRpcClient | FailoverRpcClient;
@@ -19,6 +22,11 @@ export interface PollerDeps {
   signal?: AbortSignal;
   log?: (message: string) => void;
   metrics?: IngestMetrics;
+  /**
+   * Where stored events are read back for reorg checks (#3). Without one there
+   * is nothing to compare against, so no check runs.
+   */
+  reorgStore?: ReorgStore;
 }
 
 /**
@@ -84,6 +92,7 @@ export class EventPoller {
   readonly #log: (message: string) => void;
   readonly #options: PollerOptions;
   readonly #metrics: IngestMetrics | undefined;
+  readonly #reorgStore: ReorgStore | undefined;
 
   constructor(options: PollerOptions, deps: PollerDeps) {
     // Before anything reaches the network: a malformed id produces a doomed
@@ -98,6 +107,7 @@ export class EventPoller {
     this.#signal = deps.signal;
     this.#log = deps.log ?? (() => {});
     this.#metrics = deps.metrics;
+    this.#reorgStore = deps.reorgStore;
   }
 
   get cursorKey(): string {
@@ -158,9 +168,57 @@ export class EventPoller {
     if (warning) this.#log(warning);
   }
 
+  /**
+   * Compare the last `depth` ledgers up to `tip` with what is stored, and hand
+   * any difference to the store to repair.
+   *
+   * Never fatal: a failed check is logged and the stream carries on, because
+   * an RPC blip during a reorg check must not stop indexing. The next new tip
+   * checks the window again.
+   */
+  async #checkReorg(
+    filters: ReturnType<typeof buildFilters>,
+    tip: number,
+    oldestLedger: number,
+    depth: number,
+    limit: number,
+  ): Promise<void> {
+    const store = this.#reorgStore;
+    if (!store) return;
+    const fromLedger = Math.max(oldestLedger, tip - depth + 1);
+    try {
+      const truth: RawEvent[] = [];
+      let page = await this.#client.getEvents({ filters, startLedger: fromLedger, limit });
+      for (;;) {
+        // The tip may have moved while paging; ledgers past it are the main
+        // stream's business, and are not stored yet to compare against.
+        truth.push(...page.events.filter((e) => e.ledger <= tip));
+        const last = page.events.at(-1);
+        if (page.events.length < limit || !last || last.ledger > tip) break;
+        page = await this.#client.getEvents({ filters, cursor: page.cursor, limit });
+      }
+      const stored = await store.eventsInLedgers(fromLedger, tip);
+      const diff = diffLedgerWindow({ fromLedger, toLedger: tip }, stored, truth);
+      if (isEmptyDiff(diff)) return;
+      this.#log(describeReorg(diff));
+      await store.applyReorg(diff);
+    } catch (error) {
+      this.#log(`reorg check for ledgers ${fromLedger}..${tip} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   /** Yields pages of events until aborted. */
   async *stream(): AsyncGenerator<EventBatch & { progress: PollerProgress }> {
-    const pageSize = this.#options.pageSize ?? 200;
+    const bounds = this.#options.pageSizeBounds;
+    const pager = new AdaptivePageSize({
+      initial: this.#options.pageSize ?? 200,
+      min: bounds?.min ?? this.#options.pageSize ?? 200,
+      max: bounds?.max ?? this.#options.pageSize ?? 200,
+      ...(bounds?.fastMs !== undefined ? { fastMs: bounds.fastMs } : {}),
+      ...(bounds?.slowMs !== undefined ? { slowMs: bounds.slowMs } : {}),
+    });
+    const reorgDepth = this.#options.reorgDepth ?? DEFAULT_REORG_DEPTH;
+    let lastReorgCheckTip: number | undefined;
     const baseIdleMs = this.#options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     const maxIdleMs = this.#options.maxPollIntervalMs ?? Math.max(baseIdleMs, DEFAULT_MAX_POLL_INTERVAL_MS);
     assertIdlePollingIntervals(baseIdleMs, maxIdleMs);
@@ -174,7 +232,8 @@ export class EventPoller {
     // Module 2 absorbs that with INSERT OR IGNORE, but every other consumer —
     // the NDJSON stdout path, for one — would emit the repeat. Drop repeats
     // here so "at least once" is not every consumer's problem to solve.
-    const seen = new RecentIds(pageSize * RECENT_ID_WINDOW_PAGES);
+    // Sized for the largest page the stream may ask for, not the current one.
+    const seen = new RecentIds((bounds?.max ?? pager.size) * RECENT_ID_WINDOW_PAGES);
 
     let observedLatestLedger: number | undefined;
     let latestLedgerUnchangedSince: number | undefined;
@@ -188,17 +247,22 @@ export class EventPoller {
 
     while (!this.#signal?.aborted) {
       let batch: EventBatch;
+      // Fixed for this request: `pager.size` may change once it is measured.
+      const pageSize = pager.size;
       try {
         if (!positionResolved) {
           ({ cursor, startLedger } = await this.#resolveStart());
           positionResolved = true;
         }
+        const requestedAt = this.#now();
         batch = await this.#client.getEvents({
           filters,
           limit: pageSize,
           ...(endLedger !== undefined ? { endLedger } : {}),
           ...(cursor ? { cursor, fallbackLedger: startLedger ?? (await this.#cursors.load(this.#key))?.ledger } : { startLedger: startLedger as number }),
         });
+        pager.recordPage(batch.events.length, this.#now() - requestedAt);
+        if (pager.size !== pageSize) this.#log(`page size ${pageSize} -> ${pager.size}`);
       } catch (error) {
         // A cursor can fall out of the retention window if the indexer was off
         // for longer than the node keeps history. Restart from the oldest
@@ -216,6 +280,10 @@ export class EventPoller {
           continue;
         }
         if (error instanceof RetryExhaustedError) {
+          // Retries exhausted is how a request too large for the node to answer
+          // in time surfaces, so the next one asks for less.
+          pager.recordFailure();
+          if (pager.size !== pageSize) this.#log(`page size ${pageSize} -> ${pager.size} after a failed request`);
           this.#metrics?.rpcExhausted();
           this.#log(`RPC unavailable after ${error.attempts} attempts: ${error.message}`);
           await this.#sleep(idleMs);
@@ -308,6 +376,21 @@ export class EventPoller {
 
       // End the generator rather than idling forever on a finished range.
       if (reachedEndLedger) return;
+
+      // At the tip, and the tip has moved since the last look: re-read the
+      // newest ledgers and make the stored rows match (#3). Once per new tip,
+      // not once per idle poll, so a quiet node costs nothing extra.
+      if (
+        caughtUp &&
+        this.#reorgStore &&
+        reorgDepth > 0 &&
+        endLedger === undefined &&
+        batch.latestLedger !== lastReorgCheckTip
+      ) {
+        lastReorgCheckTip = batch.latestLedger;
+        await this.#checkReorg(filters, batch.latestLedger, batch.oldestLedger, reorgDepth, pageSize);
+      }
+
       if (caughtUp) {
         await this.#sleep(idleMs);
         if (batch.events.length === 0) idleMs = Math.min(maxIdleMs, Math.max(baseIdleMs, idleMs * 2));
