@@ -148,6 +148,21 @@ export const POSTGRES_MIGRATIONS: PostgresMigration[] = [
   },
   {
     version: 7,
+    name: 'stream-state-latest-ledger',
+    up: `
+      -- The RPC's latestLedger and when the indexer saw it (#181), so the API
+      -- can report lag without ever talking to the RPC. Nullable: rows
+      -- written before this carry no sample.
+      ALTER TABLE stream_state ADD COLUMN latest_ledger INTEGER;
+      ALTER TABLE stream_state ADD COLUMN latest_ledger_seen_at TEXT;
+    `,
+    down: `
+      ALTER TABLE stream_state DROP COLUMN latest_ledger_seen_at;
+      ALTER TABLE stream_state DROP COLUMN latest_ledger;
+    `,
+  },
+  {
+    version: 8,
     name: 'event-deep-topics',
     up: `
       CREATE TABLE event_topics (

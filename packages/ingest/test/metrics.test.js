@@ -60,11 +60,11 @@ test('histogram buckets are cumulative with an infinite bucket equal to count', 
 test('error labels classify failures without exposing provider messages', () => {
   const metrics = new IngestMetrics();
   for (const error of [
-    { response: { status: 429 } }, { status: 503 }, { code: 'ETIMEDOUT' },
+    { response: { status: 429 } }, { status: 401 }, { status: 503 }, { code: 'ETIMEDOUT' },
     { code: -32600 }, new Error('secret provider token'), null,
   ]) metrics.rpcError('getEvents', error);
   const text = metrics.render();
-  for (const kind of ['rate_limit', 'http', 'timeout', 'json_rpc']) {
+  for (const kind of ['rate_limit', 'http_4xx', 'http_5xx', 'timeout', 'json_rpc']) {
     assert.ok(text.includes(`kind="${kind}"} 1\n`));
   }
   assert.ok(text.includes('kind="transport"} 2\n'));

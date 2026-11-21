@@ -21,6 +21,7 @@ Options:
   -h, --help          Show this help.
 
 Access control (all off unless set):
+  LENS_NDJSON_MAX_ROWS   Most events one application/x-ndjson response carries (default 1000000).
   LENS_RATE_LIMIT_RPS    Requests per second allowed per client IP (token bucket).
   LENS_RATE_LIMIT_BURST  Bucket size (default: LENS_RATE_LIMIT_RPS, rounded up).
   LENS_API_KEYS          Comma-separated API keys; when set, requests must send
@@ -106,6 +107,7 @@ const server = createApiServer({
   store,
   ...(rateLimit ? { rateLimit } : {}),
   ...(apiKeys.length > 0 ? { apiKeys } : {}),
+  ...(envInt('LENS_NDJSON_MAX_ROWS') ? { ndjsonMaxRows: envInt('LENS_NDJSON_MAX_ROWS') as number } : {}),
   trustProxy: ['1', 'true'].includes((process.env.LENS_TRUST_PROXY ?? '').toLowerCase()),
   network: process.env.LENS_NETWORK ?? 'testnet',
   ...(values.cors ?? process.env.LENS_CORS_ORIGIN

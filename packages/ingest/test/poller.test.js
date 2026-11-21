@@ -598,13 +598,13 @@ test('progress reports lag in ledgers and an estimated wall-clock lag', async ()
 });
 
 test('ingestionLag is the single definition every consumer shares', () => {
-  assert.deepEqual(ingestionLag(100, 160), { lagLedgers: 60, lagSeconds: 300 });
-  assert.deepEqual(ingestionLag(160, 160), { lagLedgers: 0, lagSeconds: 0 });
+  assert.deepEqual(ingestionLag(100, 160), { lagLedgers: 60, lagSeconds: 300, measuredLagSeconds: null });
+  assert.deepEqual(ingestionLag(160, 160), { lagLedgers: 0, lagSeconds: 0, measuredLagSeconds: null });
 });
 
 test('lag never goes negative when the node reports a stale latestLedger', () => {
   // The page we were just served can be ahead of the node's own latestLedger.
-  assert.deepEqual(ingestionLag(200, 160), { lagLedgers: 0, lagSeconds: 0 });
+  assert.deepEqual(ingestionLag(200, 160), { lagLedgers: 0, lagSeconds: 0, measuredLagSeconds: null });
 });
 
 // ── #19 warn when a page hits the RPC ceiling ────────────────────────────────
