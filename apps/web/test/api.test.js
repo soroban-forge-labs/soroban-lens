@@ -124,3 +124,37 @@ test('ledger range combines with contract id on the event path', () => {
 test('no filters streams every contract, with no query string', () => {
   assert.equal(buildStreamPath({}), '/events/stream');
 });
+
+// ── #82 runtime network list ─────────────────────────────────────────────────
+
+import { parseNetworks, loadRuntimeNetworks } from '../.test-build/api.js';
+
+test('a { label: url } map becomes the switcher entries, in order', () => {
+  assert.deepEqual(parseNetworks({ testnet: 'http://localhost:8080', mainnet: 'http://localhost:8081/' }), [
+    { label: 'testnet', baseUrl: 'http://localhost:8080' },
+    { label: 'mainnet', baseUrl: 'http://localhost:8081' },
+  ]);
+});
+
+test('anything else is rejected, so the build-time list is used instead', () => {
+  for (const bad of [null, [], {}, 'x', { testnet: 8080 }, { testnet: '' }, { '': 'http://x' }]) {
+    assert.equal(parseNetworks(bad), null, JSON.stringify(bad));
+  }
+});
+
+const respond = (body, contentType = 'application/json', ok = true) => async () => ({
+  ok,
+  headers: { get: () => contentType },
+  json: async () => body,
+});
+
+test('/networks.json from the container is used when it is real JSON', async () => {
+  const networks = await loadRuntimeNetworks(respond({ testnet: 'http://localhost:8080', mainnet: 'http://localhost:8081' }));
+  assert.deepEqual(networks.map((n) => n.label), ['testnet', 'mainnet']);
+});
+
+test('an SPA fallback (index.html with a 200) or a 404 is not mistaken for a network list', async () => {
+  assert.equal(await loadRuntimeNetworks(respond('<!doctype html>', 'text/html')), null);
+  assert.equal(await loadRuntimeNetworks(respond(null, 'application/json', false)), null);
+  assert.equal(await loadRuntimeNetworks(async () => { throw new TypeError('offline'); }), null);
+});

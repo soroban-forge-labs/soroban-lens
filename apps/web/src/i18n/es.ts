@@ -43,8 +43,13 @@ export const es: Partial<Catalogue> = {
   emptyNoMatchingEvents:
     'Este contrato est\u00e1 indexado, pero ning\u00fan evento coincide con estos filtros.',
   emptyNothingIndexed:
-    'Nada indexado a\u00fan. Inicia el indexador o carga el fixture con `npm run seed`.',
-  emptyNoResults: 'Ning\u00fan evento coincide con estos filtros.',
+    'Nada indexado a\u00fan, y el indexador nunca se ha ejecutado contra esta base de datos. In\u00edcialo con `lens index` (o `docker compose up`), o carga los datos de ejemplo con `npm run seed`.',
+  emptyIndexerCatchingUp:
+    'El indexador est\u00e1 en marcha (\u00faltimo ledger {ledger}) pero a\u00fan no ha guardado ning\u00fan evento. Puede que siga recorriendo el historial o que los contratos vigilados est\u00e9n inactivos; los eventos aparecer\u00e1n aqu\u00ed a medida que se indexen.',
+  emptyApiUnreachable:
+    'No se puede conectar con la API, as\u00ed que no hay nada que mostrar. Comprueba que est\u00e1 en marcha (`npm run api` o `docker compose ps`) y que la URL de esta red es correcta.',
+  emptyRequestFailed: 'La petici\u00f3n de eventos fall\u00f3 (ver el mensaje de arriba), as\u00ed que estos resultados no son una respuesta real. Corrige la petici\u00f3n o reint\u00e9ntalo cuando la API se recupere.',
+  emptyNoResults: 'Ning\u00fan evento coincide con estos filtros. Quita o relaja un filtro para ver m\u00e1s.',
 
   loadMore: 'Cargar {count} m\u00e1s',
   loadingMore: 'Cargando\u2026',

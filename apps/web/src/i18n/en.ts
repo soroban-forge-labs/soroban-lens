@@ -46,8 +46,13 @@ export const en = {
     'This contract has not been seen by this indexer. Check the id, and that it is one this instance indexes (LENS_CONTRACT_IDS).',
   emptyNoMatchingEvents: 'This contract is indexed, but no events match these filters.',
   emptyNothingIndexed:
-    'Nothing indexed yet. Start the indexer, or load the fixture with `npm run seed`.',
-  emptyNoResults: 'No events match these filters.',
+    'Nothing indexed yet, and the indexer has never run against this database. Start it with `lens index` (or `docker compose up`), or load the sample data with `npm run seed`.',
+  emptyIndexerCatchingUp:
+    'The indexer is running (last at ledger {ledger}) but has not stored an event yet. It may still be working through history, or the watched contracts may be quiet; events appear here as they are indexed.',
+  emptyApiUnreachable:
+    'Cannot reach the API, so there is nothing to show. Check it is running (`npm run api`, or `docker compose ps`) and that this network\'s URL is right.',
+  emptyRequestFailed: 'The events request failed (see the message above), so these results are not a real answer. Fix the request, or retry once the API recovers.',
+  emptyNoResults: 'No events match these filters. Clear or loosen a filter to see more.',
 
   // ── Load more ─────────────────────────────────────────────────────────────────
   loadMore: 'Load {count} more',
