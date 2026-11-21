@@ -256,13 +256,16 @@ test('isPrivateAddress classifies loopback, private and reserved ranges', () => 
 
 test('filters are validated like the REST parameters', async () => {
   await withApi(FAST, async ({ call }) => {
-    for (const filter of [{ contractId: 'nope' }, { address: 'nope' }, { topics: [1] }, { topics: ['a', 'b', 'c', 'd', 'e'] }, { unknown: 1 }, 'string']) {
+    for (const filter of [{ contractId: 'nope' }, { address: 'nope' }, { topics: [1] }, { unknown: 1 }, 'string']) {
       const { res } = await call('POST', '/webhooks', { url: 'http://127.0.0.1:9/x', filter });
       assert.equal(res.status, 400, JSON.stringify(filter));
     }
     const ok = await call('POST', '/webhooks', { url: 'http://127.0.0.1:9/x', filter: { contractId: SAC, topics: ['transfer', null] } });
     assert.equal(ok.res.status, 201);
     assert.deepEqual(ok.body.filter, { contractId: SAC, topics: ['transfer', null] });
+    // Topic positions past the fourth are filterable since #164, so a deep filter is valid.
+    const deep = await call('POST', '/webhooks', { url: 'http://127.0.0.1:9/x', filter: { topics: ['a', 'b', 'c', 'd', 'e'] } });
+    assert.equal(deep.res.status, 201);
   });
 });
 
