@@ -87,7 +87,7 @@ function parseRateLimit(): { requestsPerSecond: number; burst?: number } | undef
   return { requestsPerSecond, burst };
 }
 
-const store = new SqliteEventStore({ path: dbPath, log });
+const store = new SqliteEventStore({ path: dbPath, log, readOnly: true });
 
 /** A positive integer from the environment, or undefined when unset or unusable. */
 function envInt(name: string): number | undefined {

@@ -32,6 +32,12 @@ export interface SqliteStoreOptions {
   /** Run migrations on construction. Defaults to true. */
   migrateOnOpen?: boolean;
   /**
+   * Open the file read-only: no migration, no WAL setup, no checkpoint timer,
+   * and SQLite refuses every write. For consumers that never write (the API).
+   * An unmigrated database is then reported by getStats/health, not fixed.
+   */
+  readOnly?: boolean;
+  /**
    * Structured logger for migration events — the store and the API share the
    * same `Logger` shape from ./logger.js. Defaults to a no-op, so passing
    * nothing keeps a library consumer's stderr silent, exactly as before this
@@ -110,23 +116,24 @@ export class SqliteEventStore implements EventStore {
     this.#countCacheTtlMs = options.countCacheTtlMs ?? 2000;
     this.#now = options.now ?? Date.now;
     this.#sizeTargetBytes = options.sizeTargetBytes;
-    if (options.path !== ':memory:') mkdirSync(dirname(options.path), { recursive: true });
-    this.#db = new DatabaseSync(options.path);
+    const readOnly = options.readOnly === true && options.path !== ':memory:';
+    if (options.path !== ':memory:' && !readOnly) mkdirSync(dirname(options.path), { recursive: true });
+    this.#db = new DatabaseSync(options.path, readOnly ? { readOnly: true } : {});
 
     // WAL lets the API read while the indexer writes, which is the whole point
     // of running both against one file. NORMAL trades an fsync per commit for
     // throughput; on a crash the worst case is replaying the last batch, which
     // is already the delivery guarantee we have from Module 1.
-    if (options.path !== ':memory:') this.#db.exec('PRAGMA journal_mode = WAL');
-    this.#db.exec('PRAGMA synchronous = NORMAL');
+    if (options.path !== ':memory:' && !readOnly) this.#db.exec('PRAGMA journal_mode = WAL');
+    if (!readOnly) this.#db.exec('PRAGMA synchronous = NORMAL');
     this.#db.exec('PRAGMA foreign_keys = ON');
     // Wait rather than fail when the indexer holds the write lock.
     this.#db.exec('PRAGMA busy_timeout = 5000');
 
     this.#searchAvailable = options.forceDisableFts5 ? false : this.#hasFts5();
-    if (options.migrateOnOpen !== false) this.#migrateSync();
+    if (options.migrateOnOpen !== false && !readOnly) this.#migrateSync();
 
-    const defaultInterval = options.path === ':memory:' ? 0 : 60_000;
+    const defaultInterval = options.path === ':memory:' || readOnly ? 0 : 60_000;
     const checkpointIntervalMs = options.checkpointIntervalMs ?? defaultInterval;
     if (checkpointIntervalMs > 0) {
       // unref(): a scheduled checkpoint must never be the reason a process
