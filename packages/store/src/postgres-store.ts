@@ -618,6 +618,14 @@ export class PostgresEventStore implements EventStore {
     }
   }
 
+  async deleteEvents(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    // One array parameter rather than a list of placeholders; event_addresses
+    // rows go via ON DELETE CASCADE, as for pruneBefore.
+    const result = await this.#pool.query('DELETE FROM events WHERE id = ANY($1::text[])', [ids]);
+    return result.rowCount ?? 0;
+  }
+
   async pruneBefore(ledger: number): Promise<number> {
     // No VACUUM: autovacuum reclaims the space, and a manual one would block
     // other writers for no benefit. event_addresses rows go via ON DELETE CASCADE.

@@ -162,6 +162,18 @@ export interface EventStore {
   pruneBefore(ledger: number): Promise<number>;
 
   /**
+   * Delete specific events by id, returning how many existed and were removed.
+   *
+   * For reorg repair (#3): when the network's history for a recent ledger no
+   * longer matches what was stored, the rows it dropped — and rows whose
+   * contents changed, before their replacement is inserted — go through here.
+   * `insertEvents` is idempotent on id, so a changed row cannot be fixed by
+   * re-inserting it alone. Unknown ids are ignored. Like `pruneBefore`, it
+   * never touches stream state.
+   */
+  deleteEvents(ids: string[]): Promise<number>;
+
+  /**
    * Delete the oldest events in ledger chunks until the on-disk size
    * (`bytes` + its WAL) fits under `targetBytes`, then checkpoint.
    *

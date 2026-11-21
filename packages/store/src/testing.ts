@@ -280,6 +280,19 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] deleteEvents removes exactly the named rows, ignoring unknown ids`, async () => {
+    const store = await seeded();
+    const ids = fixtureEvents.slice(0, 3).map((e) => e.id);
+    const removed = await store.deleteEvents([...ids, 'not-an-event-id']);
+    assert.equal(removed, 3);
+    for (const id of ids) assert.equal(await store.getEvent(id), null);
+    assert.equal((await store.getStats()).eventCount, fixtureEvents.length - 3);
+    assert.equal(await store.deleteEvents([]), 0);
+    // A deleted id can be inserted again: the reorg path deletes, then re-inserts.
+    assert.equal(await store.insertEvents(fixtureEvents.slice(0, 1)), 1);
+    await store.close();
+  });
+
   test(`[${name}] pruneBefore does not touch stream state`, async () => {
     const store = await seeded();
     await store.saveStreamState({ key: 'k', cursor: 'abc', ledger: 1, updatedAt: '2026-01-01T00:00:00Z' });
