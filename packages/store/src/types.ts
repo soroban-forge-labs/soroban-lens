@@ -219,6 +219,10 @@ export interface StreamState {
   cursor: string;
   ledger: number;
   updatedAt: string;
+  /** The RPC's latest ledger when this state was saved (#181). Absent on older rows. */
+  latestLedger?: number;
+  /** When `latestLedger` was observed (ISO). */
+  latestLedgerSeenAt?: string;
 }
 
 /** One topic and how many events carry it in the first position. */
