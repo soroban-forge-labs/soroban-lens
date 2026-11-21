@@ -84,3 +84,26 @@ build toolchain. CI tests against 22.13 and 24.
 with a persistent EBS volume, a dedicated VPC and secrets in SSM Parameter
 Store. `terraform/examples/aws/` is a ready-to-apply root. See
 [`terraform/aws/README.md`](terraform/aws/README.md).
+
+## Released images
+
+Each `v*.*.*` tag runs `.github/workflows/release.yml`. It builds
+`ghcr.io/soroban-forge-labs/soroban-lens-node` and `-web` for amd64 and arm64,
+publishes the npm packages at that exact version, and creates a GitHub release
+with a changelog from the commit subjects, `openapi.json`, and a
+`docker-compose.release.yml` pinned to that version.
+
+To run a release without cloning:
+
+```bash
+curl -LO https://github.com/soroban-forge-labs/soroban-lens/releases/latest/download/docker-compose.release.yml
+docker compose -f docker-compose.release.yml up -d
+```
+
+Set `LENS_VERSION=0.2.0` to pin or roll back. The published web bundle talks to
+`http://localhost:8080`. Pointing it anywhere else means building the web image
+from source, as above.
+
+Maintainers cutting a release: `git tag v0.2.0 && git push origin v0.2.0`.
+npm publishing needs an `NPM_TOKEN` repository secret and is skipped with a
+warning without one. Images and the GitHub release need nothing extra.

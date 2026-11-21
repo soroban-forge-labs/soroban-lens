@@ -1,0 +1,146 @@
+name: Release
+
+# Tag-triggered release (#83). Pushing v1.2.3 (or v1.2.3-rc.1):
+#   1. runs the full test suite,
+#   2. builds the node and web images for linux/amd64 and linux/arm64 and
+#      pushes them to GHCR as :1.2.3 (and :latest for a non-prerelease),
+#   3. publishes the npm packages at that exact version (when NPM_TOKEN is set),
+#   4. creates the GitHub release with a changelog from the commit subjects,
+#      the OpenAPI spec and docker-compose.release.yml attached.
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/soroban-lens
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  images:
+    name: Images (${{ matrix.image }})
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - image: node
+            dockerfile: deploy/Dockerfile.node
+          - image: web
+            dockerfile: deploy/Dockerfile.web
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Prereleases (1.2.3-rc.1) never move :latest.
+          if [[ "$version" == *-* ]]; then echo "latest=false" >> "$GITHUB_OUTPUT"; else echo "latest=true" >> "$GITHUB_OUTPUT"; fi
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-${{ matrix.image }}:${{ steps.version.outputs.version }}
+            ${{ steps.version.outputs.latest == 'true' && format('{0}-{1}:latest', env.IMAGE_PREFIX, matrix.image) || '' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  npm:
+    name: npm packages
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: node scripts/release-version.mjs "$GITHUB_REF_NAME"
+      - run: npm run build
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN is not set; skipping npm publish."
+            exit 0
+          fi
+          tag=latest
+          [[ "$GITHUB_REF_NAME" == *-* ]] && tag=next
+          # Dependency order: ingest and store first, then what depends on them.
+          for ws in @soroban-lens/ingest @soroban-lens/store @soroban-lens/api @soroban-lens/cli; do
+            npm publish --workspace "$ws" --access public --provenance --tag "$tag"
+          done
+
+  release:
+    name: GitHub release
+    needs: [images, npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the changelog walks back to the previous tag
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: node scripts/changelog.mjs "$GITHUB_REF_NAME" > release-notes.md
+      - name: Pin the attached compose file to this release
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sed -i "s/\${LENS_VERSION:-latest}/\${LENS_VERSION:-$version}/g" docker-compose.release.yml
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease="--prerelease"
+          gh release create "$GITHUB_REF_NAME" $prerelease \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            packages/api/openapi.json \
+            docker-compose.release.yml
