@@ -16,7 +16,7 @@ import { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metr
 import { loadContractIdsFromFile, ContractFileParseError } from './contract-id.js';
 import { parseTopicFilters } from './topics.js';
 
-const EVENT_TYPES: EventType[] = ['contract', 'system', 'diagnostic'];
+const EVENT_TYPES: EventType[] = ['contract', 'system'];
 
 function isEventType(value: string): value is EventType {
   return (EVENT_TYPES as string[]).includes(value);
@@ -83,22 +83,19 @@ Options:
       --contracts-file <path>  Load contract ids from a file (one per line, # comments allowed).
                            Merged with any -c flags; duplicates silently dropped.
   -n, --network <name>     ${Object.keys(NETWORKS).join(' | ')}  (default: testnet)
-  -r, --rpc-url <url>      Override the network's RPC URL.
+  -r, --rpc-url <url>      Override the network's RPC URL. The node's passphrase
+                           must match --network, or the run fails before indexing.
       --start-ledger <n>   First ledger to read when no cursor is stored.
       --page-size <n>      Events per RPC page, 1-10000 (default: 200).
       --poll-interval <ms> Wait after catching up to the tip (default: 2000).
       --poll-max-interval <ms> Maximum idle wait after repeated empty polls (default: 30000).
       --stalled-threshold <ms> Warn if the RPC tip does not advance (default: 60000).
       --end-ledger <n>     Last ledger to read. Exits cleanly once passed.
-      --type <kind>        contract | system | diagnostic (default: contract).
-      --topic <seg>        Server-side topic filter segment. Repeatable, positional,
-                           at most 4. A segment is '*' (any value), a typed
-                           shorthand — sym:transfer str:hi addr:G… bool:true
-                           u32:5 i32:-5 u64:7 i64:-7 u128:10 i128:-10 — or a
-                           base64 XDR ScVal. e.g. --topic sym:transfer --topic '*'
-      --topics <a,b,…>     One more topic filter, comma-separated segments.
-                           Repeatable; filters are ORed, at most 5 in all.
-                           e.g. --topics 'sym:transfer,*' --topics 'sym:mint,*'
+      --type <kind>        contract | system (default: contract).
+      --topic <seg>        Server-side topic filter segment: a base64 ScVal, or
+                           '*' to match any value in that position. Repeatable,
+                           positional, at most 4 — the RPC matches a prefix of
+                           at most 4 segments, though events may carry more.
       --rpc-header <h>     'Name: value' header for the RPC. Repeatable.
                            Values are redacted in all output.
       --retry-attempts <n> Total RPC attempts including the first (default: 5).
@@ -232,7 +229,7 @@ async function main(argv: string[]): Promise<number> {
   if (values.type !== undefined) {
     if (!isEventType(values.type)) {
       process.stderr.write(
-        `error: --type must be contract, system or diagnostic, got "${values.type}"\n`,
+        `error: --type must be contract or system, got "${values.type}"\n`,
       );
       return 2;
     }
@@ -313,6 +310,9 @@ async function main(argv: string[]): Promise<number> {
     {
       contractIds,
       eventType,
+      // Refuse to index the wrong network (#139): a mismatch fails before the
+      // first getEvents call rather than mislabelling every stored event.
+      networkPassphrase: network.networkPassphrase,
       ...(topics ? { topics } : {}),
       ...(endLedger !== undefined ? { endLedger } : {}),
       ...(startLedger !== undefined ? { startLedger } : {}),

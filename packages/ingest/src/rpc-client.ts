@@ -30,8 +30,23 @@ export const MAX_PAGE_SIZE = 10_000;
 export const MAX_CONTRACT_IDS_PER_FILTER = 5;
 
 /**
+ * The narrow read surface the poller depends on.
+ *
+ * `LensRpcClient` and `FailoverRpcClient` both satisfy it structurally, and so
+ * does `RecordedRpcClient` (#143). Keeping the poller typed against this rather
+ * than the full `LensRpcClient` means the recorder/replay pair drops into
+ * tests without casts.
+ */
+export interface RpcReadClient {
+  readonly rpcUrl: string;
+  getNetwork(): Promise<rpc.Api.GetNetworkResponse>;
+  retention(): Promise<RetentionState>;
+  getEvents(args: GetEventsArgs): Promise<EventBatch>;
+}
+
+/**
  * Thin, retrying wrapper over the Soroban RPC `getEvents` / `getHealth` /
- * `getLatestLedger` methods.
+ * `getNetwork` / `getLatestLedger` methods.
  *
  * It deliberately calls the SDK's `_getEvents`, which returns topics and values
  * as base64 XDR strings rather than parsed `ScVala` objects. Keeping the wire
@@ -55,7 +70,10 @@ export class LensRpcClient {
     this.#metrics = options.metrics;
   }
 
-  async #attempt<T>(method: 'getHealth' | 'getLatestLedger' | 'getEvents', call: () => Promise<T>): Promise<T> {
+  async #attempt<T>(
+    method: 'getHealth' | 'getLatestLedger' | 'getEvents' | 'getNetwork',
+    call: () => Promise<T>,
+  ): Promise<T> {
     const start = performance.now();
     try {
       return await call();
@@ -70,6 +88,18 @@ export class LensRpcClient {
   /** Liveness plus the node's current retention window. */
   async health(): Promise<rpc.Api.GetHealthResponse> {
     return withRetry(() => this.#attempt('getHealth', () => this.#server.getHealth()), this.#retry);
+  }
+
+  /**
+   * The network the node is on, including its passphrase (#139).
+   *
+   * `getNetwork` is the only RPC call that reveals which network a URL is
+   * actually serving. Without it, `--network mainnet --rpc-url <testnet>` looks
+   * identical to a correct configuration until the wrong network's events are
+   * already in the database.
+   */
+  async getNetwork(): Promise<rpc.Api.GetNetworkResponse> {
+    return withRetry(() => this.#attempt('getNetwork', () => this.#server.getNetwork()), this.#retry);
   }
 
   async latestLedger(): Promise<number> {
@@ -218,7 +248,7 @@ export interface ChunkedEventBatch {
 }
 
 /** Deterministic cross-chunk ordering: ledger, then tx index, operation index, then id. */
-function compareRawEvents(a: RawEvent, b: RawEvent): number {
+export function compareRawEvents(a: RawEvent, b: RawEvent): number {
   if (a.ledger !== b.ledger) return a.ledger - b.ledger;
   if (a.transactionIndex !== b.transactionIndex) return a.transactionIndex - b.transactionIndex;
   if (a.operationIndex !== b.operationIndex) return a.operationIndex - b.operationIndex;

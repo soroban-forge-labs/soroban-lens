@@ -86,3 +86,19 @@ node packages/ingest/dist/bin.js -c <CONTRACT_ID> --max-events 200 --no-resume \
 
 If you replace this file, update the `_source` block and the coverage table
 above, and re-run `npm test` — several suites assert against these exact ids.
+
+## `testnet-getevents-recording.json`
+
+A recorded RPC interaction for the poller's replay test (#143): the startup
+sequence (`getNetwork`, `retention`) and two `getEvents` pages, one full and
+one short, from the same testnet capture as `testnet-events.json`.
+
+Unlike `testnet-events.json`, which is a single `getEvents` result, this file
+is a *sequence*: each entry pairs the method, its arguments, and either the
+response or the error. It is replayed by `RecordedRpcClient` so a poller test
+can drive the whole startup → backfill → caught-up cycle with no network.
+
+Refresh it with the recorder (see `packages/ingest/README.md` → "Recording
+RPC traffic"). The `_source` block records how the current file was produced;
+if you regenerate against newer ledgers, update the request block to match
+and re-run `npm test -w @soroban-lens/ingest`.

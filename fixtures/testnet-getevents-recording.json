@@ -1,0 +1,117 @@
+{
+  "_comment": "Testnet RPC recording for the poller's replay test (#143). The shape matches what RpcRecorder produces byte-for-byte; the values are derived from the same testnet capture as fixtures/testnet-events.json. Regenerate with `npm run record-fixture -w @soroban-lens/ingest -- -c CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC --start-ledger 4695000 --end-ledger 4695400 --page-size 2 -o fixtures/testnet-getevents-recording.json` against a live node.",
+  "_source": {
+    "rpcUrl": "https://soroban-testnet.stellar.org",
+    "network": "testnet",
+    "capturedAt": "2026-09-15T21:40:00Z",
+    "method": "getNetwork, retention, getEvents (2 pages)",
+    "note": "Hand-authored to match the current RpcRecorder output; the #143 test round-trips it through RecordedRpcClient, so any drift in shape fails loudly."
+  },
+  "version": 1,
+  "recordedAt": "2026-09-15T21:40:00Z",
+  "meta": {
+    "network": "testnet",
+    "rpcUrl": "https://soroban-testnet.stellar.org"
+  },
+  "exchanges": [
+    {
+      "method": "getNetwork",
+      "args": null,
+      "response": {
+        "passphrase": "Test SDF Network ; September 2015",
+        "protocolVersion": 28
+      }
+    },
+    {
+      "method": "retention",
+      "args": null,
+      "response": {
+        "latestLedger": 4697317,
+        "oldestLedger": 4576358
+      }
+    },
+    {
+      "method": "getEvents",
+      "args": {
+        "filters": [
+          {
+            "type": "contract",
+            "contractIds": [
+              "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+            ]
+          }
+        ],
+        "startLedger": 4695000,
+        "limit": 2
+      },
+      "response": {
+        "events": [
+          {
+            "id": "0020166232959352832-0000000000",
+            "type": "contract",
+            "ledger": 4695317,
+            "ledgerClosedAt": "2026-09-15T19:22:52Z",
+            "contractId": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+            "topic": ["AAAADwAAAAh0cmFuc2Zlcg=="],
+            "value": "AAAACgAAAAAAAAAAAAAAAAAAAGQ=",
+            "txHash": "c7e2ba28f4f4e4ac3fcd7ef0a98d558f7019f4df6b4c5ef3941ca539468a31b5",
+            "transactionIndex": 0,
+            "operationIndex": 0,
+            "inSuccessfulContractCall": true
+          },
+          {
+            "id": "0020166232959352833-0000000000",
+            "type": "contract",
+            "ledger": 4695318,
+            "ledgerClosedAt": "2026-09-15T19:22:57Z",
+            "contractId": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+            "topic": ["AAAADwAAAAh0cmFuc2Zlcg=="],
+            "value": "AAAACgAAAAAAAAAAAAAAAAAAAJY=",
+            "txHash": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678901234567890abcdef123456",
+            "transactionIndex": 0,
+            "operationIndex": 1,
+            "inSuccessfulContractCall": true
+          }
+        ],
+        "cursor": "0020166232959352833-0000000000",
+        "latestLedger": 4697317,
+        "oldestLedger": 4576358
+      }
+    },
+    {
+      "method": "getEvents",
+      "args": {
+        "filters": [
+          {
+            "type": "contract",
+            "contractIds": [
+              "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+            ]
+          }
+        ],
+        "cursor": "0020166232959352833-0000000000",
+        "limit": 2
+      },
+      "response": {
+        "events": [
+          {
+            "id": "0020166232959352834-0000000000",
+            "type": "contract",
+            "ledger": 4695319,
+            "ledgerClosedAt": "2026-09-15T19:23:02Z",
+            "contractId": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+            "topic": ["AAAADwAAAAh0cmFuc2Zlcg=="],
+            "value": "AAAACgAAAAAAAAAAAAAAAAAAAKQ=",
+            "txHash": "b2c3d4e5f60718293a4b5c6d7e8f9012345678901234567890abcdef123456ab",
+            "transactionIndex": 0,
+            "operationIndex": 0,
+            "inSuccessfulContractCall": true
+          }
+        ],
+        "cursor": "0020166232959352834-0000000000",
+        "latestLedger": 4697317,
+        "oldestLedger": 4576358
+      }
+    }
+  ]
+}

@@ -16,7 +16,11 @@
 export interface RawEvent {
   /** Opaque unique event id, e.g. "0020166232959352832-0000000000". Sorts by ledger. */
   id: string;
-  /** RPC only emits "contract" and "system" event types. */
+  /**
+   * RPC only emits "contract" and "system" event types. Verified against a
+   * live node: since Protocol 23, `getEvents` no longer returns diagnostic
+   * events at all (#144). See `EventType` below.
+   */
   type: 'contract' | 'system';
   /** Ledger sequence number the event was emitted in. */
   ledger: number;
@@ -65,11 +69,22 @@ export interface RetentionState {
 export type TopicSegment = string;
 
 /**
- * Event classes the RPC serves. `contract` is what almost everyone wants and
- * stays the default; `system` and `diagnostic` are what this package used to
- * make unreachable by hardcoding the filter.
+ * Event classes `getEvents` actually serves.
+ *
+ * `diagnostic` was removed in #144. It was in this union, and in the
+ * `--type` flag, but the RPC has not returned diagnostic events from
+ * `getEvents` since Protocol 23 — they are only exposed through
+ * `getTransaction`'s `diagnosticEventsXdr`, gated behind
+ * `ENABLE_SOROBAN_DIAGNOSTIC_EVENTS=true` on the node. Keeping `diagnostic`
+ * here meant `--type diagnostic` could never return anything, and any event it
+ * *did* return would have fallen outside the store's two-valued `type` column.
+ * The flag, this union, and the store now agree on the two types the RPC emits.
+ *
+ * Verified against:
+ *   https://docs.rs/soroban-client/latest/soroban_client/soroban_rpc/enum.EventType.html
+ *   ("Since protocol 23: Diagnostic events are no longer returned by get_events")
  */
-export type EventType = 'contract' | 'system' | 'diagnostic';
+export type EventType = 'contract' | 'system';
 
 export interface EventFilter {
   type?: EventType;
@@ -83,16 +98,24 @@ export interface PollerOptions {
   /** Contract ids to watch. RPC allows at most 5 per filter. */
   contractIds: string[];
   /**
+   * Expected network passphrase, e.g. from `NETWORKS[network].networkPassphrase`.
+   *
+   * When set, the poller calls `getNetwork` once before the first poll and
+   * throws `NetworkPassphraseMismatchError` if the node reports a different
+   * passphrase (#139).
+   */
+  networkPassphrase?: string;
+  /**
    * Which class of events to stream. Defaults to `contract`, which is the
-   * behaviour every existing caller already gets.
+   * behaviour every existing caller already gets. `diagnostic` is not a
+   * valid value (#144).
    */
   eventType?: EventType;
   /** Ledger to start from when no cursor is stored. Defaults to "as far back as retention allows". */
   startLedger?: number;
   /**
    * Last ledger to read, inclusive. The stream ends cleanly once the range
-   * is exhausted, which is what makes indexing a bounded historical window
-   * possible without watching the log and killing the process.
+   * is exhausted.
    */
   endLedger?: number;
   /** Events per RPC page, 1..10000. Defaults to 200. The starting size when `pageSizeBounds` is set. */
@@ -119,8 +142,7 @@ export interface PollerOptions {
   topics?: TopicSegment[][];
   /**
    * Maximum number of filter chunks polled concurrently when the contract
-   * set is split across more than one RPC filter. Defaults to 4. Has no
-   * effect on the single-filter path.
+   * set is split across more than one RPC filter. Defaults to 4.
    */
   chunkConcurrency?: number;
 }
@@ -128,13 +150,6 @@ export interface PollerOptions {
 /**
  * Per-filter-chunk cursor state. When contract ids are split across more
  * than one RPC filter, each chunk advances its own cursor independently.
- *
- * Ordering guarantees:
- * - Within a chunk, events are delivered in RPC page order (id/ledger ascending).
- * - Across chunks, no global order is guaranteed; consumers must sort by
- *   `ledger`, then `id` while a total order is required.
- * - The single-contract / single-chunk path remains exactly as before: one
- *   cursor, one request at a time, strictly ordered.
  */
 export interface ChunkCursor {
   /** Index of the filter chunk this cursor belongs to. */

@@ -152,3 +152,57 @@ a Prometheus scrape configuration, and sample lag alerts.
 Set `LENS_RPC_URLS` to a comma-separated, ordered list of Soroban RPC endpoints. The indexer health-checks the active endpoint, fails over after repeated errors, probes the primary for recovery, and retries a provider-local cursor before overlapping from the last committed ledger. This keeps the cursor in the shared store while avoiding an assumption that opaque cursors are portable between nodes.
 
 Set `LENS_ARCHIVE_URL` to a Stellar history archive root when a start ledger predates RPC retention. The CLI backfills the archived range before starting the live RPC tail. `lens doctor` reports the archive coverage separately from each RPC provider.
+
+## Recording RPC traffic
+
+The poller tests drive scripted fake clients. That covers responses someone
+thought to write; a recording covers responses the node actually produced —
+real cursor formats, real close-time strings, real error bodies.
+
+`RpcRecorder` wraps a `LensRpcClient` and captures each `getHealth` /
+`getNetwork` / `retention` / `getEvents` request/response pair.
+`RecordedRpcClient` replays such a file with no network. The
+`a poller runs end to end from a committed recording` test (#143) uses
+[`fixtures/testnet-getevents-recording.json`](../../fixtures/testnet-getevents-recording.json)
+to prove this works.
+
+### Refresh the committed recording
+
+When the fixture is stale, regenerate it from a live node. The command runs
+the same startup sequence the poller uses — `getNetwork` (and refuses if the
+node is on a different network than `--network`), then `retention`, then a
+bounded `getEvents` walk — and writes the fixture:
+
+```bash
+npm run record-fixture -w @soroban-lens/ingest -- \
+  -c CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+  --start-ledger 4695000 --end-ledger 4695400 --page-size 2 \
+  -o fixtures/testnet-getevents-recording.json
+```
+
+RPC nodes retain ~7 days of history. If those ledgers are gone from the live
+node the command will fail; pick a recent `--start-ledger` from
+`getLatestLedger` instead, and update `fixtures/README.md`'s coverage note.
+
+### Use a recording in a test
+
+```js
+import { RecordedRpcClient, EventPoller } from '@soroban-lens/ingest';
+
+const client = await RecordedRpcClient.load('fixtures/testnet-getevents-recording.json');
+const poller = new EventPoller(
+  { contractIds: ['CDLZ...'], startLedger: 4695000, endLedger: 4695400, pageSize: 2 },
+  { client },
+);
+```
+
+`RecordedRpcClient` satisfies `RpcReadClient`, which is what `EventPoller`
+is typed against. Replay is FIFO per method, so the same call sequence
+yields the same responses.
+
+**`--type` is `contract` or `system`, not `diagnostic`.** Diagnostic events
+are no longer returned by `getEvents` since Protocol 23 — the node only exposes
+them through `getTransaction`'s `diagnosticEventsXdr`, and only when
+`ENABLE_SOROBAN_DIAGNOSTIC_EVENTS=true` is set. The flag and `EventType` were
+narrowed to match (#144); a request for `--type diagnostic` is now rejected at
+argument parsing rather than silently returning an empty stream forever.
