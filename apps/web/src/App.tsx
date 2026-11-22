@@ -594,7 +594,9 @@ function AppInner(): React.JSX.Element {
             type="button"
             className="theme-toggle"
             onClick={toggleTheme}
-            aria-label={theme === 'dark' ? t('switchToLight') : t('switchToDark')}
+            // The accessible name must contain the visible label (axe
+            // label-content-name-mismatch), so the action follows it here.
+            aria-label={`${theme === 'dark' ? t('lightMode') : t('darkMode')} — ${theme === 'dark' ? t('switchToLight') : t('switchToDark')}`}
             title={theme === 'dark' ? t('switchToLight') : t('switchToDark')}
           >
             {theme === 'dark' ? t('lightMode') : t('darkMode')}
