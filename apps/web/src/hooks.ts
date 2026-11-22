@@ -142,10 +142,15 @@ export function useUrlState(
         filters: {
           contractId: parsed.filters.contractId,
           topic: parsed.filters.topic,
+          address: parsed.filters.address,
+          search: parsed.filters.search,
           successfulOnly: parsed.filters.successfulOnly,
           live: parsed.filters.live,
           fromLedger: parsed.filters.fromLedger,
           toLedger: parsed.filters.toLedger,
+          timeRange: parsed.filters.timeRange,
+          customFromTime: parsed.filters.customFromTime,
+          customToTime: parsed.filters.customToTime,
         },
         network: parsed.network || initial.network,
         expandedEventId: parsed.expandedEventId,
@@ -202,7 +207,7 @@ export function useUrlState(
     const onPopState = (): void => {
       const parsed = parseUrl(window.location.pathname, window.location.search);
       const next: UrlState = parsed ?? {
-        filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+        filters: { ...prev.current.filters },
         network: '',
         expandedEventId: null,
       };

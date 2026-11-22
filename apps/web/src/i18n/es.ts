@@ -43,6 +43,8 @@ export const es: Partial<Catalogue> = {
 
   invalidContractId:
     'Eso no parece un ID de contrato. Se espera un StrKey: C seguido de 55 letras may\u00fasculas y d\u00edgitos del 2 al 7.',
+  invalidAddress:
+    'Eso no parece una direcci\u00f3n. Se espera un StrKey: G o C seguida de 55 letras may\u00fasculas y d\u00edgitos del 2 al 7.',
 
   loading: 'Cargando\u2026',
   emptyContractUnknown:
@@ -78,6 +80,16 @@ export const es: Partial<Catalogue> = {
   useTestnetExample: 'usar el contrato XLM de testnet',
   topicLabel: 'Tema',
   topicPlaceholder: 'transfer',
+  addressLabel: 'Dirección',
+  addressPlaceholder: 'G… o C… (deja vacío para cualquier dirección)',
+  searchLabel: 'Buscar',
+  searchPlaceholder: 'texto dentro de la salida decodificada',
+  searchMinChars: 'La búsqueda necesita al menos 3 caracteres.',
+  timeRangeLabel: 'Intervalo de tiempo',
+  timeRangeAll: 'Todo',
+  timeRangeFrom: 'Desde',
+  timeRangeTo: 'Hasta',
+  timeRangeActiveTitle: 'Solo se muestran los eventos dentro de este intervalo',
   successfulOnly: 'Solo llamadas exitosas',
   liveUpdates: 'Actualizaciones en vivo',
 
@@ -91,6 +103,8 @@ export const es: Partial<Catalogue> = {
   colTx: 'Tx',
 
   filterByTopic: 'Filtrar por \u201c{topic}\u201d',
+  filterByAddress: 'Filtrar eventos por la direcci\u00f3n {id}',
+  filterByContract: 'Filtrar eventos por el contrato {id}',
   additionalTopics: '+{count}',
   failedCallWarning:
     'Emitido durante una llamada al contrato que no tuvo \u00e9xito. Est\u00e1 indexado por completitud, pero no tuvo efecto en la cadena.',

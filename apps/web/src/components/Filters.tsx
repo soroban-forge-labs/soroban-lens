@@ -17,6 +17,17 @@ function isValidLedger(v: string): boolean {
   return v === '' || (/^\d+$/.test(v) && Number.isInteger(Number(v)) && Number(v) >= 0);
 }
 
+/** Account or contract StrKey — the only shape the API's `address=` accepts. */
+const ADDRESS_PATTERN = /^[GC][A-Z2-7]{55}$/;
+
+/** Preset windows offered by the time-range filter (#190). */
+const TIME_PRESETS: { value: string; label: string }[] = [
+  { value: '15m', label: 'Last 15 minutes' },
+  { value: '1h', label: 'Last hour' },
+  { value: '24h', label: 'Last day' },
+  { value: 'custom', label: 'Custom…' },
+];
+
 export function Filters({
   value,
   onChange,
@@ -32,6 +43,9 @@ export function Filters({
   const selectedContract = knownContracts.some((contract) => contract.contractId === value.contractId)
     ? value.contractId
     : '';
+
+  const addressInvalid = value.address !== '' && !ADDRESS_PATTERN.test(value.address);
+  const searchShort = value.search !== '' && value.search.length < 3;
 
   const fromInvalid = !isValidLedger(value.fromLedger);
   const toInvalid = !isValidLedger(value.toLedger);
@@ -100,6 +114,70 @@ export function Filters({
             <option key={tc.topic} value={tc.topic}>{`${tc.topic} (${tc.count})`}</option>
           ))}
         </datalist>
+      </div>
+
+      <div className="field">
+        <label htmlFor="address">{t('addressLabel')}</label>
+        <input
+          id="address"
+          name="address"
+          className="mono"
+          placeholder={t('addressPlaceholder')}
+          spellCheck={false}
+          autoComplete="off"
+          value={value.address}
+          aria-invalid={addressInvalid}
+          onChange={(e) => set('address', e.target.value.trim())}
+        />
+      </div>
+
+      <div className="field">
+        <label htmlFor="search">{t('searchLabel')}</label>
+        <input
+          id="search"
+          name="search"
+          placeholder={t('searchPlaceholder')}
+          spellCheck={false}
+          autoComplete="off"
+          value={value.search}
+          onChange={(e) => set('search', e.target.value)}
+        />
+        {searchShort && (
+          <span className="muted small" role="status">
+            {t('searchMinChars')}
+          </span>
+        )}
+      </div>
+
+      <div className="field">
+        <label htmlFor="timeRange">{t('timeRangeLabel')}</label>
+        <select
+          id="timeRange"
+          name="timeRange"
+          value={value.timeRange}
+          onChange={(e) => set('timeRange', e.target.value)}
+        >
+          <option value="">{t('timeRangeAll')}</option>
+          {TIME_PRESETS.map((preset) => (
+            <option key={preset.value} value={preset.value}>{preset.label}</option>
+          ))}
+        </select>
+        {value.timeRange === 'custom' && (
+          <>
+            <input
+              type="datetime-local"
+              aria-label={t('timeRangeFrom')}
+              value={value.customFromTime}
+              onChange={(e) => set('customFromTime', e.target.value)}
+            />
+            <input
+              type="datetime-local"
+              aria-label={t('timeRangeTo')}
+              value={value.customToTime}
+              onChange={(e) => set('customToTime', e.target.value)}
+            />
+          </>
+        )}
       </div>
 
       <div className="field">

@@ -5,10 +5,18 @@ import { EventTable } from '../../src/components/EventTable.js';
 import { LocaleProvider } from '../../src/i18n/index.js';
 import { VIRTUALIZE_ABOVE } from '../../src/virtual.js';
 import type { LensEvent } from '../../src/types.js';
-import { makeEvents } from './fixtures.js';
+import { makeEvent, makeEvents } from './fixtures.js';
 
 /** EventTable with the expansion state App would own. */
-function Harness({ events }: { events: LensEvent[] }) {
+function Harness({
+  events,
+  onAddressClick = () => {},
+  onContractClick = () => {},
+}: {
+  events: LensEvent[];
+  onAddressClick?: (address: string) => void;
+  onContractClick?: (contractId: string) => void;
+}) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   return (
     <LocaleProvider>
@@ -26,6 +34,8 @@ function Harness({ events }: { events: LensEvent[] }) {
         }
         showContract={false}
         onTopicClick={() => {}}
+        onAddressClick={onAddressClick}
+        onContractClick={onContractClick}
         loading={false}
         emptyMessage="empty"
         selectedIds={new Set()}
@@ -66,6 +76,84 @@ describe('row expansion', () => {
     expect(document.activeElement).toBe(second);
     fireEvent.keyDown(second!, { key: 'ArrowUp' });
     expect(document.activeElement).toBe(first);
+  });
+});
+
+describe('clickable decoded addresses (#205)', () => {
+  const ACCOUNT = 'GBYRNL77SLMBVGJLFYVWB762E7ZJJVSGEDOU626FPOCGOMPG776JQHHT';
+  const TOKEN = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+
+  const expand = (container: HTMLElement) => {
+    fireEvent.click(screen.getAllByRole('button', { name: 'Expand event details' })[0]!);
+    return container.querySelector<HTMLTableRowElement>('tr.detail-row')!;
+  };
+
+  it('clicking an account (G…) topic calls onAddressClick', () => {
+    let clicked = '';
+    const { container } = render(
+      <Harness events={[makeEvent(0)]} onAddressClick={(a) => { clicked = a; }} />,
+    );
+    const detail = expand(container);
+    const button = [...detail.querySelectorAll<HTMLButtonElement>('.topic-list button')]
+      .find((b) => b.textContent === ACCOUNT);
+    expect(button, 'account topic renders as a button').toBeTruthy();
+    fireEvent.click(button!);
+    expect(clicked).toBe(ACCOUNT);
+  });
+
+  it('clicking a contract (C…) topic calls onContractClick', () => {
+    let clicked = '';
+    const { container } = render(
+      <Harness
+        events={[makeEvent(0, { topics: [{ type: 'symbol', value: 'transfer' }, { type: 'address', value: TOKEN }] })]}
+        onContractClick={(c) => { clicked = c; }}
+      />,
+    );
+    const detail = expand(container);
+    const button = [...detail.querySelectorAll<HTMLButtonElement>('.topic-list button')]
+      .find((b) => b.textContent === TOKEN);
+    expect(button, 'contract topic renders as a button').toBeTruthy();
+    fireEvent.click(button!);
+    expect(clicked).toBe(TOKEN);
+  });
+
+  it('a string that merely looks like an address stays plain text', () => {
+    const { container } = render(
+      <Harness
+        events={[makeEvent(0, { topics: [{ type: 'symbol', value: 'note' }, { type: 'string', value: ACCOUNT }] })]}
+      />,
+    );
+    const detail = expand(container);
+    const button = [...detail.querySelectorAll<HTMLButtonElement>('.topic-list button')]
+      .find((b) => b.textContent === ACCOUNT);
+    expect(button, 'string-typed lookalike must not become a filter button').toBeUndefined();
+    const code = [...detail.querySelectorAll('.topic-list code')].find((c) => c.textContent?.includes(ACCOUNT));
+    expect(code).toBeTruthy();
+  });
+
+  it('an Address-typed spec field is clickable too', () => {
+    let clicked = '';
+    const { container } = render(
+      <Harness
+        events={[makeEvent(0, {
+          typed: {
+            name: 'transfer',
+            source: 'stellar-asset',
+            fields: [
+              { name: 'from', type: 'Address', value: ACCOUNT, location: 'topic' },
+              { name: 'amount', type: 'i128', value: '1000', location: 'data' },
+            ],
+          },
+        })]}
+        onAddressClick={(a) => { clicked = a; }}
+      />,
+    );
+    const detail = expand(container);
+    const button = [...detail.querySelectorAll<HTMLButtonElement>('.typed-fields button')]
+      .find((b) => b.textContent === ACCOUNT);
+    expect(button, 'Address field renders as a button').toBeTruthy();
+    fireEvent.click(button!);
+    expect(clicked).toBe(ACCOUNT);
   });
 });
 

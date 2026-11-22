@@ -122,6 +122,8 @@ async function request<T>(baseUrl: string, path: string, signal?: AbortSignal): 
 export interface EventQueryParams {
   contractId?: string;
   topics?: (string | null)[];
+  address?: string;
+  search?: string;
   fromLedger?: number;
   toLedger?: number;
   fromTime?: string;
@@ -136,6 +138,8 @@ export function buildEventPath(params: EventQueryParams): string {
   const search = new URLSearchParams();
   if (params.limit !== undefined) search.set('limit', String(params.limit));
   if (params.cursor) search.set('cursor', params.cursor);
+  if (params.address) search.set('address', params.address);
+  if (params.search) search.set('search', params.search);
   if (params.fromLedger !== undefined) search.set('fromLedger', String(params.fromLedger));
   if (params.toLedger !== undefined) search.set('toLedger', String(params.toLedger));
   if (params.fromTime !== undefined) search.set('fromTime', params.fromTime);
@@ -158,8 +162,12 @@ export function buildEventPath(params: EventQueryParams): string {
 export function buildStreamPath(params: EventQueryParams): string {
   const search = new URLSearchParams();
   if (params.contractId) search.set('contractId', params.contractId);
+  if (params.address) search.set('address', params.address);
+  if (params.search) search.set('search', params.search);
   if (params.fromLedger !== undefined) search.set('fromLedger', String(params.fromLedger));
   if (params.toLedger !== undefined) search.set('toLedger', String(params.toLedger));
+  if (params.fromTime !== undefined) search.set('fromTime', params.fromTime);
+  if (params.toTime !== undefined) search.set('toTime', params.toTime);
   if (params.successfulOnly) search.set('successfulOnly', 'true');
   for (const topic of params.topics ?? []) search.append('topic', topic ?? '*');
   const query = search.toString();

@@ -18,6 +18,8 @@ interface Props {
   onToggleExpanded: (eventId: string) => void;
   showContract: boolean;
   onTopicClick: (topic: string) => void;
+  onAddressClick: (address: string) => void;
+  onContractClick: (contractId: string) => void;
   loading: boolean;
   emptyMessage: string;
   selectedIds: ReadonlySet<string>;
@@ -42,7 +44,7 @@ interface Viewport {
  * the layout changes when windowing switches on.
  */
 export function EventTable({
-  events, network, expandedEventIds, onToggleExpanded, showContract, onTopicClick, loading, emptyMessage, selectedIds, onToggleSelect, absolute,
+  events, network, expandedEventIds, onToggleExpanded, showContract, onTopicClick, onAddressClick, onContractClick, loading, emptyMessage, selectedIds, onToggleSelect, absolute,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
   const virtualized = events.length > VIRTUALIZE_ABOVE;
@@ -206,6 +208,8 @@ export function EventTable({
             onToggleExpanded={toggleExpanded}
             showContract={showContract}
             onTopicClick={onTopicClick}
+            onAddressClick={onAddressClick}
+            onContractClick={onContractClick}
             selected={selectedIds.has(event.id)}
             onToggleSelect={onToggleSelect}
             absolute={absolute}

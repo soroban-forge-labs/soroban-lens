@@ -125,6 +125,38 @@ test('no filters streams every contract, with no query string', () => {
   assert.equal(buildStreamPath({}), '/events/stream');
 });
 
+// ── #188/#189/#190: address, search, and time bounds ────────────────────────
+
+const ALICE = 'GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI';
+
+test('an address filter is sent on the event path (#188)', () => {
+  const { params } = parse(buildEventPath({ address: ALICE }));
+  assert.equal(params.get('address'), ALICE);
+});
+
+test('search text is sent on the event path (#189)', () => {
+  const { params } = parse(buildEventPath({ search: 'transfer' }));
+  assert.equal(params.get('search'), 'transfer');
+  // An empty term adds nothing rather than a bare `search=`.
+  assert.equal(parse(buildEventPath({ search: '' })).params.has('search'), false);
+});
+
+test('time bounds are sent as epoch seconds on both paths (#190)', () => {
+  const { params } = parse(buildEventPath({ fromTime: '1735732800', toTime: '1735736400' }));
+  assert.equal(params.get('fromTime'), '1735732800');
+  assert.equal(params.get('toTime'), '1735736400');
+
+  const stream = parse(buildStreamPath({ fromTime: '1735732800', toTime: '1735736400' }));
+  assert.equal(stream.params.get('fromTime'), '1735732800');
+  assert.equal(stream.params.get('toTime'), '1735736400');
+});
+
+test('the stream path carries address and search too, so live rows match the page', () => {
+  const { params } = parse(buildStreamPath({ address: ALICE, search: 'transfer' }));
+  assert.equal(params.get('address'), ALICE);
+  assert.equal(params.get('search'), 'transfer');
+});
+
 // ── #82 runtime network list ─────────────────────────────────────────────────
 
 import { parseNetworks, loadRuntimeNetworks } from '../.test-build/api.js';

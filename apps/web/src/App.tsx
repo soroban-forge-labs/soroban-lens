@@ -18,6 +18,9 @@ const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMPQVUU2HHGC
 const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
+/** Account or contract StrKey — the shape the API's `address=` accepts (#188). */
+const ADDRESS_PATTERN = /^[GC][A-Z2-7]{55}$/;
+const TIME_PRESET_SECONDS: Record<string, number> = { '15m': 15 * 60, '1h': 60 * 60, '24h': 24 * 60 * 60 };
 const ACTIVITY_DAYS = 30;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 
@@ -49,7 +52,7 @@ function AppInner(): React.JSX.Element {
   // the exact view. localStorage is the fallback for a bare visit only.
   const [urlState, setUrlState] = useUrlState(
     {
-      filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+      filters: { contractId: '', topic: '', address: '', search: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '', timeRange: '', customFromTime: '', customToTime: '' },
       network: networks[0]!.label,
       expandedEventId: null,
     },
@@ -151,8 +154,14 @@ function AppInner(): React.JSX.Element {
   // Typing a 56-character contract id should not fire 56 requests.
   const debouncedContractId = useDebounced(filters.contractId, 300);
   const debouncedTopic = useDebounced(filters.topic, 300);
+  const debouncedAddress = useDebounced(filters.address, 300);
+  const debouncedSearch = useDebounced(filters.search, 300);
 
   const contractIdValid = debouncedContractId === '' || CONTRACT_ID_PATTERN.test(debouncedContractId);
+  const addressValid = debouncedAddress === '' || ADDRESS_PATTERN.test(debouncedAddress);
+  // #189: the store treats a 1–2 char term as "match nothing", so a partial
+  // term shows the inline hint and does not send a request at all.
+  const searchReady = debouncedSearch === '' || debouncedSearch.length >= 3;
 
   // Parse ledger bounds: only include when valid non-empty integers.
   const fromLedgerNum =
@@ -169,11 +178,46 @@ function AppInner(): React.JSX.Element {
     toLedgerNum === undefined ||
     fromLedgerNum <= toLedgerNum;
 
+  // #190: preset windows convert to epoch seconds at query time; a custom
+  // range parses ISO-8601 or epoch seconds like the tail filter does.
+  const parseTimeBound = useCallback((raw: string): number | undefined => {
+    const v = raw.trim();
+    if (!v) return undefined;
+    if (/^-?\d+$/.test(v)) return Number(v);
+    const parsed = Date.parse(v);
+    return Number.isNaN(parsed) ? undefined : Math.floor(parsed / 1000);
+  }, []);
+  const timeBounds = useMemo(() => {
+    const presetSeconds = TIME_PRESET_SECONDS[filters.timeRange];
+    if (presetSeconds !== undefined) {
+      const now = Math.floor(Date.now() / 1000);
+      return { fromTime: String(now - presetSeconds), toTime: String(now) };
+    }
+    if (filters.timeRange === 'custom') {
+      const from = parseTimeBound(filters.customFromTime);
+      const to = parseTimeBound(filters.customToTime);
+      return {
+        ...(from !== undefined ? { fromTime: String(from) } : {}),
+        ...(to !== undefined ? { toTime: String(to) } : {}),
+      };
+    }
+    return {};
+  }, [filters.timeRange, filters.customFromTime, filters.customToTime, parseTimeBound]);
+  const timeRangeLabel =
+    filters.timeRange === 'custom'
+      ? 'custom range'
+      : filters.timeRange
+        ? `last ${filters.timeRange}`
+        : null;
+
   const query = useMemo(
     () => ({
       ...(contractIdValid && debouncedContractId ? { contractId: debouncedContractId } : {}),
       ...(debouncedTopic ? { topics: [debouncedTopic] } : {}),
+      ...(addressValid && debouncedAddress ? { address: debouncedAddress } : {}),
+      ...(searchReady && debouncedSearch ? { search: debouncedSearch } : {}),
       ...(filters.successfulOnly ? { successfulOnly: true } : {}),
+      ...timeBounds,
       ...(activityRange
         ? {
             fromLedger: activityRange.fromLedger,
@@ -188,7 +232,7 @@ function AppInner(): React.JSX.Element {
       limit: PAGE_SIZE,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly, fromLedgerNum, toLedgerNum, activityRange],
+    [contractIdValid, debouncedContractId, debouncedTopic, addressValid, debouncedAddress, searchReady, debouncedSearch, filters.successfulOnly, fromLedgerNum, toLedgerNum, activityRange, timeBounds],
   );
 
   const contractSummary = contracts.find((contract) => contract.contractId === debouncedContractId);
@@ -309,7 +353,7 @@ function AppInner(): React.JSX.Element {
   }, [selectedIds, events, selected.baseUrl]);
 
   const loadFirstPage = useCallback(async (): Promise<void> => {
-    if (!contractIdValid || !ledgerRangeValid) return;
+    if (!contractIdValid || !ledgerRangeValid || !addressValid || !searchReady) return;
     const isCurrent = requestGate.current.begin();
     try {
       const page = await api.events(selected.baseUrl, query);
@@ -343,7 +387,7 @@ function AppInner(): React.JSX.Element {
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid]);
+  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid, addressValid, searchReady]);
 
   const loadMore = useCallback(async (): Promise<void> => {
     if (!nextCursor || loadingMore) return;
@@ -380,20 +424,20 @@ function AppInner(): React.JSX.Element {
   // When the query or network changes, fetch fresh data but keep the old rows
   // on screen until the new ones arrive.
   useEffect(() => {
-    if (!contractIdValid || !ledgerRangeValid) {
+    if (!contractIdValid || !ledgerRangeValid || !addressValid || !searchReady) {
       setLoading(false);
       return;
     }
     setLoading(true);
     setNextCursor(null);
     void loadFirstPage();
-  }, [loadFirstPage, contractIdValid, ledgerRangeValid]);
+  }, [loadFirstPage, contractIdValid, ledgerRangeValid, addressValid, searchReady]);
 
   // Live updates arrive over SSE; polling is the fallback for whenever the
   // stream is not open (before it connects, while the browser retries a drop,
   // or against an API that does not offer it).
   const streamUrl =
-    filters.live && contractIdValid && !activityRange
+    filters.live && contractIdValid && addressValid && searchReady && !activityRange
       ? `${selected.baseUrl}${buildStreamPath(query)}`
       : null;
   const streaming = useEventStream(
@@ -468,7 +512,12 @@ function AppInner(): React.JSX.Element {
     if (
       next.contractId !== filters.contractId ||
       next.topic !== filters.topic ||
-      next.successfulOnly !== filters.successfulOnly
+      next.address !== filters.address ||
+      next.search !== filters.search ||
+      next.successfulOnly !== filters.successfulOnly ||
+      next.timeRange !== filters.timeRange ||
+      next.customFromTime !== filters.customFromTime ||
+      next.customToTime !== filters.customToTime
     ) {
       setActivityRange(null);
     }
@@ -631,6 +680,10 @@ function AppInner(): React.JSX.Element {
         <p className="warning banner">{t('invalidContractId')}</p>
       )}
 
+      {!addressValid && (
+        <p className="warning banner">{t('invalidAddress')}</p>
+      )}
+
       {error && contractIdValid && (
         <p className="warning banner" role="alert">
           {error}
@@ -646,6 +699,11 @@ function AppInner(): React.JSX.Element {
           >
             {eventCountText}
           </span>
+          {timeRangeLabel && !activityRange && (
+            <span className="muted small" title={t('timeRangeActiveTitle')}>
+              {timeRangeLabel}
+            </span>
+          )}
           {filters.live && !activityRange && (
             <span
               className="live-dot"
@@ -749,6 +807,8 @@ function AppInner(): React.JSX.Element {
           selectedIds={selectedIdSet}
           onToggleSelect={toggleSelect}
           onTopicClick={(topic) => changeFilters({ ...filters, topic })}
+          onAddressClick={(address) => changeFilters({ ...filters, address })}
+          onContractClick={(contractId) => changeFilters({ ...filters, contractId })}
           absolute={absoluteTime}
           emptyMessage={emptyMessage}
         />

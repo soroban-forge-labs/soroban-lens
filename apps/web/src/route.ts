@@ -20,11 +20,20 @@
 export interface FilterState {
   contractId: string;
   topic: string;
+  /** #188: account or contract address to match anywhere in the event; '' when unset. */
+  address: string;
+  /** #189: full-text substring over decoded output; requests only fire at 3+ chars. */
+  search: string;
   successfulOnly: boolean;
   live: boolean;
   /** Inclusive ledger bounds as typed in the filter bar; '' when unset. */
   fromLedger: string;
   toLedger: string;
+  /** #190: '15m' | '1h' | '24h' | 'custom'; '' means no time bound. */
+  timeRange: string;
+  /** #190 custom bounds as typed (ISO-8601 or epoch seconds); '' when unset. */
+  customFromTime: string;
+  customToTime: string;
 }
 
 /** The complete view state that can be encoded in the URL. */
@@ -57,11 +66,16 @@ export function parseUrl(pathname: string, search: string): UrlState | null {
     filters: {
       contractId: params.get('contract') ?? '',
       topic: params.get('topic') ?? '',
+      address: params.get('address') ?? '',
+      search: params.get('search') ?? '',
       successfulOnly: params.get('successfulOnly') === 'true',
       // live defaults to true; only `live=false` turns it off.
       live: params.get('live') !== 'false',
       fromLedger: params.get('fromLedger') ?? '',
       toLedger: params.get('toLedger') ?? '',
+      timeRange: params.get('timeRange') ?? '',
+      customFromTime: params.get('fromTime') ?? '',
+      customToTime: params.get('toTime') ?? '',
     },
     network: params.get('network') ?? '',
     expandedEventId,
@@ -80,11 +94,16 @@ export function stringifyUrl(state: UrlState): string {
 
   if (f.contractId) params.set('contract', f.contractId);
   if (f.topic) params.set('topic', f.topic);
+  if (f.address) params.set('address', f.address);
+  if (f.search) params.set('search', f.search);
   if (f.successfulOnly) params.set('successfulOnly', 'true');
   // live defaults to true, so only write it when it is off.
   if (!f.live) params.set('live', 'false');
   if (f.fromLedger) params.set('fromLedger', f.fromLedger);
   if (f.toLedger) params.set('toLedger', f.toLedger);
+  if (f.timeRange) params.set('timeRange', f.timeRange);
+  if (f.customFromTime) params.set('fromTime', f.customFromTime);
+  if (f.customToTime) params.set('toTime', f.customToTime);
   if (state.network) params.set('network', state.network);
 
   const query = params.toString();
@@ -105,10 +124,15 @@ export function sameFilterView(a: UrlState, b: UrlState): boolean {
   return (
     a.filters.contractId === b.filters.contractId &&
     a.filters.topic === b.filters.topic &&
+    a.filters.address === b.filters.address &&
+    a.filters.search === b.filters.search &&
     a.filters.successfulOnly === b.filters.successfulOnly &&
     a.filters.live === b.filters.live &&
     a.filters.fromLedger === b.filters.fromLedger &&
     a.filters.toLedger === b.filters.toLedger &&
+    a.filters.timeRange === b.filters.timeRange &&
+    a.filters.customFromTime === b.filters.customFromTime &&
+    a.filters.customToTime === b.filters.customToTime &&
     a.network === b.network
   );
 }
