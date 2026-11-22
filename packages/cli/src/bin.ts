@@ -11,14 +11,14 @@
 import { parseArgs } from 'node:util';
 import { access, readFile } from 'node:fs/promises';
 import { SqliteEventStore } from '@soroban-lens/store';
-import type { ContractSpecRecord, RawEventInput } from '@soroban-lens/store';
+import type { ContractSpecRecord, EventQuery, RawEventInput } from '@soroban-lens/store';
 import { resolveConfig } from './config.js';
 import { formatReport, runDoctor } from './doctor.js';
 import { applyFixes, formatFixes } from './fix.js';
 import { buildTailQuery, followEvents, formatEvent, formatEventJson, TailUsageError, wantsColor } from './tail.js';
 import { runIndexer } from './indexer.js';
 import { restoreBackup } from './backup.js';
-import { assertContractIds, loadContractIdsFromFile, ContractFileParseError } from '@soroban-lens/ingest';
+import { assertContractIds, isContractId, CONTRACT_ID_HINT, loadContractIdsFromFile, ContractFileParseError } from '@soroban-lens/ingest';
 import {
   describeSpecRecord,
   lookupContractSpec,
@@ -41,7 +41,9 @@ Usage:
   lens redecode [--all]              Re-run the decoder over previously-failed rows.
   lens verify [--repair]             Check stored-row invariants; optionally fix them.
   lens migrate --down --to <n>       Roll back migrations above version <n>.
-  lens export <path>                 Write every event as NDJSON, backend-portable.
+  lens export <path> [filters]       Write events as NDJSON, backend-portable. Filters:
+                                    -c <id>, --from-ledger/--to-ledger <n>,
+                                    --from-time/--to-time <t>.
   lens backup <path>                 Consistent copy of the whole database, safe while indexing.
   lens restore <path> [--force]      Replace the database with a backup (stop the indexer first).
   lens import <path>                 Load an NDJSON snapshot written by 'lens export'.
@@ -105,6 +107,11 @@ Examples:
   lens tail   --topic transfer --json | jq .value
 `;
 
+/** `lens export` filter flags that fail shape checks (#155). */
+class ExportUsageError extends Error {
+  override readonly name = 'ExportUsageError';
+}
+
 async function main(argv: string[]): Promise<number> {
   const command = argv[0];
   const rest = command && !command.startsWith('-') ? argv.slice(1) : argv;
@@ -147,7 +154,9 @@ async function main(argv: string[]): Promise<number> {
       search: { type: 'string' },
       'successful-only': { type: 'boolean' },
       'from-ledger': { type: 'string' },
+      'to-ledger': { type: 'string' },
       'from-time': { type: 'string' },
+      'to-time': { type: 'string' },
       json: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -495,9 +504,57 @@ async function main(argv: string[]): Promise<number> {
         process.stderr.write('error: lens export requires a destination path\n');
         return 2;
       }
+      // #155: an EventQuery-style subset — contract(s), ledger range, time
+      // range — the same fields and shape checks the tail filters use.
+      const filter: EventQuery = {};
+      const contracts = values.contract ?? [];
+      for (const c of contracts) {
+        if (!isContractId(c)) {
+          process.stderr.write(`error: "${c}" is not a contract id. ${CONTRACT_ID_HINT}\n`);
+          return 2;
+        }
+      }
+      if (contracts.length === 1) filter.contractId = contracts[0];
+      else if (contracts.length > 1) filter.contractIds = contracts;
+      const ledgerBound = (key: 'from-ledger' | 'to-ledger'): number | undefined => {
+        const raw = values[key];
+        if (raw === undefined) return undefined;
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 0) {
+          throw new ExportUsageError(`--${key} must be a non-negative integer, got "${raw}"`);
+        }
+        return n;
+      };
+      const timeBound = (key: 'from-time' | 'to-time'): number | undefined => {
+        const raw = values[key];
+        if (raw === undefined) return undefined;
+        const v = raw.trim();
+        if (/^-?\d+$/.test(v)) return Number(v);
+        const parsed = Date.parse(v);
+        if (Number.isNaN(parsed)) {
+          throw new ExportUsageError(`--${key} must be an ISO-8601 timestamp or epoch seconds, got "${raw}"`);
+        }
+        return Math.floor(parsed / 1000);
+      };
+      try {
+        const fromLedger = ledgerBound('from-ledger');
+        const toLedger = ledgerBound('to-ledger');
+        const fromTime = timeBound('from-time');
+        const toTime = timeBound('to-time');
+        if (fromLedger !== undefined) filter.fromLedger = fromLedger;
+        if (toLedger !== undefined) filter.toLedger = toLedger;
+        if (fromTime !== undefined) filter.fromTime = fromTime;
+        if (toTime !== undefined) filter.toTime = toTime;
+      } catch (error) {
+        if (error instanceof ExportUsageError) {
+          process.stderr.write(`error: ${error.message}\n`);
+          return 2;
+        }
+        throw error;
+      }
       const store = new SqliteEventStore({ path: config.dbPath });
       try {
-        const count = await store.exportSnapshot(path);
+        const count = await store.exportSnapshot(path, Object.keys(filter).length ? filter : undefined);
         process.stderr.write(`[lens] exported ${count} event(s) to ${path}\n`);
       } finally {
         await store.close();
@@ -593,7 +650,7 @@ function generateCompletion(shell: string): string {
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
   commands="doctor index seed stats tail prune redecode verify migrate export import backup restore spec completion"
-  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --page-size-min --page-size-max --reorg-depth --poll-interval --once --max-events --fixture --before-ledger --force --fix --topic --address --tx-hash --search --successful-only --from-ledger --from-time --json -h --help"
+  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --page-size-min --page-size-max --reorg-depth --poll-interval --once --max-events --fixture --before-ledger --force --fix --topic --address --tx-hash --search --successful-only --from-ledger --to-ledger --from-time --to-time --json -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )

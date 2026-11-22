@@ -1129,7 +1129,7 @@ export class SqliteEventStore implements EventStore {
     this.#db.prepare('VACUUM INTO ?').run(destPath);
   }
 
-  async exportSnapshot(destPath: string): Promise<number> {
+  async exportSnapshot(destPath: string, filter?: EventQuery): Promise<number> {
     // VACUUM INTO takes a consistent, point-in-time copy even while another
     // connection (the indexer) is mid-write — it is SQLite's own supported
     // mechanism for exactly this, which is why the issue names it directly.
@@ -1142,7 +1142,13 @@ export class SqliteEventStore implements EventStore {
 
     const snapshot = new DatabaseSync(tempPath);
     try {
-      const rows = snapshot.prepare('SELECT * FROM events ORDER BY id ASC').all() as unknown as EventRow[];
+      // #155: a subset export reuses the queryEvents WHERE builder verbatim —
+      // the snapshot has the same schema, so a filter means exactly the same
+      // thing here as it does on a live query.
+      const { clause, values } = filter ? buildWhere(filter) : { clause: '', values: [] as SqlParam[] };
+      const rows = snapshot
+        .prepare(`SELECT * FROM events ${clause} ORDER BY id ASC`)
+        .all(...values) as unknown as EventRow[];
       const out = createWriteStream(destPath, { encoding: 'utf8' });
       try {
         for (const row of rows) out.write(`${JSON.stringify(rowToEvent(row))}
