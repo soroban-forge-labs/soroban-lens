@@ -124,13 +124,16 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
     },
   });
 
-  const cursorKey = defaultCursorKey(config.network.rpcUrl, config.contractIds);
+  const cursorKey = defaultCursorKey(config.network.rpcUrl);
   const poller = new EventPoller(
     {
       contractIds: config.contractIds,
       pageSize: config.pageSize,
       pollIntervalMs: config.pollIntervalMs,
       maxPollIntervalMs: config.maxPollIntervalMs,
+      // Fail fast when `--network` and the node disagree (#139). This is the
+      // exact combination that otherwise indexes testnet data as mainnet.
+      networkPassphrase: config.network.networkPassphrase,
       ...(config.startLedger !== undefined ? { startLedger: config.startLedger } : {}),
     },
     {

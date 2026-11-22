@@ -30,6 +30,9 @@ export class FailoverRpcClient {
   async health(): Promise<Awaited<ReturnType<LensRpcClient['health']>>> {
     return this.#request((client) => client.health());
   }
+  async getNetwork(): Promise<Awaited<ReturnType<LensRpcClient['getNetwork']>>> {
+    return this.#request((client) => client.getNetwork());
+  }
   async retention(): Promise<RetentionState> { return this.#request((client) => client.retention()); }
   async latestLedger(): Promise<number> { return this.#request((client) => client.latestLedger()); }
   async clockSkew(options: Parameters<LensRpcClient['clockSkew']>[0] = {}): ReturnType<LensRpcClient['clockSkew']> { return this.#request((client) => client.clockSkew(options)); }

@@ -16,12 +16,14 @@ export type {
   ChunkState,
 } from './types.js';
 
-export { LensRpcClient, buildFilters, MAX_PAGE_SIZE, MAX_CONTRACT_IDS_PER_FILTER } from './rpc-client.js';
+export { LensRpcClient, buildFilters, compareRawEvents, MAX_PAGE_SIZE, MAX_CONTRACT_IDS_PER_FILTER } from './rpc-client.js';
 export type { RpcClientOptions, GetEventsArgs, GetEventsChunkedArgs, ChunkedEventBatch } from './rpc-client.js';
 
 export {
   EventPoller,
+  NetworkPassphraseMismatchError,
   defaultCursorKey,
+  contractCursorKey,
   ingestionLag,
   APPROX_LEDGER_SECONDS,
   DEFAULT_POLL_INTERVAL_MS,

@@ -15,7 +15,7 @@ import { IngestMetrics } from './metrics.js';
 import { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';
 import { loadContractIdsFromFile, ContractFileParseError } from './contract-id.js';
 
-const EVENT_TYPES: EventType[] = ['contract', 'system', 'diagnostic'];
+const EVENT_TYPES: EventType[] = ['contract', 'system'];
 
 function isEventType(value: string): value is EventType {
   return (EVENT_TYPES as string[]).includes(value);
@@ -101,14 +101,15 @@ Options:
       --contracts-file <path>  Load contract ids from a file (one per line, # comments allowed).
                            Merged with any -c flags; duplicates silently dropped.
   -n, --network <name>     ${Object.keys(NETWORKS).join(' | ')}  (default: testnet)
-  -r, --rpc-url <url>      Override the network's RPC URL.
+  -r, --rpc-url <url>      Override the network's RPC URL. The node's passphrase
+                           must match --network, or the run fails before indexing.
       --start-ledger <n>   First ledger to read when no cursor is stored.
       --page-size <n>      Events per RPC page, 1-10000 (default: 200).
       --poll-interval <ms> Wait after catching up to the tip (default: 2000).
       --poll-max-interval <ms> Maximum idle wait after repeated empty polls (default: 30000).
       --stalled-threshold <ms> Warn if the RPC tip does not advance (default: 60000).
       --end-ledger <n>     Last ledger to read. Exits cleanly once passed.
-      --type <kind>        contract | system | diagnostic (default: contract).
+      --type <kind>        contract | system (default: contract).
       --topic <seg>        Server-side topic filter segment: a base64 ScVal, or
                            '*' to match any value in that position. Repeatable,
                            positional, at most 4 — the RPC matches a prefix of
@@ -245,7 +246,7 @@ async function main(argv: string[]): Promise<number> {
   if (values.type !== undefined) {
     if (!isEventType(values.type)) {
       process.stderr.write(
-        `error: --type must be contract, system or diagnostic, got "${values.type}"\n`,
+        `error: --type must be contract or system, got "${values.type}"\n`,
       );
       return 2;
     }
@@ -326,6 +327,9 @@ async function main(argv: string[]): Promise<number> {
     {
       contractIds,
       eventType,
+      // Refuse to index the wrong network (#139): a mismatch fails before the
+      // first getEvents call rather than mislabelling every stored event.
+      networkPassphrase: network.networkPassphrase,
       ...(topics ? { topics } : {}),
       ...(endLedger !== undefined ? { endLedger } : {}),
       ...(startLedger !== undefined ? { startLedger } : {}),

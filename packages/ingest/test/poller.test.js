@@ -16,6 +16,12 @@ import {
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
 const OTHER = 'CA6F5E42TCRGPMDXU33WGMXAADPNEKOIZETAWSKYKAWNHESQQ2MTLSCC';
 
+/**
+ * #142: `cursorKey` is a base key; the poller derives per-contract keys as
+ * `<base>:<contractId>`. These helpers keep the tests reading naturally.
+ */
+const K = (base, id) => `${base}:${id}`;
+
 const rawEvent = (ledger, n) => ({
   id: `00201662329593528${String(ledger).slice(-2)}-000000000${n}`,
   type: 'contract',
@@ -71,7 +77,6 @@ test('metrics advance after acknowledgement and include empty-page progress', as
   assert.doesNotMatch(metrics.render(), /lens_events_ingested_total\{/);
   assert.equal((await stream.next()).done, true);
   assert.match(metrics.render(), /lens_events_ingested_total\{contract="[^"]+"\} 1\n/);
-  // The first page's idle callback stops this stream; use an empty bounded run.
   await new EventPoller({ contractIds: [SAC], endLedger: 4697317 }, {
     client: fakeClient([{ events: [], cursor: 'empty' }]), metrics,
   }).stream().next();
@@ -82,7 +87,7 @@ test('metrics advance after acknowledgement and include empty-page progress', as
 test('metrics count retention recovery once', async () => {
   const metrics = new IngestMetrics();
   const cursors = new MemoryCursorStore();
-  await cursors.save('metrics', { cursor: 'ancient', ledger: 100, updatedAt: '' });
+  await cursors.save(K('metrics', SAC), { cursor: 'ancient', ledger: 100, updatedAt: '' });
   await take(new EventPoller({ contractIds: [SAC] }, {
     client: fakeClient([
       new Error('start ledger is before the oldest ledger retained by this node'),
@@ -106,7 +111,6 @@ test('a fixed RPC tip warns once after the threshold and clears on advancement',
     { events: [], cursor: 'five', latestLedger: 4697318 },
   ]);
   const poller = new EventPoller({
-    // A fixed interval keeps quiet-contract backoff out of this stall test.
     contractIds: [SAC], pollIntervalMs: 10, maxPollIntervalMs: 10, stalledThresholdMs: 20,
   }, {
     client,
@@ -184,7 +188,7 @@ test('subsequent polls use the cursor and drop the ledger range', async () => {
 
 test('a restart resumes from the persisted cursor instead of the start ledger', async () => {
   const cursors = new MemoryCursorStore();
-  await cursors.save('resume-key', { cursor: 'saved-cursor', ledger: 4695317, updatedAt: '' });
+  await cursors.save(K('resume-key', SAC), { cursor: 'saved-cursor', ledger: 4695317, updatedAt: '' });
   const client = fakeClient([{ events: [rawEvent(4695318, 0)], cursor: 'cur-2' }]);
   const poller = new EventPoller({ contractIds: [SAC], startLedger: 4000000 }, {
     client, cursors, cursorKey: 'resume-key', sleep: async () => {},
@@ -204,11 +208,9 @@ test('the cursor is persisted after each page', async () => {
     client, cursors, cursorKey: 'k', sleep: async () => {},
   });
   await take(poller.stream(), 2);
-  const saved = await cursors.load('k');
+  const saved = await cursors.load(K('k', SAC));
   assert.equal(saved.cursor, 'cur-1', 'cursor advances only once the consumer pulls the next page');
   assert.equal(saved.ledger, 4695317);
-  // The window observed with that page is saved too, so the next restart can
-  // tell whether it is still inside it (#17).
   assert.deepEqual(saved.retention, { latestLedger: 4697317, oldestLedger: 4576358 });
 });
 
@@ -238,11 +240,7 @@ test('consecutive empty polls use capped exponential idle backoff', async () => 
   ]);
   const poller = new EventPoller(
     { contractIds: [SAC], startLedger: 4695000, pollIntervalMs: 100, maxPollIntervalMs: 250 },
-    {
-      client,
-      signal: controller.signal,
-      sleep: async (ms) => sleeps.push(ms),
-    },
+    { client, signal: controller.signal, sleep: async (ms) => sleeps.push(ms) },
   );
 
   await take(poller.stream(), 1);
@@ -334,7 +332,7 @@ test('a full page means more history is pending', async () => {
 
 test('a cursor that fell out of retention restarts from oldestLedger', async () => {
   const cursors = new MemoryCursorStore();
-  await cursors.save('k', { cursor: 'ancient', ledger: 100, updatedAt: '' });
+  await cursors.save(K('k', SAC), { cursor: 'ancient', ledger: 100, updatedAt: '' });
   const client = fakeClient([
     new Error('start ledger is before the oldest ledger retained by this node'),
     { events: [rawEvent(4576358, 0)], cursor: 'cur-fresh' },
@@ -352,7 +350,7 @@ test('a cursor that fell out of retention restarts from oldestLedger', async () 
 
 test('a restart whose saved position fell out of the window warns before fetching', async () => {
   const cursors = new MemoryCursorStore();
-  await cursors.save('k', {
+  await cursors.save(K('k', SAC), {
     cursor: 'ancient',
     ledger: 100,
     updatedAt: '2026-10-01T00:00:00Z',
@@ -365,8 +363,6 @@ test('a restart whose saved position fell out of the window warns before fetchin
   const logs = [];
   const poller = new EventPoller({ contractIds: [SAC] }, {
     client, cursors, cursorKey: 'k', sleep: async () => {},
-    // Snapshot the request count at log time: "before any events are fetched"
-    // is the whole point of the warning, so it has to be assertable.
     log: (m) => logs.push({ m, fetched: client.requests.length }),
   });
 
@@ -379,15 +375,13 @@ test('a restart whose saved position fell out of the window warns before fetchin
   assert.match(warning.m, /stopped at ledger 100/);
   assert.match(warning.m, /advanced 4576308 ledgers since then/);
   assert.match(warning.m, /4576258 ledger\(s\) of events in between are unrecoverable/);
-  // The warning is a warning, not a silent re-index: the saved cursor is still
-  // tried first and the existing recovery path does the restart.
   assert.equal(client.requests[0].cursor, 'ancient');
   assert.equal(batch.events[0].ledger, 4576358);
 });
 
 test('a restart still inside the window does not warn about a gap', async () => {
   const cursors = new MemoryCursorStore();
-  await cursors.save('k', {
+  await cursors.save(K('k', SAC), {
     cursor: 'saved',
     ledger: 4695317,
     updatedAt: '',
@@ -405,7 +399,7 @@ test('a restart still inside the window does not warn about a gap', async () => 
 
 test('a cursor saved before snapshots existed is compared by ledger alone', async () => {
   const cursors = new MemoryCursorStore();
-  await cursors.save('k', { cursor: 'ancient', ledger: 100, updatedAt: '' });
+  await cursors.save(K('k', SAC), { cursor: 'ancient', ledger: 100, updatedAt: '' });
   const client = fakeClient([{ events: [rawEvent(4576358, 0)], cursor: 'cur-1' }]);
   const logs = [];
   const poller = new EventPoller({ contractIds: [SAC] }, {
@@ -419,7 +413,7 @@ test('a cursor saved before snapshots existed is compared by ledger alone', asyn
 
 test('a failed retention check does not stop a warm restart', async () => {
   const cursors = new MemoryCursorStore();
-  await cursors.save('k', { cursor: 'saved', ledger: 4695317, updatedAt: '' });
+  await cursors.save(K('k', SAC), { cursor: 'saved', ledger: 4695317, updatedAt: '' });
   const client = {
     rpcUrl: 'https://soroban-testnet.stellar.org',
     requests: [],
@@ -450,9 +444,6 @@ test('errors that are not retention problems propagate', async () => {
   await assert.rejects(() => take(poller.stream(), 1), /invalid contract id encoding/);
 });
 
-// Recovery clears the saved cursor and replays from the oldest retained
-// ledger — up to seven days of work. These guard against triggering that on
-// anything short of a genuine retention miss.
 for (const [name, error] of [
   ['a transient error that merely mentions the cursor', new Error('bad gateway while forwarding cursor request')],
   ['a malformed-cursor rejection', new Error('invalid cursor encoding')],
@@ -461,22 +452,21 @@ for (const [name, error] of [
 ]) {
   test(`${name} does not trigger a full re-index`, async () => {
     const cursors = new MemoryCursorStore();
-    await cursors.save('k', { cursor: 'saved', ledger: 4695317, updatedAt: '' });
+    await cursors.save(K('k', SAC), { cursor: 'saved', ledger: 4695317, updatedAt: '' });
     const client = fakeClient([error, { events: [rawEvent(4576358, 0)], cursor: 'cur-fresh' }]);
     const poller = new EventPoller({ contractIds: [SAC] }, {
       client, cursors, cursorKey: 'k', sleep: async () => {},
     });
 
     await assert.rejects(() => take(poller.stream(), 1), (thrown) => thrown === error);
-    // The saved position must survive, or the next start replays from scratch.
-    assert.equal((await cursors.load('k')).cursor, 'saved');
+    assert.equal((await cursors.load(K('k', SAC))).cursor, 'saved');
     assert.equal(client.requests.length, 1, 'must not have retried from oldestLedger');
   });
 }
 
 test('a retention miss carrying the JSON-RPC invalid-request code still recovers', async () => {
   const cursors = new MemoryCursorStore();
-  await cursors.save('k', { cursor: 'ancient', ledger: 100, updatedAt: '' });
+  await cursors.save(K('k', SAC), { cursor: 'ancient', ledger: 100, updatedAt: '' });
   const client = fakeClient([
     Object.assign(new Error('cursor must be within the ledger range: 4576358 - 4697317'), {
       code: -32600,
@@ -510,7 +500,6 @@ test('an abort signal stops the stream', async () => {
 
 test('a malformed contract id is rejected before any network call', () => {
   const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
-  // An account id is the mistake worth naming: same alphabet, wrong prefix.
   assert.throws(
     () => new EventPoller({ contractIds: ['GBIBH5UV4Q5L7VVJIHWYBTCSUDHJQXQC2V6Y5LOW4D26XNU5NREMIKE4'] }, { client }),
     (error) => {
@@ -560,7 +549,7 @@ test('readiness drops after exhausted RPC retries and recovers on an empty page'
   });
   const batches = [];
   for await (const batch of poller.stream()) batches.push(batch);
-  assert.equal(batches.length, 0, 'empty successful pages should not require events to become ready');
+  assert.equal(batches.length, 0);
   assert.equal(sleeps, 2);
   assert.equal(metrics.isReady(1000), true);
 });
@@ -578,13 +567,11 @@ test('contract id validation catches every malformed id, not just the first', ()
 
 test('a well-formed contract id and an empty list are both accepted', () => {
   const client = fakeClient([]);
-  const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
   assert.doesNotThrow(() => new EventPoller({ contractIds: [SAC] }, { client }));
-  // Empty means "every contract on the network", which is documented behaviour.
   assert.doesNotThrow(() => new EventPoller({ contractIds: [] }, { client }));
 });
 
-// ── #10 report ingestion lag in PollerProgress ───────────────────────────────
+// ── #10 report ingestion lag in PollerProgress ────────────────────────────────
 
 test('progress reports lag in ledgers and an estimated wall-clock lag', async () => {
   const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
@@ -603,11 +590,10 @@ test('ingestionLag is the single definition every consumer shares', () => {
 });
 
 test('lag never goes negative when the node reports a stale latestLedger', () => {
-  // The page we were just served can be ahead of the node's own latestLedger.
   assert.deepEqual(ingestionLag(200, 160), { lagLedgers: 0, lagSeconds: 0 });
 });
 
-// ── #19 warn when a page hits the RPC ceiling ────────────────────────────────
+// ── #19 warn when a page hits the RPC ceiling ─────────────────────────────────
 
 test('a page at the RPC ceiling logs a distinct warning naming the ledger', async () => {
   const events = Array.from({ length: MAX_PAGE_SIZE }, (_, i) => rawEvent(4695317, i));
@@ -625,7 +611,6 @@ test('a page at the RPC ceiling logs a distinct warning naming the ledger', asyn
 });
 
 test('a full page below the ceiling is not a ceiling warning', async () => {
-  // Merely "not caught up" — the ordinary case, and must stay quiet.
   const events = Array.from({ length: 2 }, (_, i) => rawEvent(4695317 + i, i));
   const client = fakeClient([{ events, cursor: 'cur-1' }]);
   const logs = [];
@@ -638,12 +623,10 @@ test('a full page below the ceiling is not a ceiling warning', async () => {
   assert.equal(logs.find((l) => l.includes('RPC ceiling')), undefined);
 });
 
-// ── #11 dedupe within a batch before yielding ────────────────────────────────
+// ── #11 dedupe within a batch before yielding ─────────────────────────────────
 
 test('a replayed batch emits each event exactly once', async () => {
   const first = [rawEvent(4695317, 0), rawEvent(4695318, 1)];
-  // The same page served twice, which is what at-least-once delivery does
-  // after a crash mid-write.
   const client = fakeClient([
     { events: first, cursor: 'cur-1' },
     { events: [...first, rawEvent(4695319, 2)], cursor: 'cur-2' },
@@ -656,7 +639,7 @@ test('a replayed batch emits each event exactly once', async () => {
   const ids = batches.flatMap((b) => b.events.map((e) => e.id));
   assert.equal(new Set(ids).size, ids.length, `duplicate ids emitted: ${ids.join(', ')}`);
   assert.equal(ids.length, 3);
-  assert.equal(batches[1].events.length, 1, 'only the genuinely new event survives');
+  assert.equal(batches[1].events.length, 1);
 });
 
 test('duplicates within a single page are dropped too', async () => {
@@ -683,12 +666,10 @@ test('a page that is entirely duplicates is not yielded but still advances', asy
 
   const batches = await take(poller.stream(), 2);
   assert.deepEqual(batches.map((b) => b.events.length), [1, 1]);
-  assert.equal(batches[1].events[0].ledger, 4695320, 'the all-duplicate page was skipped');
+  assert.equal(batches[1].events[0].ledger, 4695320);
 });
 
 test('caughtUp still reflects what the RPC returned, not what survived dedup', async () => {
-  // A full page of repeats means there IS more history to walk, even though
-  // nothing new came out of it.
   const events = Array.from({ length: 2 }, (_, i) => rawEvent(4695317 + i, i));
   const client = fakeClient([
     { events, cursor: 'cur-1' },
@@ -702,18 +683,15 @@ test('caughtUp still reflects what the RPC returned, not what survived dedup', a
   assert.equal(batch.progress.caughtUp, false);
 });
 
-// ── #4 expose system events ──────────────────────────────────────────────────
+// ── #4 expose system events ───────────────────────────────────────────────────
 
 test('buildFilters defaults to contract events, unchanged', () => {
   assert.deepEqual(buildFilters([]), [{ type: 'contract' }]);
   assert.deepEqual(buildFilters(['CA']), [{ type: 'contract', contractIds: ['CA'] }]);
 });
 
-test('buildFilters can ask for system and diagnostic events', () => {
+test('buildFilters can ask for system events; diagnostic was removed (#144)', () => {
   assert.deepEqual(buildFilters([], undefined, 'system'), [{ type: 'system' }]);
-  assert.deepEqual(buildFilters(['CA'], undefined, 'diagnostic'), [
-    { type: 'diagnostic', contractIds: ['CA'] },
-  ]);
 });
 
 test('the event type reaches the RPC filter, and defaults to contract', async () => {
@@ -733,7 +711,7 @@ test('the event type reaches the RPC filter, and defaults to contract', async ()
   assert.equal(plain.requests[0].filters[0].type, 'contract');
 });
 
-// ── #9 bounded runs with endLedger ───────────────────────────────────────────
+// ── #9 bounded runs with endLedger ────────────────────────────────────────────
 
 test('endLedger is passed to the RPC and ends the stream cleanly', async () => {
   const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
@@ -745,7 +723,6 @@ test('endLedger is passed to the RPC and ends the stream cleanly', async () => {
   const batches = [];
   for await (const batch of poller.stream()) batches.push(batch);
 
-  // The generator returned on its own rather than idling at the tip forever.
   assert.equal(batches.length, 1);
   assert.equal(client.requests[0].endLedger, 4695400);
   assert.equal(batches[0].progress.reachedEndLedger, true);
@@ -780,7 +757,7 @@ test('an unbounded run never reports reachedEndLedger', async () => {
   assert.equal(client.requests[0].endLedger, undefined);
 });
 
-// ── #5 topic filters reach the RPC ───────────────────────────────────────────
+// ── #5 topic filters reach the RPC ────────────────────────────────────────────
 
 test('topic filters are passed through to the RPC filter', async () => {
   const topics = [['AAAADwAAAAh0cmFuc2Zlcg==', '*']];
@@ -794,8 +771,6 @@ test('topic filters are passed through to the RPC filter', async () => {
 });
 
 test('the retention-gap restart does not wait through retry backoff', async () => {
-  // The real client wraps getEvents in withRetry; do the same here so the
-  // out-of-range rejection goes through the retry decision before the poller.
   const sleeps = [];
   const outOfRange = Object.assign(
     new Error('cursor is outside the retention window: must be between the oldest ledger 4576358 and the latest'),
@@ -808,7 +783,7 @@ test('the retention-gap restart does not wait through retry backoff', async () =
     getEvents: (args) => withRetry(() => inner.getEvents(args), { sleep: async (ms) => sleeps.push(ms) }),
   };
   const cursors = new MemoryCursorStore();
-  await cursors.save('gap', { cursor: 'ancient', ledger: 100, updatedAt: '' });
+  await cursors.save(K('gap', SAC), { cursor: 'ancient', ledger: 100, updatedAt: '' });
 
   const [batch] = await take(new EventPoller({ contractIds: [SAC] }, {
     client, cursors, cursorKey: 'gap', sleep: async (ms) => sleeps.push(ms),
@@ -818,4 +793,275 @@ test('the retention-gap restart does not wait through retry backoff', async () =
   assert.equal(inner.requests.length, 2, 'one rejected request, then the restart');
   assert.equal(inner.requests[1].startLedger, 4576358);
   assert.deepEqual(sleeps, [], 'no backoff before the restart');
+});
+
+// ── #139 check the network passphrase before the first poll ───────────────────
+
+test('a mismatched network passphrase fails before any getEvents call', async () => {
+  const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
+  client.getNetwork = async () => ({ passphrase: 'Test SDF Network ; September 2015' });
+  const poller = new EventPoller(
+    {
+      contractIds: [SAC],
+      networkPassphrase: 'Public Global Stellar Network ; September 2015',
+    },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  );
+
+  await assert.rejects(
+    () => poller.stream().next(),
+    (error) => {
+      assert.equal(error.name, 'NetworkPassphraseMismatchError');
+      assert.equal(error.expected, 'Public Global Stellar Network ; September 2015');
+      assert.equal(error.actual, 'Test SDF Network ; September 2015');
+      assert.equal(error.rpcUrl, 'https://soroban-testnet.stellar.org');
+      assert.match(error.message, /Network passphrase mismatch/);
+      return true;
+    },
+  );
+  assert.equal(client.requests.length, 0, 'must fail before reaching getEvents');
+});
+
+test('a matching network passphrase proceeds to the first poll', async () => {
+  const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
+  client.getNetwork = async () => ({ passphrase: 'Test SDF Network ; September 2015' });
+  const poller = new EventPoller(
+    {
+      contractIds: [SAC],
+      startLedger: 4695000,
+      networkPassphrase: 'Test SDF Network ; September 2015',
+    },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  );
+
+  const [batch] = await take(poller.stream(), 1);
+  assert.equal(batch.events.length, 1);
+  assert.equal(client.requests.length, 1);
+});
+
+test('no networkPassphrase configured skips the check entirely', async () => {
+  let called = 0;
+  const client = fakeClient([{ events: [rawEvent(4695317, 0)], cursor: 'cur-1' }]);
+  client.getNetwork = async () => { called++; return { passphrase: 'irrelevant' }; };
+  const poller = new EventPoller({ contractIds: [SAC], startLedger: 4695000 }, {
+    client, cursors: new MemoryCursorStore(), sleep: async () => {},
+  });
+
+  await take(poller.stream(), 1);
+  assert.equal(called, 0, 'getNetwork must not be called when no passphrase is configured');
+});
+
+test('getNetwork is called once, not once per page', async () => {
+  let called = 0;
+  const client = fakeClient([
+    { events: [rawEvent(4695317, 0)], cursor: 'cur-1' },
+    { events: [rawEvent(4695318, 1)], cursor: 'cur-2' },
+  ]);
+  client.getNetwork = async () => {
+    called++;
+    return { passphrase: 'Test SDF Network ; September 2015' };
+  };
+  const poller = new EventPoller(
+    {
+      contractIds: [SAC],
+      startLedger: 4695000,
+      networkPassphrase: 'Test SDF Network ; September 2015',
+    },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  );
+
+  await take(poller.stream(), 2);
+  assert.equal(called, 1, 'the check runs before the first poll and never again');
+});
+
+// ── #142 add a contract without replaying the others ─────────────────────────
+
+test('adding a contract does not reset the others (#142)', async () => {
+  // Two distinct valid contract ids plus a third for the "newly added" case.
+  const A = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+  const B = 'CA6F5E42TCRGPMDXU33WGMXAADPNEKOIZETAWSKYKAWNHESQQ2MTLSCC';
+  const C = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526';
+
+  const cursors = new MemoryCursorStore();
+  const requests = [];
+  const called = { [A]: 0, [B]: 0, [C]: 0 };
+
+  /**
+   * Each contract returns 2 events on its first call, then empty. The `called`
+   * counter is shared across `makeClient()` instances so round 1's progress is
+   * visible to round 2.
+   */
+  const makeClient = () => ({
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    async retention() { return { latestLedger: 4697317, oldestLedger: 4576358 }; },
+    async getEvents(args) {
+      const id = args.filters[0].contractIds[0];
+      requests.push({
+        id,
+        mode: args.cursor ? 'cursor' : 'startLedger',
+        startLedger: args.startLedger,
+        cursor: args.cursor,
+      });
+      const n = called[id]++;
+      const events = n === 0
+        ? [
+            { ...rawEvent(4695317, 0), contractId: id },
+            { ...rawEvent(4695318, 1), contractId: id },
+          ]
+        : [];
+      return {
+        events,
+        cursor: `cursor-${id}-${n}`,
+        latestLedger: 4697317,
+        oldestLedger: 4576358,
+      };
+    },
+  });
+
+  // Round 1: [A, B] indexed to caught-up. Cursors saved per contract.
+  for await (const _ of new EventPoller(
+    { contractIds: [A, B], startLedger: 4695000, endLedger: 4697317, pageSize: 10 },
+    { client: makeClient(), cursors, sleep: async () => {} },
+  ).stream()) { /* drain */ }
+
+  requests.length = 0;
+  // A and B were each called once; leaving `called` alone means round 2 sees
+  // them "caught up" (empty page) and C "backfilling" (its first page).
+
+  // Round 2: same config plus C.
+  for await (const _ of new EventPoller(
+    { contractIds: [A, B, C], startLedger: 4695000, endLedger: 4697317, pageSize: 10 },
+    { client: makeClient(), cursors, sleep: async () => {} },
+  ).stream()) { /* drain */ }
+
+  const aReqs = requests.filter((r) => r.id === A);
+  const bReqs = requests.filter((r) => r.id === B);
+  const cReqs = requests.filter((r) => r.id === C);
+
+  // Existing contracts: every request carries a cursor, never a start ledger.
+  assert.ok(aReqs.length > 0, 'A must be polled');
+  assert.ok(aReqs.every((r) => r.mode === 'cursor'),
+    `A must never backfill, got: ${JSON.stringify(aReqs)}`);
+  assert.ok(bReqs.length > 0, 'B must be polled');
+  assert.ok(bReqs.every((r) => r.mode === 'cursor'),
+    `B must never backfill, got: ${JSON.stringify(bReqs)}`);
+
+  // New contract: backfills from its start ledger, then uses its own cursor.
+  assert.ok(cReqs.length > 0, 'C must be polled');
+  assert.equal(cReqs[0].mode, 'startLedger');
+  assert.equal(cReqs[0].startLedger, 4695000);
+  if (cReqs.length > 1) {
+    assert.ok(cReqs.slice(1).every((r) => r.mode === 'cursor'),
+      'C must resume from its own cursor after its first page');
+  }
+});
+
+test('adding a contract does not re-read pages for the others — page counts (#142)', async () => {
+  const A = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+  const B = 'CA6F5E42TCRGPMDXU33WGMXAADPNEKOIZETAWSKYKAWNHESQQ2MTLSCC';
+  const C = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526';
+
+  const cursors = new MemoryCursorStore();
+  const requests = [];
+  const called = { [A]: 0, [B]: 0, [C]: 0 };
+
+  // Slow path: A and B each have 3 events and are re-indexed page-by-page
+  // (pageSize 1) so the count is unambiguous. If a reset happened, their
+  // pages in round 2 would be > 1 (they would need to re-fetch history).
+  const makeClient = () => ({
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    async retention() { return { latestLedger: 4697317, oldestLedger: 4576358 }; },
+    async getEvents(args) {
+      const id = args.filters[0].contractIds[0];
+      requests.push({ id, mode: args.cursor ? 'cursor' : 'startLedger' });
+      const n = called[id]++;
+      const events = n < 3
+        ? [{ ...rawEvent(4695317 + n, n), contractId: id }]
+        : [];
+      return {
+        events,
+        cursor: `cursor-${id}-${n}`,
+        latestLedger: 4697317,
+        oldestLedger: 4576358,
+      };
+    },
+  });
+
+  // Round 1: A and B fully indexed.
+  for await (const _ of new EventPoller(
+    { contractIds: [A, B], startLedger: 4695000, endLedger: 4697317, pageSize: 1 },
+    { client: makeClient(), cursors, sleep: async () => {} },
+  ).stream()) { /* drain */ }
+
+  requests.length = 0;
+
+  // Round 2: add C. If A or B were reset, their page counts would exceed 1.
+  for await (const _ of new EventPoller(
+    { contractIds: [A, B, C], startLedger: 4695000, endLedger: 4697317, pageSize: 1 },
+    { client: makeClient(), cursors, sleep: async () => {} },
+  ).stream()) { /* drain */ }
+
+  const aPages = requests.filter((r) => r.id === A).length;
+  const bPages = requests.filter((r) => r.id === B).length;
+  // A and B are already caught up, so each needs exactly one empty page per
+  // round before the round concludes. Crucially, they never re-index.
+  assert.equal(aPages, 1, `A must not re-read (expected 1 empty page, got ${aPages})`);
+  assert.equal(bPages, 1, `B must not re-read (expected 1 empty page, got ${bPages})`);
+});
+
+// ── #143 record and replay RPC traffic ────────────────────────────────────────
+
+test('a poller runs end to end from a committed recording (#143)', async () => {
+  const { fileURLToPath } = await import('node:url');
+  const { RecordedRpcClient } = await import('../dist/index.js');
+  const path = fileURLToPath(new URL('../../../fixtures/testnet-getevents-recording.json', import.meta.url));
+  const client = await RecordedRpcClient.load(path);
+
+  // Same startup sequence as a real run: passphrase check (#139), then the
+  // backfill resolution reads `retention()`, then per-contract `getEvents`.
+  const poller = new EventPoller(
+    {
+      contractIds: [SAC],
+      startLedger: 4695000,
+      endLedger: 4695400,
+      pageSize: 2,
+      networkPassphrase: 'Test SDF Network ; September 2015',
+    },
+    { client, cursors: new MemoryCursorStore(), sleep: async () => {} },
+  );
+
+  const batches = [];
+  for await (const batch of poller.stream()) batches.push(batch);
+
+  // Two pages: 2 events (full), 1 event (short, caught up, reachedEndLedger).
+  assert.equal(batches.length, 2);
+  assert.equal(batches[0].events.length, 2);
+  assert.equal(batches[1].events.length, 1);
+  assert.equal(batches[0].progress.caughtUp, false);
+  assert.equal(batches[1].progress.caughtUp, true);
+  assert.equal(batches[1].progress.reachedEndLedger, true);
+
+  const ids = batches.flatMap((b) => b.events.map((e) => e.id));
+  assert.equal(ids.length, 3, 'all three recorded events were replayed');
+  assert.equal(new Set(ids).size, ids.length, 'no duplicates across pages');
+  assert.deepEqual(batches[0].events.map((e) => e.ledger), [4695317, 4695318]);
+  assert.deepEqual(batches[1].events.map((e) => e.ledger), [4695319]);
+
+  // Every event came from the recording's contract, not a hand-written fake.
+  const contracts = new Set(batches.flatMap((b) => b.events.map((e) => e.contractId)));
+  assert.deepEqual([...contracts], [SAC]);
+});
+
+test('a replayed recording with no matching exchange fails clearly (#143)', async () => {
+  const { RecordedRpcClient } = await import('../dist/index.js');
+  const client = new RecordedRpcClient({
+    version: 1,
+    recordedAt: '2026-09-15T21:40:00Z',
+    meta: { rpcUrl: 'https://example.invalid' },
+    exchanges: [{ method: 'retention', args: null, response: { latestLedger: 1, oldestLedger: 1 } }],
+  });
+  await assert.rejects(
+    () => client.getEvents({ filters: [], startLedger: 1 }),
+    /no recorded getEvents exchange/,
+  );
 });

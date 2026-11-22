@@ -38,6 +38,7 @@ export async function runDoctor(config: LensConfig): Promise<CheckResult[]> {
     checkDiskSpace(config.dataDir),
     checkDatabase(config.dbPath),
     checkRpc(config),
+    checkNetworkPassphrase(config),
     checkClockSkew(config),
     checkArchive(config),
   ]);
@@ -185,6 +186,58 @@ async function checkRpc(config: LensConfig): Promise<CheckResult> {
 }
 
 /**
+ * Confirm the RPC node is on the network `--network` / `LENS_NETWORK` selected (#139).
+ *
+ * The indexer's own startup check covers this after the fact, but doctor is
+ * where an operator finds out *before* they run `lens index`. A testnet node
+ * behind `--network mainnet` looks healthy from every other angle; only
+ * `getNetwork` reveals the passphrase mismatch, and only this check surfaces
+ * it as a first-class diagnostic.
+ *
+ * A transient `getNetwork` failure is a warning, not a failure: the Soroban
+ * RPC check above already reports an unreachable endpoint, and a second red X
+ * for the same root cause adds noise without adding information.
+ */
+async function checkNetworkPassphrase(config: LensConfig): Promise<CheckResult> {
+  const expected = config.network.networkPassphrase;
+  const client = new FailoverRpcClient({
+    rpcUrls: config.rpcUrls,
+    ...(Object.keys(config.rpcHeaders).length > 0 ? { headers: config.rpcHeaders } : {}),
+    retry: { attempts: 1 },
+    timeoutSeconds: 10,
+  });
+  try {
+    const { passphrase } = await client.getNetwork();
+    if (passphrase === expected) {
+      return {
+        name: 'Network passphrase',
+        status: 'pass',
+        detail: `RPC reports "${expected}" for ${config.network.name}`,
+      };
+    }
+    return {
+      name: 'Network passphrase',
+      status: 'fail',
+      detail:
+        `RPC reports "${passphrase}", but network "${config.network.name}" expects "${expected}"`,
+      fix:
+        `The RPC URL points at a node on a different network than --network / LENS_NETWORK. ` +
+        `Either change --network to the network the node is actually on, or change --rpc-url / ` +
+        `LENS_RPC_URL to a "${config.network.name}" node.`,
+    };
+  } catch (error) {
+    return {
+      name: 'Network passphrase',
+      status: 'warn',
+      detail: `could not verify passphrase: ${message(error)}`,
+      fix:
+        'The Soroban RPC check above covers reachability; this check would confirm that the node is on the network you selected. ' +
+        'Re-run `lens doctor` once the RPC endpoint is reachable.',
+    };
+  }
+}
+
+/**
  * Local clock versus the network's latest ledger close time (#18).
  *
  * A warning, not a failure: the indexer still runs, but every time-based query
@@ -289,7 +342,7 @@ export function formatReport(results: CheckResult[]): { text: string; exitCode: 
   const lines = ['', 'lens doctor', ''];
 
   for (const r of results) {
-    lines.push(`  ${icon[r.status]}  ${r.name.padEnd(16)} ${r.detail}`);
+    lines.push(`  ${icon[r.status]}  ${r.name.padEnd(20)} ${r.detail}`);
     if (r.fix) lines.push(`     ↳ ${r.fix}`);
   }
 

@@ -181,7 +181,7 @@ test('StoreBackedCursors keeps resume state in the events database', async () =>
   await store.close();
 });
 
-// ── #6 retry tuning ──────────────────────────────────────────────────────────
+// ── #6 retry tuning ───────────────────────────────────────────────────────────
 
 test('retry tuning falls back to the documented defaults', () => {
   const config = resolveConfig({}, {});
@@ -207,7 +207,7 @@ test('a non-numeric retry value falls back rather than becoming NaN', () => {
   assert.equal(config.retry.attempts, 5);
 });
 
-// ── #7 RPC headers ───────────────────────────────────────────────────────────
+// ── #7 RPC headers ────────────────────────────────────────────────────────────
 
 test('RPC headers are parsed from flags and the environment', () => {
   const config = resolveConfig(
@@ -255,7 +255,7 @@ test('doctor reports header names without their values', async () => {
   assert.match(text, /Authorization: <redacted>/);
 });
 
-// ── #21 lens prune ───────────────────────────────────────────────────────────
+// ── #21 lens prune ────────────────────────────────────────────────────────────
 
 test('prune removes rows below the ledger and shrinks the database', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'lens-prune-'));
@@ -286,17 +286,25 @@ test('prune removes rows below the ledger and shrinks the database', async () =>
   await rm(dir, { recursive: true, force: true });
 });
 
-/** A fake RPC answering getHealth and getLatestLedger, the two calls doctor makes. */
-async function fakeRpc(closeTimeSeconds) {
+/**
+ * A fake RPC answering getHealth, getNetwork and getLatestLedger — the three
+ * calls doctor makes. `passphrase` defaults to the testnet preset so existing
+ * clock-skew tests keep passing without having to name a network.
+ */
+async function fakeRpc(closeTimeSeconds, passphrase = 'Test SDF Network ; September 2015') {
   const server = createServer(async (request, response) => {
     let body = '';
     for await (const chunk of request) body += chunk;
     const { method, id } = JSON.parse(body);
     response.setHeader('content-type', 'application/json');
-    const result =
-      method === 'getHealth'
-        ? { status: 'healthy', latestLedger: 500, oldestLedger: 100, ledgerRetentionWindow: 400 }
-        : { id: 'x', sequence: 500, protocolVersion: 23, closeTime: String(closeTimeSeconds) };
+    let result;
+    if (method === 'getHealth') {
+      result = { status: 'healthy', latestLedger: 500, oldestLedger: 100, ledgerRetentionWindow: 400 };
+    } else if (method === 'getNetwork') {
+      result = { passphrase, protocolVersion: 23, friendbotUrl: '' };
+    } else {
+      result = { id: 'x', sequence: 500, protocolVersion: 23, closeTime: String(closeTimeSeconds) };
+    }
     response.end(JSON.stringify({ jsonrpc: '2.0', id, result }));
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -360,8 +368,52 @@ test('doctor warns that skew could not be measured when the RPC is unreachable',
   assert.match(skew.detail, /could not read/);
 });
 
+// ── #139 check the network passphrase on startup ──────────────────────────────
 
-// ── #141 --contracts-file ────────────────────────────────────────────────────
+test('doctor fails when the RPC node is on a different network than --network', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-doctor-net-'));
+  // Testnet node, but the operator selected mainnet: exactly the combination
+  // from #139. Every event the indexer would produce would be mislabelled.
+  const rpc = await fakeRpc(Math.floor(Date.now() / 1000) - 3, 'Test SDF Network ; September 2015');
+  try {
+    const config = resolveConfig(
+      { dataDir: dir, db: join(dir, 'lens.db'), rpcUrl: rpc.url, contracts: [SAC], network: 'mainnet' },
+      {},
+    );
+    const check = find(await runDoctor(config), 'Network passphrase');
+    assert.equal(check.status, 'fail');
+    assert.match(check.detail, /Test SDF Network/);
+    assert.match(check.detail, /Public Global Stellar Network/);
+    assert.match(check.fix, /LENS_NETWORK/);
+    assert.match(check.fix, /LENS_RPC_URL/);
+  } finally {
+    await rpc.close();
+  }
+});
+
+test('doctor passes when the RPC passphrase matches the selected network', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-doctor-net-'));
+  const rpc = await fakeRpc(Math.floor(Date.now() / 1000) - 3, 'Test SDF Network ; September 2015');
+  try {
+    const config = resolveConfig(
+      { dataDir: dir, db: join(dir, 'lens.db'), rpcUrl: rpc.url, contracts: [SAC] }, // testnet is the default
+      {},
+    );
+    assert.equal(find(await runDoctor(config), 'Network passphrase').status, 'pass');
+  } finally {
+    await rpc.close();
+  }
+});
+
+test('doctor warns, but does not fail, when the passphrase cannot be verified', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-doctor-net-'));
+  const config = resolveConfig({ dataDir: dir, db: join(dir, 'lens.db'), rpcUrl: DEAD_RPC, contracts: [SAC] }, {});
+  const check = find(await runDoctor(config), 'Network passphrase');
+  assert.equal(check.status, 'warn');
+  assert.match(check.detail, /could not verify/);
+});
+
+// ── #141 --contracts-file ─────────────────────────────────────────────────────
 
 import { execFile as _execFile } from 'node:child_process';
 import { promisify } from 'node:util';

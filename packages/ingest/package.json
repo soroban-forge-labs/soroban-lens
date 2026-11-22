@@ -12,7 +12,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.js"
+    "test": "npm run build && node --test test/*.test.js",
+    "record-fixture": "npm run build && node dist/scripts/record-fixture.js"
   },
   "dependencies": { "@stellar/stellar-sdk": "^17.2.1" },
   "devDependencies": { "typescript": "^7.0.2", "@types/node": "^26.6.5" }
