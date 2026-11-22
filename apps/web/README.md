@@ -58,6 +58,9 @@ always emitting.
   to the explorer configured for the selected network (Stellar Expert by
   default). A network with no explorer configured shows plain text, not a link.
 - **Load more** — keyset pagination via the API's `nextCursor`.
+- **Estimated totals** — when the API serves the event total from its count
+  cache (`totalIsEstimate`), the count line reads "about 1,234 events" with a
+  tooltip saying why, instead of presenting a cached number as exact.
 
 Theme stays in `localStorage` (not the URL); everything else is in the address
 bar.
@@ -170,7 +173,8 @@ pure and covered by `test/explorer.test.js`.
    these. They cover `summarise()`/`truncate()`, the topic-prefix query builder,
    row expansion and keyboard navigation, the request versioning that stops a
    slow response overwriting a newer one (`src/requests.ts`), the
-   network-mismatch warning, and the table's windowing.
+   network-mismatch warning, the estimated-total count line, and the table's
+   windowing.
 
 jsdom has no layout, so anything that depends on real heights is tested through
 the pure arithmetic in `src/virtual.ts` rather than through the DOM.

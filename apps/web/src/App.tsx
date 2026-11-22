@@ -74,6 +74,9 @@ function AppInner(): React.JSX.Element {
     setExpandedEventIds((current) => (current.has(expandedEventId) ? current : new Set(current).add(expandedEventId)));
   }, [expandedEventId]);
   const [total, setTotal] = useState(0);
+  // True when `total` came from the store's count cache rather than a fresh
+  // COUNT(*) — shown as "about N" because it can lag a few seconds behind.
+  const [totalIsEstimate, setTotalIsEstimate] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [topics, setTopics] = useState<TopicCount[]>([]);
@@ -313,6 +316,7 @@ function AppInner(): React.JSX.Element {
       if (!isCurrent()) return;
       setEvents(page.events);
       setTotal(page.total);
+      setTotalIsEstimate(page.totalIsEstimate ?? false);
       setNextCursor(page.nextCursor);
       setContractUnknown(false);
       setEmptyReason(page.emptyReason ?? null);
@@ -326,6 +330,7 @@ function AppInner(): React.JSX.Element {
       if (err instanceof ApiRequestError && err.status === 404 && query.contractId) {
         setEvents([]);
         setTotal(0);
+        setTotalIsEstimate(false);
         setNextCursor(null);
         setContractUnknown(true);
         setEmptyReason(null);
@@ -353,6 +358,7 @@ function AppInner(): React.JSX.Element {
       });
       setNextCursor(page.nextCursor);
       setTotal(page.total);
+      setTotalIsEstimate(page.totalIsEstimate ?? false);
     } catch (err) {
       setError(err instanceof ApiRequestError ? err.message : String(err));
     } finally {
@@ -543,15 +549,15 @@ function AppInner(): React.JSX.Element {
   const eventCountText = (() => {
     const count = total.toLocaleString();
     if (query.contractId && debouncedTopic) {
-      return t('eventCountForContractWithTopic', { count, suffix, topic: debouncedTopic });
+      return t(totalIsEstimate ? 'eventCountForContractWithTopicEstimate' : 'eventCountForContractWithTopic', { count, suffix, topic: debouncedTopic });
     }
     if (query.contractId) {
-      return t('eventCountForContract', { count, suffix });
+      return t(totalIsEstimate ? 'eventCountForContractEstimate' : 'eventCountForContract', { count, suffix });
     }
     if (debouncedTopic) {
-      return t('eventCountWithTopic', { count, suffix, topic: debouncedTopic });
+      return t(totalIsEstimate ? 'eventCountWithTopicEstimate' : 'eventCountWithTopic', { count, suffix, topic: debouncedTopic });
     }
-    return t('eventCount', { count, suffix });
+    return t(totalIsEstimate ? 'eventCountEstimate' : 'eventCount', { count, suffix });
   })();
 
   // ── Empty message ─────────────────────────────────────────────────────────────
@@ -631,7 +637,13 @@ function AppInner(): React.JSX.Element {
 
       <div className="result-meta">
         <div className="result-meta-left">
-          <span aria-live="polite" aria-atomic="true">{eventCountText}</span>
+          <span
+            aria-live="polite"
+            aria-atomic="true"
+            title={totalIsEstimate ? t('eventCountEstimateTitle') : undefined}
+          >
+            {eventCountText}
+          </span>
           {filters.live && !activityRange && (
             <span
               className="live-dot"

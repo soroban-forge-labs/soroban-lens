@@ -54,6 +54,12 @@ export interface EventPage {
   prevCursor: string | null;
   total: number;
   /**
+   * True when `total` came from the store's short-lived count cache rather
+   * than a fresh COUNT(*) — accurate as of a few seconds ago, not this
+   * instant. Omitted (not false) on an exact, freshly-computed count.
+   */
+  totalIsEstimate?: true;
+  /**
    * Present on an empty contract page when the contract is indexed but nothing
    * matches the filters. An unindexed contract is a 404 instead.
    */

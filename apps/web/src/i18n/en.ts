@@ -22,6 +22,13 @@ export const en = {
   eventCountForContract: '{count} event{suffix} for this contract',
   eventCountWithTopic: '{count} event{suffix} with topic "{topic}"',
   eventCountForContractWithTopic: '{count} event{suffix} for this contract with topic "{topic}"',
+  /** The same four lines when the API marks the total as a cached estimate. */
+  eventCountEstimate: 'about {count} event{suffix}',
+  eventCountForContractEstimate: 'about {count} event{suffix} for this contract',
+  eventCountWithTopicEstimate: 'about {count} event{suffix} with topic "{topic}"',
+  eventCountForContractWithTopicEstimate: 'about {count} event{suffix} for this contract with topic "{topic}"',
+  eventCountEstimateTitle:
+    'Estimated total \u2014 the API served this count from a short-lived cache instead of counting every row, so it can be a few seconds behind.',
   live: 'live',
   streamingLive: 'Streaming live updates',
   pollingFallback: 'Polling every 5 seconds',
