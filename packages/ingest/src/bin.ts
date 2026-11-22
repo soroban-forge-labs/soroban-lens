@@ -14,30 +14,12 @@ import type { EventType } from './types.js';
 import { IngestMetrics } from './metrics.js';
 import { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';
 import { loadContractIdsFromFile, ContractFileParseError } from './contract-id.js';
+import { parseTopicFilters } from './topics.js';
 
 const EVENT_TYPES: EventType[] = ['contract', 'system'];
 
 function isEventType(value: string): value is EventType {
   return (EVENT_TYPES as string[]).includes(value);
-}
-
-/** The RPC matches a prefix of at most 4 topic segments. */
-const MAX_TOPIC_SEGMENTS = 4;
-
-/**
- * Repeated `--topic` flags form one positional prefix filter, so the flag order
- * is the topic order. `*` is the wildcard the RPC understands for a position.
- */
-function parseTopicFlags(flags: string[] | undefined): string[][] | undefined {
-  if (!flags || flags.length === 0) return undefined;
-  if (flags.length > MAX_TOPIC_SEGMENTS) {
-    throw new Error(
-      `at most ${MAX_TOPIC_SEGMENTS} --topic segments are supported, got ${flags.length}. ` +
-        'The RPC matches a prefix of at most 4 segments; events may carry more, ' +
-        'so filter on the prefix and narrow afterwards.',
-    );
-  }
-  return [flags];
 }
 
 /** Parse repeated `--rpc-header 'Name: value'` flags and LENS_RPC_HEADERS. */
@@ -157,6 +139,7 @@ async function main(argv: string[]): Promise<number> {
       'end-ledger': { type: 'string' },
       type: { type: 'string' },
       topic: { type: 'string', multiple: true },
+      topics: { type: 'string', multiple: true },
       'rpc-header': { type: 'string', multiple: true },
       'retry-attempts': { type: 'string' },
       'retry-base-delay': { type: 'string' },
@@ -255,7 +238,7 @@ async function main(argv: string[]): Promise<number> {
 
   let topics: string[][] | undefined;
   try {
-    topics = parseTopicFlags(values.topic);
+    topics = parseTopicFilters(values.topic, values.topics);
   } catch (error) {
     process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
@@ -353,7 +336,7 @@ async function main(argv: string[]): Promise<number> {
   process.stderr.write(
     `[ingest] ${network.name} ${network.rpcUrl} watching ${contractIds.length} contract(s)` +
       ` type=${eventType}` +
-      (topics ? ` topics=${topics[0]?.join(',')}` : '') +
+      (topics ? ` topics=${topics.map((f) => f.join(',')).join(' | ')}` : '') +
       (endLedger !== undefined ? ` endLedger=${endLedger}` : '') +
       // Names only. A header value is a provider API key and must never reach
       // a log, a terminal scrollback or a bug report.

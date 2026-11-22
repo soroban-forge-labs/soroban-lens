@@ -4,6 +4,14 @@
 #   docker compose up
 #
 # Then open http://localhost:5173 in your browser.
+#
+# Testnet and mainnet side by side (#82), one switcher in the UI:
+#
+#   LENS_MAINNET_RPC_URL=https://your-mainnet-rpc docker compose --profile mainnet up
+#
+# The mainnet indexer/API pair has its own volume and port (8081). There is no
+# free public mainnet RPC with useful retention, so LENS_MAINNET_RPC_URL is
+# yours to supply; without it doctor-mainnet fails and says so.
 
 name: soroban-lens
 
@@ -88,12 +96,99 @@ services:
         # Block-explorer links per network label; empty keeps the Stellar Expert
         # defaults. Set LENS_WEB_EXPLORERS for a self-hosted explorer.
         VITE_LENS_EXPLORERS: ${LENS_WEB_EXPLORERS:-}
+    environment:
+      # Read at container start by deploy/web-networks.sh, not baked in, so
+      # `--profile mainnet` adds mainnet to the switcher without a rebuild.
+      LENS_WEB_NETWORKS: ${LENS_WEB_NETWORKS:-{"testnet":"http://localhost:8080"}}
+      # label|browser URL|in-network probe: listed only if the probe answers.
+      LENS_WEB_OPTIONAL_NETWORKS: mainnet|http://localhost:${LENS_MAINNET_API_PORT:-8081}|http://api-mainnet:8080/health
     depends_on:
       api:
         condition: service_healthy
+      # required: false — only waited on when the mainnet profile is active
+      # (Compose 2.20+). Waiting is what lets the probe above find it up.
+      api-mainnet:
+        condition: service_healthy
+        required: false
     ports:
       - "${LENS_WEB_PORT:-5173}:8080"
     restart: unless-stopped
 
+  # ── mainnet profile (#82) ─────────────────────────────────────────────────
+  # A second, independent indexer/API pair: one database holds one network's
+  # events, so mainnet gets its own volume rather than sharing lens-data.
+
+  doctor-mainnet:
+    profiles: [mainnet]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.node
+    environment:
+      LENS_NETWORK: mainnet
+      LENS_RPC_URL: ${LENS_MAINNET_RPC_URL:-}
+      LENS_RPC_HEADERS: ${LENS_MAINNET_RPC_HEADERS:-}
+      # Mainnet's native XLM Stellar Asset Contract — the mainnet twin of the
+      # testnet default, and never quiet. Replace it with your own.
+      LENS_CONTRACT_IDS: ${LENS_MAINNET_CONTRACT_IDS:-CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA}
+    volumes:
+      - lens-data-mainnet:/app/data
+    command: ["node", "packages/cli/dist/bin.js", "doctor"]
+
+  indexer-mainnet:
+    profiles: [mainnet]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.node
+    depends_on:
+      doctor-mainnet:
+        condition: service_completed_successfully
+    environment:
+      LENS_NETWORK: mainnet
+      LENS_RPC_URL: ${LENS_MAINNET_RPC_URL:-}
+      LENS_RPC_HEADERS: ${LENS_MAINNET_RPC_HEADERS:-}
+      LENS_CONTRACT_IDS: ${LENS_MAINNET_CONTRACT_IDS:-CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA}
+      LENS_START_LEDGER: ${LENS_MAINNET_START_LEDGER:-}
+      LENS_PAGE_SIZE: ${LENS_PAGE_SIZE:-200}
+      LENS_POLL_INTERVAL_MS: ${LENS_POLL_INTERVAL_MS:-2000}
+      LENS_POLL_MAX_INTERVAL_MS: ${LENS_POLL_MAX_INTERVAL_MS:-30000}
+      LENS_METRICS_PORT: 9090
+      LENS_METRICS_HOST: 0.0.0.0
+    volumes:
+      - lens-data-mainnet:/app/data
+    command: ["node", "packages/cli/dist/bin.js", "index"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9090/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  api-mainnet:
+    profiles: [mainnet]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.node
+    depends_on:
+      doctor-mainnet:
+        condition: service_completed_successfully
+    environment:
+      LENS_API_PORT: 8080
+      LENS_NETWORK: mainnet
+      LENS_CORS_ORIGIN: ${LENS_CORS_ORIGIN:-*}
+    ports:
+      - "${LENS_MAINNET_API_PORT:-8081}:8080"
+    volumes:
+      - lens-data-mainnet:/app/data
+    command: ["node", "packages/api/dist/bin.js"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
 volumes:
   lens-data:
+  lens-data-mainnet:

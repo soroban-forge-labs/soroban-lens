@@ -3,6 +3,8 @@ import type {
   TimeBucket,
   TimeBucketCount,
   TopicCount,
+  AddressContractSummary,
+  ContractPage,
   ContractSummary,
   EventPage,
   EventQuery,
@@ -98,6 +100,16 @@ export interface EventStore {
   /** Contracts seen so far, most recently active first. */
   listContracts(limit?: number): Promise<ContractSummary[]>;
 
+  /**
+   * Keyset-paginated contracts, most recently active first. The cursor pins a
+   * ledger snapshot, so contracts that gain events mid-walk neither repeat nor
+   * vanish: every contract is returned exactly once.
+   */
+  listContractsPage(limit?: number, cursor?: string): Promise<ContractPage>;
+
+  /** Per-contract counts and first/last ledger for events mentioning `address`. */
+  summarizeAddress(address: string): Promise<AddressContractSummary[]>;
+
   /** Distinct first-topic values for a contract, for building filter UIs. */
   listTopics(contractId: string, limit?: number): Promise<{ topic: string; count: number }[]>;
 
@@ -160,6 +172,18 @@ export interface EventStore {
    * database is still a valid place to keep polling forward from.
    */
   pruneBefore(ledger: number): Promise<number>;
+
+  /**
+   * Delete specific events by id, returning how many existed and were removed.
+   *
+   * For reorg repair (#3): when the network's history for a recent ledger no
+   * longer matches what was stored, the rows it dropped — and rows whose
+   * contents changed, before their replacement is inserted — go through here.
+   * `insertEvents` is idempotent on id, so a changed row cannot be fixed by
+   * re-inserting it alone. Unknown ids are ignored. Like `pruneBefore`, it
+   * never touches stream state.
+   */
+  deleteEvents(ids: string[]): Promise<number>;
 
   /**
    * Delete the oldest events in ledger chunks until the on-disk size

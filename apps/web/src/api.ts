@@ -4,6 +4,7 @@ import type {
   ContractSummary,
   EventPage,
   Health,
+  IndexerStatus,
   LensEvent,
   TopicCount,
 } from './types.js';
@@ -24,7 +25,52 @@ const DEFAULT_NETWORKS: NetworkOption[] = [
   { label: 'testnet', baseUrl: 'http://localhost:8080' },
 ];
 
+/**
+ * Networks the container decided on at startup (#82), when it published any.
+ *
+ * `VITE_LENS_NETWORKS` is baked in at build time, so it cannot know whether a
+ * compose profile started a second API. The web image's entrypoint writes
+ * `/networks.json` when it starts instead, and that wins when present.
+ */
+let runtimeNetworks: NetworkOption[] | null = null;
+
+/**
+ * Parse a `{ label: apiBaseUrl }` map. Null for anything else — an object with
+ * a non-string URL, an empty object, an array — so a bad file falls back to
+ * the build-time list rather than leaving a switcher with no usable entry.
+ */
+export function parseNetworks(value: unknown): NetworkOption[] | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const entries = Object.entries(value);
+  if (entries.length === 0) return null;
+  const networks: NetworkOption[] = [];
+  for (const [label, baseUrl] of entries) {
+    if (typeof baseUrl !== 'string' || baseUrl.trim() === '' || label.trim() === '') return null;
+    networks.push({ label, baseUrl: baseUrl.replace(/\/+$/, '') });
+  }
+  return networks;
+}
+
+/**
+ * Fetch `/networks.json` once, before the app renders. Absent (a dev server,
+ * an image built before #82) or invalid, it is ignored: the build-time list
+ * is still a correct answer, just not one that knows about profiles.
+ */
+export async function loadRuntimeNetworks(fetchImpl: typeof fetch = fetch): Promise<NetworkOption[] | null> {
+  try {
+    const response = await fetchImpl('/networks.json', { cache: 'no-store', headers: { Accept: 'application/json' } });
+    // A single-page-app fallback serves index.html for unknown paths, so a
+    // 200 is not enough: only a JSON body counts.
+    if (!response.ok || !(response.headers.get('content-type') ?? '').includes('json')) return null;
+    runtimeNetworks = parseNetworks(await response.json());
+  } catch {
+    runtimeNetworks = null;
+  }
+  return runtimeNetworks;
+}
+
 export function configuredNetworks(): NetworkOption[] {
+  if (runtimeNetworks) return runtimeNetworks;
   const raw = import.meta.env.VITE_LENS_NETWORKS as string | undefined;
   if (!raw) {
     const single = import.meta.env.VITE_LENS_API_URL as string | undefined;
@@ -123,6 +169,9 @@ export function buildStreamPath(params: EventQueryParams): string {
 export const api = {
   health: (baseUrl: string, signal?: AbortSignal): Promise<Health> =>
     request<Health>(baseUrl, '/health', signal),
+
+  status: (baseUrl: string, signal?: AbortSignal): Promise<IndexerStatus> =>
+    request<IndexerStatus>(baseUrl, '/status', signal),
 
   events: (baseUrl: string, params: EventQueryParams, signal?: AbortSignal): Promise<EventPage> =>
     request<EventPage>(baseUrl, buildEventPath(params), signal),

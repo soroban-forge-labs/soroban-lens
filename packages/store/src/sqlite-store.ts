@@ -1,5 +1,6 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { mkdirSync, statSync, createWriteStream } from 'node:fs';
+import { decodeContractCursor, encodeContractCursor } from './contract-cursor.js';
+import { existsSync, mkdirSync, statSync, createWriteStream } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { createReadStream } from 'node:fs';
@@ -13,6 +14,8 @@ import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
 import { normaliseLimit, type EventStore, type PruneToSizeResult } from './store.js';
 import type {
   ContractSpecRecord,
+  AddressContractSummary,
+  ContractPage,
   ContractSummary,
   DecodedValue,
   EventPage,
@@ -31,6 +34,12 @@ export interface SqliteStoreOptions {
   path: string;
   /** Run migrations on construction. Defaults to true. */
   migrateOnOpen?: boolean;
+  /**
+   * Open the file read-only: no migration, no WAL setup, no checkpoint timer,
+   * and SQLite refuses every write. For consumers that never write (the API).
+   * An unmigrated database is then reported by getStats/health, not fixed.
+   */
+  readOnly?: boolean;
   /**
    * Structured logger for migration events — the store and the API share the
    * same `Logger` shape from ./logger.js. Defaults to a no-op, so passing
@@ -89,6 +98,9 @@ const noopLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
  * so `npm install` works identically on a laptop, in CI, and in an Alpine
  * container. That is what makes the "zero setup" promise in the README true.
  */
+/** Ids per DELETE in `deleteEvents`, well under SQLite's 32 766 bound-parameter ceiling. */
+const DELETE_CHUNK = 500;
+
 export class SqliteEventStore implements EventStore {
   readonly #db: DatabaseSync;
   readonly #path: string;
@@ -107,23 +119,24 @@ export class SqliteEventStore implements EventStore {
     this.#countCacheTtlMs = options.countCacheTtlMs ?? 2000;
     this.#now = options.now ?? Date.now;
     this.#sizeTargetBytes = options.sizeTargetBytes;
-    if (options.path !== ':memory:') mkdirSync(dirname(options.path), { recursive: true });
-    this.#db = new DatabaseSync(options.path);
+    const readOnly = options.readOnly === true && options.path !== ':memory:';
+    if (options.path !== ':memory:' && !readOnly) mkdirSync(dirname(options.path), { recursive: true });
+    this.#db = new DatabaseSync(options.path, readOnly ? { readOnly: true } : {});
 
     // WAL lets the API read while the indexer writes, which is the whole point
     // of running both against one file. NORMAL trades an fsync per commit for
     // throughput; on a crash the worst case is replaying the last batch, which
     // is already the delivery guarantee we have from Module 1.
-    if (options.path !== ':memory:') this.#db.exec('PRAGMA journal_mode = WAL');
-    this.#db.exec('PRAGMA synchronous = NORMAL');
+    if (options.path !== ':memory:' && !readOnly) this.#db.exec('PRAGMA journal_mode = WAL');
+    if (!readOnly) this.#db.exec('PRAGMA synchronous = NORMAL');
     this.#db.exec('PRAGMA foreign_keys = ON');
     // Wait rather than fail when the indexer holds the write lock.
     this.#db.exec('PRAGMA busy_timeout = 5000');
 
     this.#searchAvailable = options.forceDisableFts5 ? false : this.#hasFts5();
-    if (options.migrateOnOpen !== false) this.#migrateSync();
+    if (options.migrateOnOpen !== false && !readOnly) this.#migrateSync();
 
-    const defaultInterval = options.path === ':memory:' ? 0 : 60_000;
+    const defaultInterval = options.path === ':memory:' || readOnly ? 0 : 60_000;
     const checkpointIntervalMs = options.checkpointIntervalMs ?? defaultInterval;
     if (checkpointIntervalMs > 0) {
       // unref(): a scheduled checkpoint must never be the reason a process
@@ -298,6 +311,12 @@ export class SqliteEventStore implements EventStore {
       for (const address of extractAddresses(topicXdr)) stmt.run(eventId, address, position);
     });
     for (const address of extractAddresses(e.valueXdr)) stmt.run(eventId, address, 'value');
+    // Topics at position 4+ go to the event_topics side table (#164).
+    const deep = this.#prepared().insertDeepTopic;
+    e.topics.forEach((topic, i) => {
+      const key = i >= INDEXED_TOPIC_DEPTH ? topicKey(topic) : null;
+      if (key !== null) deep.run(eventId, i, key);
+    });
   }
 
   async getEvent(id: string): Promise<LensEvent | null> {
@@ -441,6 +460,71 @@ export class SqliteEventStore implements EventStore {
     }));
   }
 
+  async listContractsPage(limit = 100, cursor?: string): Promise<ContractPage> {
+    const size = normaliseLimit(limit);
+    const c = cursor ? decodeContractCursor(cursor) : undefined;
+    const snapshot =
+      c?.snapshot ??
+      ((this.#db.prepare('SELECT COALESCE(MAX(ledger), 0) AS m FROM events').get() as { m: number }).m);
+    const rows = this.#db
+      .prepare(
+        `SELECT contract_id,
+                COUNT(*)        AS event_count,
+                MIN(ledger)     AS first_ledger,
+                MAX(ledger)     AS last_ledger,
+                MAX(ledger_closed_at) AS last_seen_at
+         FROM events
+         WHERE ledger <= ?
+         GROUP BY contract_id
+         ${c ? 'HAVING MAX(ledger) < ? OR (MAX(ledger) = ? AND contract_id > ?)' : ''}
+         ORDER BY last_ledger DESC, contract_id ASC
+         LIMIT ?`,
+      )
+      .all(...(c ? [snapshot, c.lastLedger, c.lastLedger, c.contractId] : [snapshot]), size + 1) as {
+      contract_id: string;
+      event_count: number;
+      first_ledger: number;
+      last_ledger: number;
+      last_seen_at: string;
+    }[];
+    const page = rows.slice(0, size).map((r) => ({
+      contractId: r.contract_id,
+      eventCount: r.event_count,
+      firstLedger: r.first_ledger,
+      lastLedger: r.last_ledger,
+      lastSeenAt: r.last_seen_at,
+    }));
+    const last = page[page.length - 1];
+    return {
+      contracts: page,
+      nextCursor:
+        rows.length > size && last
+          ? encodeContractCursor({ snapshot, lastLedger: last.lastLedger, contractId: last.contractId })
+          : null,
+    };
+  }
+
+  async summarizeAddress(address: string): Promise<AddressContractSummary[]> {
+    const rows = this.#db
+      .prepare(
+        `SELECT e.contract_id AS contract_id,
+                COUNT(DISTINCT e.id) AS event_count,
+                MIN(e.ledger) AS first_ledger,
+                MAX(e.ledger) AS last_ledger
+         FROM event_addresses a JOIN events e ON e.id = a.event_id
+         WHERE a.address = ?
+         GROUP BY e.contract_id
+         ORDER BY event_count DESC, e.contract_id ASC`,
+      )
+      .all(address) as { contract_id: string; event_count: number; first_ledger: number; last_ledger: number }[];
+    return rows.map((r) => ({
+      contractId: r.contract_id,
+      eventCount: r.event_count,
+      firstLedger: r.first_ledger,
+      lastLedger: r.last_ledger,
+    }));
+  }
+
   async listTopics(contractId: string, limit = 50): Promise<{ topic: string; count: number }[]> {
     const rows = this.#db
       .prepare(
@@ -579,26 +663,36 @@ export class SqliteEventStore implements EventStore {
   async saveStreamState(state: StreamState): Promise<void> {
     this.#db
       .prepare(
-        `INSERT INTO stream_state (key, cursor, ledger, updated_at) VALUES (?, ?, ?, ?)
+        `INSERT INTO stream_state (key, cursor, ledger, updated_at, latest_ledger, latest_ledger_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET cursor = excluded.cursor,
                                         ledger = excluded.ledger,
-                                        updated_at = excluded.updated_at`,
+                                        updated_at = excluded.updated_at,
+                                        latest_ledger = excluded.latest_ledger,
+                                        latest_ledger_seen_at = excluded.latest_ledger_seen_at`,
       )
-      .run(state.key, state.cursor, state.ledger, state.updatedAt);
+      .run(
+        state.key,
+        state.cursor,
+        state.ledger,
+        state.updatedAt,
+        state.latestLedger ?? null,
+        state.latestLedgerSeenAt ?? null,
+      );
   }
 
   async loadStreamState(key: string): Promise<StreamState | null> {
     const row = this.#db.prepare('SELECT * FROM stream_state WHERE key = ?').get(key) as
-      | { key: string; cursor: string; ledger: number; updated_at: string }
+      | StreamStateRow
       | undefined;
-    return row ? { key: row.key, cursor: row.cursor, ledger: row.ledger, updatedAt: row.updated_at } : null;
+    return row ? streamStateOf(row) : null;
   }
 
   async listStreamStates(): Promise<StreamState[]> {
     const rows = this.#db
       .prepare('SELECT * FROM stream_state ORDER BY key')
-      .all() as { key: string; cursor: string; ledger: number; updated_at: string }[];
-    return rows.map((r) => ({ key: r.key, cursor: r.cursor, ledger: r.ledger, updatedAt: r.updated_at }));
+      .all() as unknown as StreamStateRow[];
+    return rows.map(streamStateOf);
   }
 
   /** Read-only. Serves the API's `/health`, so it must not take the write lock. */
@@ -639,6 +733,29 @@ export class SqliteEventStore implements EventStore {
     } catch (error) {
       return { ok: false, detail: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  async deleteEvents(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    let removed = 0;
+    this.#db.exec('BEGIN');
+    try {
+      // Chunked under SQLite's bound-parameter limit. event_addresses goes by
+      // ON DELETE CASCADE and events_fts by its delete trigger, as for prune.
+      for (let i = 0; i < ids.length; i += DELETE_CHUNK) {
+        const chunk = ids.slice(i, i + DELETE_CHUNK);
+        const result = this.#db
+          .prepare(`DELETE FROM events WHERE id IN (${chunk.map(() => '?').join(',')})`)
+          .run(...chunk);
+        removed += Number(result.changes);
+      }
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+    this.#countCache.clear();
+    return removed;
   }
 
   async pruneBefore(ledger: number): Promise<number> {
@@ -858,6 +975,7 @@ export class SqliteEventStore implements EventStore {
   /** Replace one event's address-index rows with a fresh extraction. */
   #refreshAddresses(eventId: string, event: LensEvent): void {
     this.#db.prepare('DELETE FROM event_addresses WHERE event_id = ?').run(eventId);
+    this.#db.prepare('DELETE FROM event_topics WHERE event_id = ?').run(eventId);
     this.#insertAddresses(eventId, event);
   }
 
@@ -938,6 +1056,18 @@ export class SqliteEventStore implements EventStore {
       this.#db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  /**
+   * Write a complete, consistent copy of the database to `destPath` (#91):
+   * events, stream cursors, contract specs and schema, so restoring it resumes
+   * indexing exactly where the backup was taken. Safe while the indexer runs —
+   * `VACUUM INTO` reads one snapshot — and refuses to overwrite an existing file.
+   */
+  async backupTo(destPath: string): Promise<void> {
+    if (this.#path === ':memory:') throw new Error('an in-memory database has nothing on disk to back up');
+    if (existsSync(destPath)) throw new Error(`${destPath} already exists; refusing to overwrite it`);
+    this.#db.prepare('VACUUM INTO ?').run(destPath);
   }
 
   async exportSnapshot(destPath: string): Promise<number> {
@@ -1075,6 +1205,7 @@ interface Statements {
   insert: StatementSync;
   byId: StatementSync;
   insertAddress: StatementSync;
+  insertDeepTopic: StatementSync;
 }
 
 function buildStatements(db: DatabaseSync): Statements {
@@ -1092,6 +1223,9 @@ function buildStatements(db: DatabaseSync): Statements {
     byId: db.prepare('SELECT * FROM events WHERE id = ?'),
     insertAddress: db.prepare(
       'INSERT OR IGNORE INTO event_addresses (event_id, address, position) VALUES (?, ?, ?)',
+    ),
+    insertDeepTopic: db.prepare(
+      'INSERT OR IGNORE INTO event_topics (event_id, position, topic) VALUES (?, ?, ?)',
     ),
   };
 }
@@ -1210,6 +1344,10 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
     conditions.push('closed_at_unix <= ?');
     values.push(query.toTime);
   }
+  if (query.indexedAfter !== undefined) {
+    conditions.push('indexed_at > ?');
+    values.push(query.indexedAfter);
+  }
   if (query.successfulOnly === true) {
     conditions.push('in_successful_call = 1');
   }
@@ -1221,7 +1359,12 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
   query.topics?.forEach((topic, i) => {
     if (topic === null || topic === undefined) return;
     const column = columns[i];
-    if (!column) return;
+    if (!column) {
+      // Position 4+: the event_topics side table (#164).
+      conditions.push('id IN (SELECT event_id FROM event_topics WHERE position = ? AND topic = ?)');
+      values.push(i, topic);
+      return;
+    }
     conditions.push(`${column} = ?`);
     values.push(topic);
   });
@@ -1276,5 +1419,25 @@ function specSummary(row: Omit<SpecRow, 'entries_xdr'>): Omit<ContractSpecRecord
     eventCount: row.event_count,
     ...(row.error !== null ? { error: row.error } : {}),
     fetchedAt: row.fetched_at,
+  };
+}
+
+interface StreamStateRow {
+  key: string;
+  cursor: string;
+  ledger: number;
+  updated_at: string;
+  latest_ledger: number | null;
+  latest_ledger_seen_at: string | null;
+}
+
+function streamStateOf(row: StreamStateRow): StreamState {
+  return {
+    key: row.key,
+    cursor: row.cursor,
+    ledger: row.ledger,
+    updatedAt: row.updated_at,
+    ...(row.latest_ledger !== null ? { latestLedger: row.latest_ledger } : {}),
+    ...(row.latest_ledger_seen_at !== null ? { latestLedgerSeenAt: row.latest_ledger_seen_at } : {}),
   };
 }

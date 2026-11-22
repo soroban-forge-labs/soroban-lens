@@ -92,6 +92,17 @@ export interface Health {
   schemaVersion: number;
 }
 
+/** `GET /status`: store statistics plus the indexer's stored cursors. */
+export interface IndexerStatus {
+  eventCount: number;
+  contractCount: number;
+  minLedger: number | null;
+  maxLedger: number | null;
+  schemaVersion: number;
+  /** One per indexer stream. Empty until the indexer has run at least once. */
+  streams: { key: string; cursor: string; ledger: number; updatedAt: string }[];
+}
+
 export interface TopicCount {
   topic: string;
   count: number;

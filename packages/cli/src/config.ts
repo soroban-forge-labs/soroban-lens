@@ -11,6 +11,13 @@ export interface LensConfig {
   apiPort: number;
   startLedger: number | undefined;
   pageSize: number;
+  /**
+   * Bounds for an adaptive page size (#14), from `LENS_PAGE_SIZE_MIN` and
+   * `LENS_PAGE_SIZE_MAX`. Undefined keeps the page size fixed at `pageSize`.
+   */
+  pageSizeBounds: { min: number; max: number } | undefined;
+  /** Recent ledgers re-read each time the tip moves, to catch reorgs (#3). `LENS_REORG_DEPTH`, default 3; 0 is off. */
+  reorgDepth: number;
   pollIntervalMs: number;
   maxPollIntervalMs: number;
   /** Extra headers for every RPC request. Values are secrets — never log them. */
@@ -49,6 +56,9 @@ export interface ConfigOverrides {
   port?: number | undefined;
   startLedger?: number | undefined;
   pageSize?: number | undefined;
+  pageSizeMin?: number | undefined;
+  pageSizeMax?: number | undefined;
+  reorgDepth?: number | undefined;
   pollInterval?: number | undefined;
   maxPollInterval?: number | undefined;
   rpcHeaders?: string[] | undefined;
@@ -91,6 +101,12 @@ export function resolveConfig(
     apiPort: overrides.port ?? numberOr(env.LENS_API_PORT, 8080),
     startLedger: overrides.startLedger ?? optionalNumber(env.LENS_START_LEDGER),
     pageSize: overrides.pageSize ?? numberOr(env.LENS_PAGE_SIZE, 200),
+    pageSizeBounds: pageSizeBounds(
+      overrides.pageSizeMin ?? optionalNumber(env.LENS_PAGE_SIZE_MIN),
+      overrides.pageSizeMax ?? optionalNumber(env.LENS_PAGE_SIZE_MAX),
+      overrides.pageSize ?? numberOr(env.LENS_PAGE_SIZE, 200),
+    ),
+    reorgDepth: overrides.reorgDepth ?? numberOr(env.LENS_REORG_DEPTH, 3),
     pollIntervalMs,
     maxPollIntervalMs,
     rpcHeaders: parseHeaders(overrides.rpcHeaders, env.LENS_RPC_HEADERS),
@@ -104,6 +120,20 @@ export function resolveConfig(
     maxDbSizeBytes: overrides.maxDbSize ?? optionalNumber(env.LENS_MAX_DB_SIZE_BYTES),
     pruneIntervalMs: overrides.pruneInterval ?? numberOr(env.LENS_PRUNE_INTERVAL_MS, 60_000),
   };
+}
+
+/**
+ * Either bound alone is enough to opt in: the other defaults to the fixed page
+ * size, so `LENS_PAGE_SIZE_MAX=10000` means "start at LENS_PAGE_SIZE, grow up to
+ * 10 000". Neither set keeps today's fixed size.
+ */
+function pageSizeBounds(
+  min: number | undefined,
+  max: number | undefined,
+  pageSize: number,
+): { min: number; max: number } | undefined {
+  if (min === undefined && max === undefined) return undefined;
+  return { min: min ?? Math.min(pageSize, max ?? pageSize), max: max ?? Math.max(pageSize, min ?? pageSize) };
 }
 
 export function splitList(value: string | undefined): string[] {

@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 dist/
 *.tsbuildinfo
 
@@ -33,3 +33,5 @@ bench/results/
 crash.log
 *.tfvars
 *.tfvars.json
+site/dist/
+site/.vitepress/cache/

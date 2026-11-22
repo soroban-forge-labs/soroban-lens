@@ -22,6 +22,7 @@
     "bench": "npm run build -w @soroban-lens/store -w @soroban-lens/api && node bench/run.js",
     "bench:quick": "npm run build -w @soroban-lens/store -w @soroban-lens/api && node bench/run.js --events 50000",
     "bench:compare": "node bench/compare.js",
+    "bench:page-size": "npm run build -w @soroban-lens/ingest && node bench/page-size.js",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "clean": "rm -rf packages/*/dist apps/web/dist",
     "lens": "node packages/cli/dist/bin.js",

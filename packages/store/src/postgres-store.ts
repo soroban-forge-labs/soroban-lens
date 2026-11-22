@@ -1,4 +1,5 @@
 import { createReadStream, createWriteStream } from 'node:fs';
+import { decodeContractCursor, encodeContractCursor } from './contract-cursor.js';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { decodeEvent, topicKey, extractAddresses } from './decode.js';
@@ -8,6 +9,8 @@ import { POSTGRES_MIGRATIONS } from './postgres-schema.js';
 import { normaliseLimit, type EventStore, type PruneToSizeResult } from './store.js';
 import type {
   ContractSpecRecord,
+  AddressContractSummary,
+  ContractPage,
   ContractSummary,
   DecodedValue,
   EventPage,
@@ -312,6 +315,14 @@ export class PostgresEventStore implements EventStore {
       for (const address of extractAddresses(topicXdr)) await insert(address, `topic${i}`);
     }
     for (const address of extractAddresses(e.valueXdr)) await insert(address, 'value');
+    for (const [i, topic] of e.topics.entries()) {
+      const key = i >= 4 ? topicKey(topic) : null;
+      if (key === null) continue;
+      await db.query(
+        'INSERT INTO event_topics (event_id, position, topic) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+        [eventId, i, key],
+      );
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -460,6 +471,63 @@ export class PostgresEventStore implements EventStore {
     }));
   }
 
+  async listContractsPage(limit = 100, cursor?: string): Promise<ContractPage> {
+    const size = normaliseLimit(limit);
+    const c = cursor ? decodeContractCursor(cursor) : undefined;
+    const snapshot =
+      c?.snapshot ??
+      Number((await this.#pool.query('SELECT COALESCE(MAX(ledger), 0) AS m FROM events')).rows[0]?.['m'] ?? 0);
+    const { rows } = await this.#pool.query(
+      `SELECT contract_id,
+              COUNT(*)::int         AS event_count,
+              MIN(ledger)           AS first_ledger,
+              MAX(ledger)           AS last_ledger,
+              MAX(ledger_closed_at) AS last_seen_at
+       FROM events
+       WHERE ledger <= $1
+       GROUP BY contract_id
+       ${c ? 'HAVING MAX(ledger) < $3 OR (MAX(ledger) = $3 AND contract_id COLLATE "C" > $4)' : ''}
+       ORDER BY last_ledger DESC, contract_id COLLATE "C" ASC
+       LIMIT $2`,
+      c ? [snapshot, size + 1, c.lastLedger, c.contractId] : [snapshot, size + 1],
+    );
+    const page = rows.slice(0, size).map((r) => ({
+      contractId: String(r['contract_id']),
+      eventCount: Number(r['event_count']),
+      firstLedger: Number(r['first_ledger']),
+      lastLedger: Number(r['last_ledger']),
+      lastSeenAt: String(r['last_seen_at']),
+    }));
+    const last = page[page.length - 1];
+    return {
+      contracts: page,
+      nextCursor:
+        rows.length > size && last
+          ? encodeContractCursor({ snapshot, lastLedger: last.lastLedger, contractId: last.contractId })
+          : null,
+    };
+  }
+
+  async summarizeAddress(address: string): Promise<AddressContractSummary[]> {
+    const { rows } = await this.#pool.query(
+      `SELECT e.contract_id,
+              COUNT(DISTINCT e.id)::int AS event_count,
+              MIN(e.ledger) AS first_ledger,
+              MAX(e.ledger) AS last_ledger
+       FROM event_addresses a JOIN events e ON e.id = a.event_id
+       WHERE a.address = $1
+       GROUP BY e.contract_id
+       ORDER BY event_count DESC, e.contract_id COLLATE "C" ASC`,
+      [address],
+    );
+    return rows.map((r) => ({
+      contractId: String(r['contract_id']),
+      eventCount: Number(r['event_count']),
+      firstLedger: Number(r['first_ledger']),
+      lastLedger: Number(r['last_ledger']),
+    }));
+  }
+
   async listTopics(contractId: string, limit = 50): Promise<{ topic: string; count: number }[]> {
     const { rows } = await this.#pool.query(
       `SELECT topic0 AS topic, COUNT(*)::int AS count
@@ -554,11 +622,21 @@ export class PostgresEventStore implements EventStore {
 
   async saveStreamState(state: StreamState): Promise<void> {
     await this.#pool.query(
-      `INSERT INTO stream_state (key, cursor, ledger, updated_at) VALUES ($1, $2, $3, $4)
+      `INSERT INTO stream_state (key, cursor, ledger, updated_at, latest_ledger, latest_ledger_seen_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (key) DO UPDATE SET cursor = EXCLUDED.cursor,
                                        ledger = EXCLUDED.ledger,
-                                       updated_at = EXCLUDED.updated_at`,
-      [state.key, state.cursor, state.ledger, state.updatedAt],
+                                       updated_at = EXCLUDED.updated_at,
+                                       latest_ledger = EXCLUDED.latest_ledger,
+                                       latest_ledger_seen_at = EXCLUDED.latest_ledger_seen_at`,
+      [
+        state.key,
+        state.cursor,
+        state.ledger,
+        state.updatedAt,
+        state.latestLedger ?? null,
+        state.latestLedgerSeenAt ?? null,
+      ],
     );
   }
 
@@ -616,6 +694,14 @@ export class PostgresEventStore implements EventStore {
     } catch (error) {
       return { ok: false, detail: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  async deleteEvents(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    // One array parameter rather than a list of placeholders; event_addresses
+    // rows go via ON DELETE CASCADE, as for pruneBefore.
+    const result = await this.#pool.query('DELETE FROM events WHERE id = ANY($1::text[])', [ids]);
+    return result.rowCount ?? 0;
   }
 
   async pruneBefore(ledger: number): Promise<number> {
@@ -743,6 +829,7 @@ export class PostgresEventStore implements EventStore {
       ],
     );
     await db.query('DELETE FROM event_addresses WHERE event_id = $1', [raw.id]);
+    await db.query('DELETE FROM event_topics WHERE event_id = $1', [raw.id]);
     await this.#insertAddresses(db, raw.id, event);
   }
 
@@ -959,6 +1046,8 @@ function streamState(row: Record<string, unknown>): StreamState {
     cursor: String(row['cursor']),
     ledger: Number(row['ledger']),
     updatedAt: String(row['updated_at']),
+    ...(row['latest_ledger'] != null ? { latestLedger: Number(row['latest_ledger']) } : {}),
+    ...(row['latest_ledger_seen_at'] != null ? { latestLedgerSeenAt: String(row['latest_ledger_seen_at']) } : {}),
   };
 }
 
@@ -992,13 +1081,19 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
   if (query.toLedger !== undefined) conditions.push(`ledger <= ${param(query.toLedger)}`);
   if (query.fromTime !== undefined) conditions.push(`closed_at_unix >= ${param(query.fromTime)}`);
   if (query.toTime !== undefined) conditions.push(`closed_at_unix <= ${param(query.toTime)}`);
+  if (query.indexedAfter !== undefined) conditions.push(`indexed_at > ${param(query.indexedAfter)}`);
   if (query.successfulOnly === true) conditions.push('in_successful_call = TRUE');
 
   const columns = ['topic0', 'topic1', 'topic2', 'topic3'] as const;
   query.topics?.forEach((topic, i) => {
     if (topic === null || topic === undefined) return;
     const column = columns[i];
-    if (!column) return;
+    if (!column) {
+      conditions.push(
+        `id IN (SELECT event_id FROM event_topics WHERE position = ${param(i)} AND topic = ${param(topic)})`,
+      );
+      return;
+    }
     conditions.push(`${column} = ${param(topic)}`);
   });
 

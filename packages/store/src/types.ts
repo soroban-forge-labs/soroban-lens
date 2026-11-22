@@ -132,6 +132,8 @@ export interface EventQuery {
   fromTime?: number | undefined;
   /** Inclusive upper bound on ledger close time, as seconds since the epoch. */
   toTime?: number | undefined;
+  /** Only events indexed strictly after this ISO timestamp (exclusive). Backed by idx_events_indexed_at. */
+  indexedAfter?: string | undefined;
   txHash?: string | undefined;
   /**
    * Match any event mentioning this address — anywhere: a topic segment
@@ -213,12 +215,31 @@ export interface ContractSummary {
   lastSeenAt: string;
 }
 
+/** One page of contract summaries. */
+export interface ContractPage {
+  contracts: ContractSummary[];
+  /** Pass back as `cursor` for the next page. `null` on the last page. */
+  nextCursor: string | null;
+}
+
+/** What one address did with one contract, from the event_addresses index. */
+export interface AddressContractSummary {
+  contractId: string;
+  eventCount: number;
+  firstLedger: number;
+  lastLedger: number;
+}
+
 /** Progress of one ingest stream, mirrored into storage so the API can report it. */
 export interface StreamState {
   key: string;
   cursor: string;
   ledger: number;
   updatedAt: string;
+  /** The RPC's latest ledger when this state was saved (#181). Absent on older rows. */
+  latestLedger?: number;
+  /** When `latestLedger` was observed (ISO). */
+  latestLedgerSeenAt?: string;
 }
 
 /** One topic and how many events carry it in the first position. */

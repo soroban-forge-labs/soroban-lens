@@ -280,6 +280,19 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] deleteEvents removes exactly the named rows, ignoring unknown ids`, async () => {
+    const store = await seeded();
+    const ids = fixtureEvents.slice(0, 3).map((e) => e.id);
+    const removed = await store.deleteEvents([...ids, 'not-an-event-id']);
+    assert.equal(removed, 3);
+    for (const id of ids) assert.equal(await store.getEvent(id), null);
+    assert.equal((await store.getStats()).eventCount, fixtureEvents.length - 3);
+    assert.equal(await store.deleteEvents([]), 0);
+    // A deleted id can be inserted again: the reorg path deletes, then re-inserts.
+    assert.equal(await store.insertEvents(fixtureEvents.slice(0, 1)), 1);
+    await store.close();
+  });
+
   test(`[${name}] pruneBefore does not touch stream state`, async () => {
     const store = await seeded();
     await store.saveStreamState({ key: 'k', cursor: 'abc', ledger: 1, updatedAt: '2026-01-01T00:00:00Z' });
@@ -369,6 +382,37 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test(`[${name}] a filter on a topic past the fourth position finds the event (#164)`, async () => {
+    const store = await seeded();
+    const deep = fixtureEvents.find((e) => e.topic.length >= 5);
+    assert.ok(deep, 'fixtureEvents needs an event with at least 5 topics');
+    const page = await store.queryEvents({ topics: [null, null, null, null, null, ], limit: 1000 });
+    const probe = (await store.getEvent(deep.id))!;
+    const value = (probe.topics[4] as { value: unknown }).value;
+    const hit = await store.queryEvents({ topics: [null, null, null, null, String(value)], limit: 1000 });
+    assert.ok(hit.events.some((e) => e.id === deep.id), 'the 5-topic event is returned');
+    assert.ok(hit.events.every((e) => e.topics[4] && String((e.topics[4] as { value: unknown }).value) === String(value)));
+    const miss = await store.queryEvents({ topics: [null, null, null, null, 'no-such-topic'] });
+    assert.equal(miss.events.length, 0);
+    assert.ok(page.events.length > 0);
+    await store.close();
+  });
+
+  test(`[${name}] indexedAfter returns only events indexed after the timestamp (#165)`, async () => {
+    const store = await createStore();
+    const half = Math.floor(fixtureEvents.length / 2);
+    await store.insertEvents(fixtureEvents.slice(0, half));
+    await new Promise((r) => setTimeout(r, 20));
+    const cutoff = new Date().toISOString();
+    await new Promise((r) => setTimeout(r, 20));
+    await store.insertEvents(fixtureEvents.slice(half));
+    const page = await store.queryEvents({ indexedAfter: cutoff, limit: 1000 });
+    const second = new Set(fixtureEvents.slice(half).map((e) => e.id));
+    assert.equal(page.events.length, second.size);
+    assert.ok(page.events.every((e) => second.has(e.id)));
+    await store.close();
   });
 
   test(`[${name}] close() does not throw`, async () => {

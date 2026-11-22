@@ -21,6 +21,7 @@ Options:
   -h, --help          Show this help.
 
 Access control (all off unless set):
+  LENS_NDJSON_MAX_ROWS   Most events one application/x-ndjson response carries (default 1000000).
   LENS_RATE_LIMIT_RPS    Requests per second allowed per client IP (token bucket).
   LENS_RATE_LIMIT_BURST  Bucket size (default: LENS_RATE_LIMIT_RPS, rounded up).
   LENS_API_KEYS          Comma-separated API keys; when set, requests must send
@@ -56,7 +57,12 @@ if (values.help) {
 const log = createLogger({ prefix: '[api]' });
 
 const dbPath = values.db ?? process.env.LENS_DB_PATH ?? './data/lens.db';
-const port = Number(values.port ?? process.env.LENS_API_PORT ?? 8080);
+const rawPort = values.port ?? process.env.LENS_API_PORT ?? '8080';
+const port = Number(rawPort);
+if (!/^\d+$/.test(rawPort) || !Number.isInteger(port) || port < 1 || port > 65535) {
+  process.stderr.write(`soroban-lens-api: --port must be an integer from 1 to 65535, got "${rawPort}".\n`);
+  process.exit(2);
+}
 const host = values.host ?? process.env.LENS_API_HOST ?? '0.0.0.0';
 
 const shutdownTimeoutMs = Number(
@@ -87,7 +93,7 @@ function parseRateLimit(): { requestsPerSecond: number; burst?: number } | undef
   return { requestsPerSecond, burst };
 }
 
-const store = new SqliteEventStore({ path: dbPath, log });
+const store = new SqliteEventStore({ path: dbPath, log, readOnly: true });
 
 /** A positive integer from the environment, or undefined when unset or unusable. */
 function envInt(name: string): number | undefined {
@@ -101,6 +107,7 @@ const server = createApiServer({
   store,
   ...(rateLimit ? { rateLimit } : {}),
   ...(apiKeys.length > 0 ? { apiKeys } : {}),
+  ...(envInt('LENS_NDJSON_MAX_ROWS') ? { ndjsonMaxRows: envInt('LENS_NDJSON_MAX_ROWS') as number } : {}),
   trustProxy: ['1', 'true'].includes((process.env.LENS_TRUST_PROXY ?? '').toLowerCase()),
   network: process.env.LENS_NETWORK ?? 'testnet',
   ...(values.cors ?? process.env.LENS_CORS_ORIGIN

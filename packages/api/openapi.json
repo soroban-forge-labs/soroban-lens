@@ -4,7 +4,7 @@
     "title": "soroban-lens Query API",
     "version": "0.1.0",
     "summary": "Read-only HTTP API over indexed Soroban contract events.",
-    "description": "Serves events indexed from a Soroban RPC node. Read-only. Unauthenticated and unlimited by default; an operator can turn on per-IP rate limiting (`LENS_RATE_LIMIT_RPS`) and API keys (`LENS_API_KEYS`), in which case every route except `/health`, `/openapi.json` and `/docs` requires a key sent as `X-API-Key` or `Authorization: Bearer`, and a client over its limit receives `429` with `Retry-After`.\n\nPagination is keyset-based: pass the `nextCursor` from a response back as `cursor`. Pass the `prevCursor` back as `cursor` together with `direction=backward` to return to the previous page; paging forward and then back returns the original page exactly. Pages stay stable while the indexer writes new events behind them, which offset pagination cannot promise.\n\n`GET /events` and `GET /contracts/{contractId}/events` carry an `ETag` derived from the newest indexed event id and the request's filter. Send it back as `If-None-Match` and an unchanged poll is answered with `304` and no body. `GET /events/stream` pushes new events as Server-Sent Events instead of polling.\n\nDecoded integer values are JSON **strings**, not numbers. Soroban `i128`/`u128` amounts routinely exceed `Number.MAX_SAFE_INTEGER`, so treating them as numbers loses precision on large transfers. Decoded `bytes` are lower-case hex strings.\n\nEvery route below also accepts `HEAD`, which returns the same status and headers as `GET` with an empty body — including the `Content-Length` the body would have had. The `head` operations are not listed separately.\n\nResponses of 1KB or more are gzip- or deflate-compressed when the request's `Accept-Encoding` header allows it, with `Vary: Accept-Encoding` set so a cache in front of this API knows the body varies by that header. A request sending no `Accept-Encoding` — or `identity` — always gets uncompressed JSON.\n\nTwo features are **off by default** because they widen what the server does: `/graphql` (a query endpoint over the same data) and `/webhooks` (the server POSTs events to client-supplied URLs). Both answer `404` until an operator enables them; see the API README. When API keys are also enabled, send the key as `X-API-Key` so `Authorization: Bearer` stays free for the webhook token.",
+    "description": "Serves events indexed from a Soroban RPC node. Read-only. Unauthenticated and unlimited by default; an operator can turn on per-IP rate limiting (`LENS_RATE_LIMIT_RPS`) and API keys (`LENS_API_KEYS`), in which case every route except `/health`, `/openapi.json` and `/docs` requires a key sent as `X-API-Key` or `Authorization: Bearer`, and a client over its limit receives `429` with `Retry-After`.\n\nPagination is keyset-based: pass the `nextCursor` from a response back as `cursor`. Pass the `prevCursor` back as `cursor` together with `direction=backward` to return to the previous page; paging forward and then back returns the original page exactly. Pages stay stable while the indexer writes new events behind them, which offset pagination cannot promise.\n\n`GET /events` and `GET /contracts/{contractId}/events` carry an `ETag` derived from the newest indexed event id and the request's filter. Send it back as `If-None-Match` and an unchanged poll is answered with `304` and no body. `GET /events/stream` pushes new events as Server-Sent Events instead of polling.\n\nDecoded integer values are JSON **strings**, not numbers. Soroban `i128`/`u128` amounts routinely exceed `Number.MAX_SAFE_INTEGER`, so treating them as numbers loses precision on large transfers. Decoded `bytes` are lower-case hex strings.\n\nEvery route below also accepts `HEAD`, which returns the same status and headers as `GET` with an empty body \u2014 including the `Content-Length` the body would have had. The `head` operations are not listed separately.\n\nResponses of 1KB or more are gzip- or deflate-compressed when the request's `Accept-Encoding` header allows it, with `Vary: Accept-Encoding` set so a cache in front of this API knows the body varies by that header. A request sending no `Accept-Encoding` \u2014 or `identity` \u2014 always gets uncompressed JSON.\n\nTwo features are **off by default** because they widen what the server does: `/graphql` (a query endpoint over the same data) and `/webhooks` (the server POSTs events to client-supplied URLs). Both answer `404` until an operator enables them; see the API README. When API keys are also enabled, send the key as `X-API-Key` so `Authorization: Bearer` stays free for the webhook token.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
@@ -138,11 +138,14 @@
         "tags": [
           "contracts"
         ],
-        "summary": "List indexed contracts, most recently active first",
+        "summary": "List indexed contracts, most recently active first (keyset-paginated)",
         "operationId": "listContracts",
         "parameters": [
           {
             "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
           }
         ],
         "responses": {
@@ -153,7 +156,8 @@
                 "schema": {
                   "type": "object",
                   "required": [
-                    "contracts"
+                    "contracts",
+                    "nextCursor"
                   ],
                   "properties": {
                     "contracts": {
@@ -161,6 +165,13 @@
                       "items": {
                         "$ref": "#/components/schemas/ContractSummary"
                       }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Pass back as `cursor` for the next page; null on the last page. The cursor pins a ledger snapshot, so a walk returns each contract exactly once even while new events arrive."
                     }
                   }
                 }
@@ -175,6 +186,9 @@
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -259,6 +273,12 @@
                   "type": "string",
                   "description": "RFC 4180 CSV, streamed (chunked transfer, no Content-Length). Header row: id, contractId, type, ledger, ledgerClosedAt, txHash, transactionIndex, operationIndex, inSuccessfulContractCall, topic0..topicN, valueType, value, decodeError."
                 }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string",
+                  "description": "One event per line, then a final {\"trailer\":{rows,capped,cap}} line. See NdjsonTrailer."
+                }
               }
             },
             "headers": {
@@ -282,6 +302,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -381,6 +406,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
               }
             }
           },
@@ -429,6 +459,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -606,6 +641,12 @@
                 "schema": {
                   "type": "string",
                   "description": "RFC 4180 CSV, streamed (chunked transfer, no Content-Length). Header row: id, contractId, type, ledger, ledgerClosedAt, txHash, transactionIndex, operationIndex, inSuccessfulContractCall, topic0..topicN, valueType, value, decodeError."
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string",
+                  "description": "One event per line, then a final {\"trailer\":{rows,capped,cap}} line. See NdjsonTrailer."
                 }
               }
             },
@@ -891,6 +932,11 @@
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
+              },
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
               }
             }
           },
@@ -1109,6 +1155,201 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/transactions/{txHash}": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Every event a transaction emitted, in order",
+        "description": "Events for one transaction hash ordered by operation index, then event id, with a small summary. Returns 404 when nothing is stored for the hash.",
+        "operationId": "getTransaction",
+        "parameters": [
+          {
+            "name": "txHash",
+            "in": "path",
+            "required": true,
+            "description": "64-character hex transaction hash.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transaction summary and events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "txHash",
+                    "summary",
+                    "events"
+                  ],
+                  "properties": {
+                    "txHash": {
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": "object",
+                      "required": [
+                        "ledger",
+                        "closedAt",
+                        "contracts",
+                        "eventCount",
+                        "succeeded"
+                      ],
+                      "properties": {
+                        "ledger": {
+                          "type": "integer"
+                        },
+                        "closedAt": {
+                          "type": "string"
+                        },
+                        "contracts": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "eventCount": {
+                          "type": "integer"
+                        },
+                        "succeeded": {
+                          "type": "boolean",
+                          "description": "False when any event was emitted in a failed contract call."
+                        }
+                      }
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Event"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/addresses/{address}": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Per-contract activity summary for an address",
+        "description": "Which contracts an address has touched, how often, and the first and last ledger, from the address index. An address never seen returns empty results, not an error.",
+        "operationId": "getAddress",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "description": "Account (G...) or contract (C...) StrKey.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[GC][A-Z2-7]{55}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Address summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "address",
+                    "eventCount",
+                    "firstLedger",
+                    "lastLedger",
+                    "contracts"
+                  ],
+                  "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "eventCount": {
+                      "type": "integer"
+                    },
+                    "firstLedger": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "lastLedger": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "contracts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "contractId",
+                          "eventCount",
+                          "firstLedger",
+                          "lastLedger"
+                        ],
+                        "properties": {
+                          "contractId": {
+                            "type": "string"
+                          },
+                          "eventCount": {
+                            "type": "integer"
+                          },
+                          "firstLedger": {
+                            "type": "integer"
+                          },
+                          "lastLedger": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -1405,6 +1646,11 @@
             "schema": {
               "$ref": "#/components/schemas/Error"
             }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
           }
         }
       },
@@ -1414,6 +1660,11 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/Error"
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
             }
           }
         }
@@ -1433,6 +1684,11 @@
             "schema": {
               "$ref": "#/components/schemas/Error"
             }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
           }
         }
       },
@@ -1450,6 +1706,11 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/Error"
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
             }
           }
         }
@@ -1469,6 +1730,11 @@
             "schema": {
               "$ref": "#/components/schemas/Error"
             }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
           }
         }
       },
@@ -1478,6 +1744,11 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/Error"
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
             }
           }
         }
@@ -1917,6 +2188,34 @@
           "updatedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "latestLedger": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The RPC's latest ledger when the indexer last saved this stream. Null before the first sample."
+          },
+          "latestLedgerSeenAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "lagLedgers": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "latestLedger minus ledger, as of the sample. Null without a sample."
+          },
+          "sampleAgeSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Seconds since the sample was taken. Grows while the indexer is stopped, so a stale lagLedgers is visible as stale."
           }
         }
       },
@@ -2312,6 +2611,71 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ActivityBucket"
+            }
+          }
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "description": "RFC 9457 problem details, served when the client sends Accept: application/problem+json.",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "parameter": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      },
+      "NdjsonTrailer": {
+        "type": "object",
+        "required": [
+          "trailer"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "trailer": {
+            "type": "object",
+            "required": [
+              "rows",
+              "capped",
+              "cap"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "rows": {
+                "type": "integer"
+              },
+              "capped": {
+                "type": "boolean",
+                "description": "True when more events matched than the row cap allowed."
+              },
+              "cap": {
+                "type": "integer"
+              }
             }
           }
         }

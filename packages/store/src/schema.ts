@@ -221,6 +221,46 @@ export const MIGRATIONS: Migration[] = [
     `,
     down: `DROP TABLE IF EXISTS contract_specs;`,
   },
+  {
+    version: 7,
+    name: 'stream-state-latest-ledger',
+    up: `
+      -- The RPC's latestLedger and when the indexer saw it (#181), so the API
+      -- can report lag without ever talking to the RPC. Nullable: rows
+      -- written before this carry no sample.
+      ALTER TABLE stream_state ADD COLUMN latest_ledger INTEGER;
+      ALTER TABLE stream_state ADD COLUMN latest_ledger_seen_at TEXT;
+    `,
+    down: `
+      ALTER TABLE stream_state DROP COLUMN latest_ledger_seen_at;
+      ALTER TABLE stream_state DROP COLUMN latest_ledger;
+    `,
+  },
+  {
+    version: 8,
+    name: 'event-deep-topics',
+    up: `
+      -- Topic positions 4 and up (#164). Positions 0-3 stay in the topic0..3
+      -- columns; only the deeper ones live here, same pattern as event_addresses.
+      CREATE TABLE event_topics (
+        event_id TEXT    NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        topic    TEXT    NOT NULL,
+        PRIMARY KEY (event_id, position)
+      ) WITHOUT ROWID;
+      CREATE INDEX idx_event_topics_lookup ON event_topics (position, topic, event_id);
+
+      -- Backfill from the decoded topics already stored. Scalars only, as topicKey.
+      INSERT OR IGNORE INTO event_topics (event_id, position, topic)
+      SELECT e.id, CAST(j.key AS INTEGER),
+             CASE json_type(j.value, '$.value') WHEN 'true' THEN 'true' WHEN 'false' THEN 'false'
+                  ELSE CAST(json_extract(j.value, '$.value') AS TEXT) END
+        FROM events e, json_each(e.topics_json) j
+       WHERE CAST(j.key AS INTEGER) >= 4
+         AND json_type(j.value, '$.value') IN ('text', 'integer', 'real', 'true', 'false');
+    `,
+    down: `DROP TABLE IF EXISTS event_topics;`,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.reduce(

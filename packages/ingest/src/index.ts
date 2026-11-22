@@ -76,3 +76,8 @@ export { FailoverRpcClient } from './rpc-pool.js';
 export type { RpcPoolOptions } from './rpc-pool.js';
 export { StellarArchiveSource } from './archive.js';
 export type { ArchiveSourceOptions, ArchiveRange } from './archive.js';
+export { AdaptivePageSize, assertBounds } from './page-size.js';
+export type { PageSizeBounds, AdaptivePageSizeOptions } from './page-size.js';
+export { diffLedgerWindow, describeReorg, isEmptyDiff, DEFAULT_REORG_DEPTH } from './reorg.js';
+export type { ReorgDiff, ReorgStore, StoredEventRef } from './reorg.js';
+export { encodeTopicSegment, parseTopicFilters, TopicFlagError, TOPIC_PREFIXES, MAX_TOPIC_FILTERS, MAX_TOPIC_SEGMENTS } from './topics.js';

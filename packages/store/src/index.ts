@@ -11,6 +11,8 @@ export type {
   LensEvent,
   EventQuery,
   EventPage,
+  AddressContractSummary,
+  ContractPage,
   ContractSummary,
   TimeBucket,
   TimeBucketCount,
@@ -54,3 +56,5 @@ export { MIGRATIONS, LATEST_SCHEMA_VERSION } from './schema.js';
 export { createLogger, formatRecord, resolveLogFormat } from './logger.js';
 export type { Logger, LogLevel, LogRecord, LogFields, LogFormat, LoggerOptions } from './logger.js';
 export type { Migration } from './schema.js';
+
+export { decodeContractCursor, encodeContractCursor } from './contract-cursor.js';

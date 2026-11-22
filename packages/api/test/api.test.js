@@ -206,7 +206,10 @@ test('out-of-range and malformed parameters are rejected, not silently clamped',
       ['/events?fromLedger=200&toLedger=100', 'fromLedger'],
       ['/events?txHash=nothex', 'txHash'],
       ['/events?successfulOnly=maybe', 'successfulOnly'],
-      ['/events?topic=a&topic=b&topic=c&topic=d&topic=e', 'topic'],
+      ['/events?indexedAfter=notatime', 'indexedAfter'],
+      ...['/contracts', `/contracts/${SAC}/topics`].flatMap((r) =>
+        ['abc', '0', '-1', '100000'].map((l) => [`${r}?limit=${l}`, 'limit']),
+      ),
     ];
     for (const [path, parameter] of cases) {
       const { res, body } = await get(path);
@@ -1985,4 +1988,173 @@ test('a JSON ETag never validates a CSV request for the same URL', async () => {
     assert.match(csv.headers.get('content-type'), /^text\/csv/);
     await csv.text();
   });
+});
+
+test('GET /transactions/{hash} returns the transaction events in order with a summary', async () => {
+  await withServer(async ({ get, store }) => {
+    const all = (await store.queryEvents({ limit: MAX_QUERY_LIMIT, order: 'asc' })).events;
+    const hash = all[0].txHash;
+    const expected = all.filter((e) => e.txHash === hash);
+    const { res, body } = await get(`/transactions/${hash}`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events.map((e) => e.id), expected.map((e) => e.id));
+    assert.equal(body.summary.ledger, expected[0].ledger);
+    assert.equal(body.summary.eventCount, expected.length);
+    assert.equal(body.summary.succeeded, expected.every((e) => e.inSuccessfulContractCall));
+    assert.deepEqual(body.summary.contracts, [...new Set(expected.map((e) => e.contractId))]);
+    assert.equal((await get(`/transactions/${'0'.repeat(64)}`)).res.status, 404);
+    assert.equal((await get('/transactions/nope')).res.status, 400);
+  });
+});
+
+test('GET /addresses/{address} counts per contract; unseen address is empty', async () => {
+  await withServer(async ({ get, store }) => {
+    const all = (await store.queryEvents({ limit: MAX_QUERY_LIMIT })).events;
+    const freq = new Map();
+    for (const e of all) {
+      for (const t of [...e.topics, e.value]) {
+        if (typeof t.value === 'string' && /^[GC][A-Z2-7]{55}$/.test(t.value)) freq.set(t.value, (freq.get(t.value) ?? 0) + 1);
+      }
+    }
+    const [busiest] = [...freq.entries()].sort((a, b) => b[1] - a[1])[0];
+    const { res, body } = await get(`/addresses/${busiest}`);
+    assert.equal(res.status, 200);
+    const mentioned = (await get(`/events?address=${busiest}&limit=1000`)).body.events;
+    assert.equal(body.eventCount, mentioned.length);
+    for (const c of body.contracts) {
+      const mine = mentioned.filter((e) => e.contractId === c.contractId);
+      assert.equal(c.eventCount, mine.length);
+      assert.equal(c.firstLedger, Math.min(...mine.map((e) => e.ledger)));
+      assert.equal(c.lastLedger, Math.max(...mine.map((e) => e.ledger)));
+    }
+    const unseen = await get(`/addresses/G${'A'.repeat(55)}`);
+    assert.equal(unseen.res.status, 200);
+    assert.deepEqual(unseen.body.contracts, []);
+    assert.equal((await get('/addresses/bogus')).res.status, 400);
+  });
+});
+
+test('GET /contracts pages through every contract exactly once, even while events arrive', async () => {
+  await withServer(async ({ get, store }) => {
+    const expected = (await get('/contracts?limit=1000')).body.contracts.map((c) => c.contractId);
+    assert.ok(expected.length >= 2);
+    const seen = [];
+    let path = '/contracts?limit=1';
+    for (let i = 0; i < 50; i++) {
+      const { body } = await get(path);
+      seen.push(...body.contracts.map((c) => c.contractId));
+      // New events land mid-walk: one on an already-listed contract, one on a brand-new one.
+      if (i === 0) {
+        const maxLedger = Math.max(...fixture.events.map((e) => e.ledger));
+        const base = fixture.events[0];
+        await store.insertEvents([
+          { ...base, id: '9'.repeat(30), ledger: maxLedger + 5, txHash: 'f'.repeat(64) },
+          { ...base, id: '9'.repeat(29) + '8', ledger: maxLedger + 6, contractId: SAC.replace('CDL', 'CDM'), txHash: 'e'.repeat(64) },
+        ]);
+      }
+      if (!body.nextCursor) break;
+      path = `/contracts?limit=1&cursor=${encodeURIComponent(body.nextCursor)}`;
+    }
+    assert.equal(new Set(seen).size, seen.length, 'no contract twice');
+    assert.deepEqual([...seen].sort(), [...expected].sort());
+    assert.equal((await get('/contracts?cursor=garbage')).res.status, 400);
+  });
+});
+
+test('CORS accepts a comma-separated origin list', async () => {
+  const origins = 'https://staging.example,https://app.example';
+  await withConfiguredServer({ options: { corsOrigin: origins } }, async ({ base }) => {
+    const ok = await fetch(`${base}/health`, { headers: { Origin: 'https://app.example' } });
+    assert.equal(ok.headers.get('access-control-allow-origin'), 'https://app.example');
+    assert.match(ok.headers.get('vary') ?? '', /Origin/);
+    const no = await fetch(`${base}/health`, { headers: { Origin: 'https://evil.example' } });
+    assert.equal(no.headers.get('access-control-allow-origin'), null);
+    assert.match(no.headers.get('vary') ?? '', /Origin/);
+  });
+  await withConfiguredServer({ options: { corsOrigin: '*' } }, async ({ base }) => {
+    const res = await fetch(`${base}/health`, { headers: { Origin: 'https://any.example' } });
+    assert.equal(res.headers.get('access-control-allow-origin'), '*');
+  });
+});
+
+test('X-Request-Id and Retry-After are exposed to browsers (#172)', async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/health`);
+    const exposed = res.headers.get('access-control-expose-headers') ?? '';
+    assert.match(exposed, /X-Request-Id/);
+    assert.match(exposed, /Retry-After/);
+  });
+});
+
+test('cache headers: immutable routes get max-age, the rest stay no-store (#173)', async () => {
+  await withServer(async ({ base }) => {
+    const id = fixture.events[0].id;
+    const one = await fetch(`${base}/events/${encodeURIComponent(id)}`);
+    assert.equal(one.status, 200);
+    assert.match(one.headers.get('cache-control'), /max-age=\d+/);
+    const spec = await fetch(`${base}/openapi.json`);
+    assert.match(spec.headers.get('cache-control'), /max-age=\d+/);
+    for (const path of ['/status', '/health', '/contracts', '/events/nope-missing']) {
+      const res = await fetch(base + path);
+      assert.equal(res.headers.get('cache-control'), 'no-store', path);
+    }
+    const list = await fetch(`${base}/events`);
+    assert.equal(list.headers.get('cache-control'), 'no-cache');
+  });
+});
+
+test('a client that accepts brotli gets Content-Encoding: br (#174)', async () => {
+  await withServer(async ({ base }) => {
+    const { request } = await import('node:http');
+    const { brotliDecompressSync } = await import('node:zlib');
+    const { res, body } = await new Promise((resolve, reject) => {
+      request(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'br, gzip' } }, (r) => {
+        const chunks = [];
+        r.on('data', (c) => chunks.push(c));
+        r.on('end', () => resolve({ res: r, body: Buffer.concat(chunks) }));
+      }).on('error', reject).end();
+    });
+    assert.equal(res.headers['content-encoding'], 'br');
+    assert.ok(JSON.parse(brotliDecompressSync(body).toString()).events);
+  });
+});
+
+test('the API serves from a read-only connection; an unmigrated db gives 503 (#175)', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'lens-ro-'));
+  const path = join(dir, 'lens.db');
+  try {
+    const rw = new SqliteEventStore({ path });
+    await rw.insertEvents(fixture.events);
+    await rw.close();
+
+    const ro = new SqliteEventStore({ path, readOnly: true });
+    const server = createApiServer({ store: ro });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const base = `http://127.0.0.1:${server.address().port}`;
+    assert.equal((await fetch(`${base}/events`)).status, 200);
+    assert.equal((await fetch(`${base}/health`)).status, 200);
+    server.close();
+    await once(server, 'close');
+    await ro.close();
+
+    const empty = join(dir, 'empty.db');
+    const { DatabaseSync } = await import('node:sqlite');
+    new DatabaseSync(empty).close();
+    const raw = new SqliteEventStore({ path: empty, readOnly: true });
+    const server2 = createApiServer({ store: raw });
+    server2.listen(0, '127.0.0.1');
+    await once(server2, 'listening');
+    const res = await fetch(`http://127.0.0.1:${server2.address().port}/events`);
+    assert.equal(res.status, 503);
+    assert.ok(res.headers.get('retry-after'));
+    server2.close();
+    await once(server2, 'close');
+    await raw.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

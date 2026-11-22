@@ -20,7 +20,7 @@ curl "localhost:8080/contracts/CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2
 |---|---|
 | `GET /health` | Liveness + a real write probe against the store. `503` when degraded. |
 | `GET /stats` | Row counts, indexed ledger range, schema version. |
-| `GET /status` | Stats plus every ingest stream's saved cursor — indexer lag without asking the RPC. |
+| `GET /status` | Stats plus every ingest stream's saved cursor, `lagLedgers` and `sampleAgeSeconds` — indexer lag without asking the RPC. |
 | `GET /contracts` | Indexed contracts, most recently active first. |
 | `GET /contracts/{id}/events` | Events for one contract. |
 | `GET /contracts/{id}/activity` | Event counts per `minute`/`hour`/`day` bucket: `?bucket=hour&from=…&to=…`. Empty buckets are omitted. |
@@ -41,6 +41,41 @@ names are a `400`.
 Query parameters on the two event-list routes: `limit` (1–1000, default 50),
 `cursor`, `direction` (`forward`/`backward`), `order` (`asc`/`desc`), `topic` (repeatable), `fromLedger`,
 `toLedger`, `txHash`, `successfulOnly`.
+
+### Streaming NDJSON
+
+Send `Accept: application/x-ndjson` to either event-list route to get every
+matching event, one JSON object per line, paged internally by keyset so memory
+stays flat for any range:
+
+```sh
+curl -sH 'Accept: application/x-ndjson' 'http://localhost:8080/events?fromLedger=4695000' \
+  | jq -c 'select(.trailer == null) | {id, ledger}'
+
+# did the row cap cut it short?
+curl -sH 'Accept: application/x-ndjson' http://localhost:8080/events | tail -n 1 | jq .trailer
+# { "rows": 1000000, "capped": true, "cap": 1000000 }
+```
+
+The last line is always `{"trailer":{"rows":N,"capped":bool,"cap":N}}`. The cap
+is `LENS_NDJSON_MAX_ROWS` (default 1,000,000); `capped: true` means more events
+matched. `?limit=` bounds the stream too, and `?format=json` overrides `Accept`.
+
+### Lag on `/status`
+
+Each stream carries `latestLedger` and `latestLedgerSeenAt` — the RPC's tip as
+the indexer last saw it — plus `lagLedgers` (tip minus `ledger`) and
+`sampleAgeSeconds`. The API never contacts the RPC. A stopped indexer keeps its
+last `lagLedgers`, but `sampleAgeSeconds` keeps growing, so "0 behind, 120 s ago"
+is distinguishable from "0 behind, now". Both are `null` until the indexer has
+saved a sample.
+
+### Errors as problem details
+
+Errors are `{ "error": { code, message, parameter?, requestId? } }`. Send
+`Accept: application/problem+json` to get RFC 9457 instead —
+`{ type, title, status, detail, code, parameter?, requestId? }` with
+`Content-Type: application/problem+json`.
 
 Every event-returning route adds a `typed` field to events whose contract has
 a spec and whose shape matches one of its declared events — the event's name
@@ -192,6 +227,15 @@ responses are `Cache-Control: no-cache` (store, but revalidate), so a browser
 sends the validator on its own. The tag tracks new events: pruning or
 re-decoding rows without indexing anything new does not change it.
 
+**Which routes are cacheable.** `GET /events/{id}` and `/openapi.json` send
+`Cache-Control: public, max-age=60` (an event never changes short of a
+redecode; the spec changes only with a deploy). `/events` and
+`/contracts/{id}/events` are `no-cache` (ETag revalidation, above); every other
+route, including `/status` and `/health`, is `no-store`. Browsers can read
+`X-Request-Id` and `Retry-After` cross-origin. Responses are compressed with
+`br`, `gzip` or `deflate` above 1 KB. `soroban-lens-api` opens the database
+read-only, so it needs an already-migrated file (otherwise 503).
+
 **Or don't poll: `GET /events/stream`.** A Server-Sent Events stream that takes
 the same filters as `/events` (and `contractId`) and writes each newly indexed
 event as it appears. Every message's `id` is the event id, so a dropped
@@ -240,6 +284,7 @@ goal, and the key check, token bucket and event stream are each small enough
 | | `LENS_RATE_LIMIT_RPS` | off. Requests per second allowed per client IP. |
 | | `LENS_RATE_LIMIT_BURST` | `ceil(LENS_RATE_LIMIT_RPS)`. Bucket size: requests allowed back to back. |
 | | `LENS_API_KEYS` | off. Comma-separated keys; when set, data routes require one. |
+| | `LENS_NDJSON_MAX_ROWS` | `1000000`. Most events one `application/x-ndjson` response carries. |
 | | `LENS_TRUST_PROXY` | off. `1` to key the limiter on `X-Forwarded-For`; only behind a proxy that sets it. |
 | `--shutdown-timeout` | `LENS_SHUTDOWN_TIMEOUT_MS` | `10000` |
 

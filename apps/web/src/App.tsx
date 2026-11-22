@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiRequestError, buildStreamPath, configuredNetworks } from './api.js';
-import type { ContractActivity, ContractSummary, Health, LensEvent, TopicCount } from './types.js';
+import type { ContractActivity, ContractSummary, Health, IndexerStatus, LensEvent, TopicCount } from './types.js';
+import { createLatestGate } from './requests.js';
+import { describeEmptyState } from './emptyState.js';
 import { Filters } from './components/Filters.js';
 import type { FilterState } from './route.js';
 import { ActivityChart } from './components/ActivityChart.js';
@@ -90,6 +92,10 @@ function AppInner(): React.JSX.Element {
   // with emptyReason means it is indexed but nothing matches the filters.
   const [contractUnknown, setContractUnknown] = useState(false);
   const [emptyReason, setEmptyReason] = useState<'no_matching_events' | null>(null);
+  // Indexer progress and why the last events request failed, for #78's empty
+  // state: an empty table means different things depending on both.
+  const [indexerStatus, setIndexerStatus] = useState<IndexerStatus | null>(null);
+  const [loadErrorStatus, setLoadErrorStatus] = useState<number | null>(null);
   const [theme, toggleTheme] = useTheme();
   // Absolute vs relative timestamps in the Ledger column. Persisted so the
   // choice survives a reload, like the theme.
@@ -242,8 +248,8 @@ function AppInner(): React.JSX.Element {
     contractSummary,
   ]);
 
-  // Guards against a slow earlier response overwriting a newer one.
-  const requestId = useRef(0);
+  // Stops a slow response for an old filter overwriting a newer one.
+  const requestGate = useRef(createLatestGate());
 
   const toggleSelect = useCallback((id: string): void => {
     setSelectedIds((current) => {
@@ -301,19 +307,22 @@ function AppInner(): React.JSX.Element {
 
   const loadFirstPage = useCallback(async (): Promise<void> => {
     if (!contractIdValid || !ledgerRangeValid) return;
-    const id = ++requestId.current;
+    const isCurrent = requestGate.current.begin();
     try {
       const page = await api.events(selected.baseUrl, query);
-      if (id !== requestId.current) return;
+      if (!isCurrent()) return;
       setEvents(page.events);
       setTotal(page.total);
       setNextCursor(page.nextCursor);
       setContractUnknown(false);
       setEmptyReason(page.emptyReason ?? null);
       setError(null);
+      setLoadErrorStatus(null);
       setLastUpdated(Date.now());
     } catch (err) {
-      if (id !== requestId.current) return;
+      if (!isCurrent()) return;
+      // ApiRequestError status 0 is "no response"; anything else threw after one.
+      setLoadErrorStatus(err instanceof ApiRequestError ? err.status : -1);
       if (err instanceof ApiRequestError && err.status === 404 && query.contractId) {
         setEvents([]);
         setTotal(0);
@@ -321,12 +330,13 @@ function AppInner(): React.JSX.Element {
         setContractUnknown(true);
         setEmptyReason(null);
         setError(null);
+        setLoadErrorStatus(null);
         setLastUpdated(Date.now());
         return;
       }
       setError(err instanceof ApiRequestError ? err.message : String(err));
     } finally {
-      if (id === requestId.current) setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid]);
 
@@ -420,6 +430,15 @@ function AppInner(): React.JSX.Element {
         if (err instanceof DOMException && err.name === 'AbortError') return;
         setHealth(null);
         setHealthError(err instanceof ApiRequestError ? err.message : String(err));
+      });
+    // Refreshed with health, so "catching up" turns into results (or into
+    // "never ran") without a reload.
+    api
+      .status(selected.baseUrl, controller.signal)
+      .then(setIndexerStatus)
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setIndexerStatus(null);
       });
     return () => controller.abort();
   }, [selected.baseUrl, lastUpdated]);
@@ -536,13 +555,8 @@ function AppInner(): React.JSX.Element {
   })();
 
   // ── Empty message ─────────────────────────────────────────────────────────────
-  const emptyMessage = contractUnknown
-    ? t('emptyContractUnknown')
-    : emptyReason === 'no_matching_events'
-      ? t('emptyNoMatchingEvents')
-      : health && health.events === 0
-        ? t('emptyNothingIndexed')
-        : t('emptyNoResults');
+  const empty = describeEmptyState({ loadErrorStatus, status: indexerStatus, contractUnknown, emptyReason });
+  const emptyMessage = t(empty.key, empty.vars);
 
   return (
     <main className="app">

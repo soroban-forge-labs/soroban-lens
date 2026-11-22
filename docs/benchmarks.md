@@ -84,3 +84,33 @@ Add a case to the `cases` list in `bench/run.js` (store) or a call in the API
 section. Give it a stable name, because `compare.js` matches metrics by name. A
 metric present on only one side is reported as new or removed, never as a
 regression.
+
+## Adaptive page size (#14)
+
+```bash
+npm run bench:page-size
+```
+
+Drives the real `EventPoller` against a simulated node: the same history served
+twice, once at the fixed default page size and once with
+`LENS_PAGE_SIZE_MIN=100` / `LENS_PAGE_SIZE_MAX=10000`. The node's response time
+grows with page size, and in the second scenario it fails any request that would
+take more than five seconds. Simulated rather than live, because the comparison
+needs identical conditions twice; the latency constants are illustrative.
+
+Recorded 2026-11-21:
+
+| scenario | mode | events | round trips | failed requests | simulated time |
+|---|---|---:|---:|---:|---:|
+| busy contract, healthy node | fixed 200 | 100000 | 501 | 0 | 97.2s |
+| busy contract, healthy node | adaptive 100..10000 | 100000 | 15 | 0 | 24.3s |
+| busy contract, node times out above ~4000/page | fixed 200 | 100000 | 501 | 0 | 197.2s |
+| busy contract, node times out above ~4000/page | adaptive 100..10000 | 100000 | 35 | 0 | 127.3s |
+| quiet contract | fixed 200 | 150 | 1 | 0 | 2.2s |
+| quiet contract | adaptive 100..10000 | 150 | 1 | 0 | 2.2s |
+
+The page size grows while pages come back full and fast, halves on a slow page
+or a failed request, and after a shrink will not grow back past the size that
+was too much until 50 good pages in a row. In the timeout scenario, slow pages
+shrink it before any request actually fails, which is why the error count stays
+at zero.

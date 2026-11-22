@@ -1,0 +1,91 @@
+# soroban-lens from published images (#83). No clone and no build needed:
+#
+#   curl -LO https://github.com/soroban-forge-labs/soroban-lens/releases/latest/download/docker-compose.release.yml
+#   docker compose -f docker-compose.release.yml up -d
+#
+# Then open http://localhost:5173. The images are multi-arch (amd64 + arm64).
+# The copy attached to each GitHub release defaults LENS_VERSION to that
+# release; this one tracks :latest. Pin a version, or roll back, with
+#   LENS_VERSION=0.2.0 docker compose -f docker-compose.release.yml up -d
+#
+# Every setting has a default here, so a .env beside this file is optional;
+# it takes the same variables as .env.example.
+
+name: soroban-lens
+
+services:
+  # Fails fast and loudly if the RPC is unreachable or the volume is not
+  # writable, so the indexer and API never start into a broken environment.
+  doctor:
+    image: ghcr.io/soroban-forge-labs/soroban-lens-node:${LENS_VERSION:-latest}
+    environment:
+      LENS_NETWORK: ${LENS_NETWORK:-testnet}
+      LENS_RPC_URL: ${LENS_RPC_URL:-}
+      LENS_CONTRACT_IDS: ${LENS_CONTRACT_IDS:-CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC}
+    volumes:
+      - lens-data:/app/data
+    command: ["node", "packages/cli/dist/bin.js", "doctor"]
+
+  indexer:
+    image: ghcr.io/soroban-forge-labs/soroban-lens-node:${LENS_VERSION:-latest}
+    depends_on:
+      doctor:
+        condition: service_completed_successfully
+    environment:
+      LENS_NETWORK: ${LENS_NETWORK:-testnet}
+      LENS_RPC_URL: ${LENS_RPC_URL:-}
+      LENS_CONTRACT_IDS: ${LENS_CONTRACT_IDS:-CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC}
+      LENS_START_LEDGER: ${LENS_START_LEDGER:-}
+      LENS_PAGE_SIZE: ${LENS_PAGE_SIZE:-200}
+      LENS_POLL_INTERVAL_MS: ${LENS_POLL_INTERVAL_MS:-2000}
+      LENS_POLL_MAX_INTERVAL_MS: ${LENS_POLL_MAX_INTERVAL_MS:-30000}
+      LENS_METRICS_PORT: 9090
+      LENS_METRICS_HOST: 0.0.0.0
+    volumes:
+      - lens-data:/app/data
+    command: ["node", "packages/cli/dist/bin.js", "index"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9090/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  api:
+    image: ghcr.io/soroban-forge-labs/soroban-lens-node:${LENS_VERSION:-latest}
+    depends_on:
+      doctor:
+        condition: service_completed_successfully
+    environment:
+      LENS_API_PORT: 8080
+      LENS_NETWORK: ${LENS_NETWORK:-testnet}
+      LENS_CORS_ORIGIN: ${LENS_CORS_ORIGIN:-*}
+    ports:
+      - "${LENS_API_PORT:-8080}:8080"
+    volumes:
+      # The API only reads. SQLite in WAL mode still needs to write the -shm and
+      # -wal sidecars, so this cannot be a read-only mount.
+      - lens-data:/app/data
+    command: ["node", "packages/api/dist/bin.js"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  web:
+    # The published bundle talks to http://localhost:8080, the API's default
+    # port mapping. A different API URL means building the web image yourself.
+    image: ghcr.io/soroban-forge-labs/soroban-lens-web:${LENS_VERSION:-latest}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${LENS_WEB_PORT:-5173}:8080"
+    restart: unless-stopped
+
+volumes:
+  lens-data:
