@@ -94,6 +94,24 @@ test('ApiRequestError falls back when the body is not the documented shape', () 
   assert.equal(error.status, 502);
 });
 
+test('a failed request keeps the X-Request-Id response header (#204)', async () => {
+  const previous = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ error: { code: 'boom', message: 'nope' } }), {
+      status: 500,
+      headers: { 'x-request-id': 'req-42' },
+    });
+  try {
+    const { api } = await import('../.test-build/api.js');
+    await assert.rejects(api.events('http://example.test', {}), (err) => {
+      assert.equal(err.requestId, 'req-42');
+      return true;
+    });
+  } finally {
+    globalThis.fetch = previous;
+  }
+});
+
 test('the stream path carries the contract as a query parameter and drops paging', () => {
   const { pathname, params } = parse(
     buildStreamPath({ contractId: SAC, limit: 50, cursor: 'x', topics: ['transfer', null], successfulOnly: true }),

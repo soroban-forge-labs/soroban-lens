@@ -9,13 +9,19 @@ import type { FilterState } from './route.js';
 import { ActivityChart } from './components/ActivityChart.js';
 import { EventTable } from './components/EventTable.js';
 import { EventCompare } from './components/EventCompare.js';
+import { CopyButton } from './components/CopyButton.js';
+import { truncate } from './format.js';
 import { StatusBar } from './components/StatusBar.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { usePolling, useDebounced, useEventStream, usePersistentState, useUrlState, useTheme } from './hooks.js';
 import { LocaleProvider, useLocale, LOCALE_CODES, LOCALE_LABELS } from './i18n/index.js';
 
 /** Testnet Stellar Asset Contract for native XLM — always emitting events. */
-const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMPQVUU2HHGCYSC'; // XLM SAC
+const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC'; // XLM SAC
+/** Short names for contracts the app already knows about, for the tab title (#202). */
+const CONTRACT_LABELS: Record<string, string> = {
+  [EXAMPLE_CONTRACT]: 'XLM',
+};
 const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
@@ -96,6 +102,11 @@ function AppInner(): React.JSX.Element {
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityRange, setActivityRange] = useState<ActivityRange | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The API tags failed responses with X-Request-Id; keeping it next to the
+  // message lets a screenshot be matched to a log line (#204).
+  const [errorRequestId, setErrorRequestId] = useState<string | null>(null);
+  // Events that arrived while the tab was hidden — the title counts them (#202).
+  const [unseen, setUnseen] = useState(0);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -111,6 +122,7 @@ function AppInner(): React.JSX.Element {
   // "Load more" failures stay next to the button (#196) — the main banner is
   // for first-page failures, where the rows on screen are still fine.
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  const [loadMoreErrorId, setLoadMoreErrorId] = useState<string | null>(null);
   const [theme, toggleTheme] = useTheme();
   // Absolute vs relative timestamps in the Ledger column. Persisted so the
   // choice survives a reload, like the theme.
@@ -398,8 +410,10 @@ function AppInner(): React.JSX.Element {
     setContractUnknown(false);
     setEmptyReason(page.emptyReason ?? null);
     setError(null);
+    setErrorRequestId(null);
     setLoadErrorStatus(null);
     setLoadMoreError(null);
+    setLoadMoreErrorId(null);
     setLastUpdated(Date.now());
   }, []);
 
@@ -415,11 +429,13 @@ function AppInner(): React.JSX.Element {
         setContractUnknown(true);
         setEmptyReason(null);
         setError(null);
+        setErrorRequestId(null);
         setLoadErrorStatus(null);
         setLastUpdated(Date.now());
         return;
       }
       setError(err instanceof ApiRequestError ? err.message : String(err));
+      setErrorRequestId(err instanceof ApiRequestError ? (err.requestId ?? null) : null);
       // #195: a failed request is exactly when the status bar is stale, so
       // health refreshes right away rather than waiting for its interval.
       refreshHealth();
@@ -454,6 +470,11 @@ function AppInner(): React.JSX.Element {
       const page = await api.events(selected.baseUrl, query);
       if (!isCurrent()) return;
       const freshLoad = eventsRef.current.length === 0;
+      if (document.hidden) {
+        const known = new Set(eventsRef.current.map((e) => e.id));
+        const added = page.events.reduce((n, e) => (known.has(e.id) ? n : n + 1), 0);
+        if (added > 0) setUnseen((n) => n + added);
+      }
       setEvents((current) => mergeLivePage(current, page.events));
       // When rows are already loaded the cursor stays put: it points past
       // the oldest row, and page one's cursor would strand the deeper pages.
@@ -469,6 +490,7 @@ function AppInner(): React.JSX.Element {
     if (!nextCursor || loadingMore) return;
     setLoadingMore(true);
     setLoadMoreError(null);
+    setLoadMoreErrorId(null);
     try {
       const page = await api.events(selected.baseUrl, { ...query, cursor: nextCursor });
       // Append by id, because a live refresh may have already added some of
@@ -482,6 +504,7 @@ function AppInner(): React.JSX.Element {
       setTotalIsEstimate(page.totalIsEstimate ?? false);
     } catch (err) {
       setLoadMoreError(err instanceof ApiRequestError ? err.message : String(err));
+      setLoadMoreErrorId(err instanceof ApiRequestError ? (err.requestId ?? null) : null);
     } finally {
       setLoadingMore(false);
     }
@@ -522,6 +545,9 @@ function AppInner(): React.JSX.Element {
     (data) => {
       try {
         const event = JSON.parse(data) as LensEvent;
+        if (document.hidden && !eventsRef.current.some((e) => e.id === event.id)) {
+          setUnseen((n) => n + 1);
+        }
         setEvents((current) =>
           current.some((e) => e.id === event.id) ? current : [event, ...current],
         );
@@ -553,6 +579,23 @@ function AppInner(): React.JSX.Element {
     return () => healthAbort.current?.abort();
   }, [refreshHealth]);
   usePolling(refreshHealth, HEALTH_INTERVAL_MS, true);
+
+  // #202: the tab title names the active contract (a known label or a short
+  // id) and, while hidden, counts the live events nobody has seen yet. Coming
+  // back to the tab clears the count.
+  useEffect(() => {
+    const onVisible = (): void => {
+      if (!document.hidden) setUnseen(0);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+  const titleContract = query.contractId
+    ? (CONTRACT_LABELS[query.contractId] ?? truncate(query.contractId))
+    : null;
+  useEffect(() => {
+    document.title = `${unseen > 0 ? `(${unseen}) ` : ''}${titleContract ? `${titleContract} — ` : ''}Soroban Lens`;
+  }, [unseen, titleContract]);
 
   // Topic suggestions only exist per contract.
   useEffect(() => {
@@ -748,6 +791,13 @@ function AppInner(): React.JSX.Element {
       {error && contractIdValid && (
         <p className="warning banner" role="alert">
           {error}
+          {errorRequestId && (
+            <span className="muted small request-id">
+              {' '}
+              {t('requestId')} <code className="mono">{errorRequestId}</code>{' '}
+              <CopyButton value={errorRequestId} label="request ID" />
+            </span>
+          )}
         </p>
       )}
 
@@ -888,7 +938,14 @@ function AppInner(): React.JSX.Element {
 
       {loadMoreError && (
         <p className="warning" role="alert">
-          {loadMoreError}{' '}
+          {loadMoreError}
+          {loadMoreErrorId && (
+            <span className="muted small request-id">
+              {' '}
+              {t('requestId')} <code className="mono">{loadMoreErrorId}</code>{' '}
+              <CopyButton value={loadMoreErrorId} label="request ID" />
+            </span>
+          )}{' '}
           <button type="button" className="link-button" onClick={() => void loadMore()}>
             {t('retry')}
           </button>

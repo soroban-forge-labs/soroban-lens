@@ -67,6 +67,7 @@ export const en = {
   loadMore: 'Load {count} more',
   loadingMore: 'Loading\u2026',
   retry: 'Retry',
+  requestId: 'request',
 
   // ── Footer ────────────────────────────────────────────────────────────────────
   footerTagline: 'Soroban Lens \u2014 a reading lens for Soroban contract events.',

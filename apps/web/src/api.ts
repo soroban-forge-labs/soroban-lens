@@ -91,13 +91,16 @@ export class ApiRequestError extends Error {
   readonly status: number;
   readonly code: string;
   readonly parameter: string | undefined;
+  /** The API's `X-Request-Id`, so a screenshot can be matched to a log line (#204). */
+  readonly requestId: string | undefined;
 
-  constructor(status: number, body: ApiErrorBody | null, fallback: string) {
+  constructor(status: number, body: ApiErrorBody | null, fallback: string, requestId?: string) {
     super(body?.error?.message ?? fallback);
     this.name = 'ApiRequestError';
     this.status = status;
     this.code = body?.error?.code ?? 'unknown';
     this.parameter = body?.error?.parameter;
+    this.requestId = requestId;
   }
 }
 
@@ -114,7 +117,12 @@ async function request<T>(baseUrl: string, path: string, signal?: AbortSignal): 
 
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
-    throw new ApiRequestError(response.status, body, `Request failed with ${response.status}.`);
+    throw new ApiRequestError(
+      response.status,
+      body,
+      `Request failed with ${response.status}.`,
+      response.headers.get('x-request-id') ?? undefined,
+    );
   }
   return (await response.json()) as T;
 }

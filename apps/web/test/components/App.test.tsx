@@ -33,9 +33,11 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
   window.localStorage.clear();
   window.history.replaceState(null, '', '/');
+  document.title = '';
 });
 
 describe('live refresh merging (#186)', () => {
@@ -121,5 +123,61 @@ describe('health refresh cadence (#195)', () => {
     const before = healthCalls;
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
     expect(healthCalls).toBeGreaterThan(before);
+  });
+});
+
+describe('tab title (#202)', () => {
+  class FakeEventSource {
+    static instances: FakeEventSource[] = [];
+    onopen: (() => void) | null = null;
+    onmessage: ((m: { data: string; lastEventId: string }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor(public url: string) {
+      FakeEventSource.instances.push(this);
+    }
+    close(): void {}
+  }
+
+  it('names the active contract and counts events that arrive while the tab is hidden', async () => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(api, 'events').mockImplementation(async () => page(['e1', 'e2', 'e3'], 'c2'));
+
+    render(<App />);
+    await screen.findByText('t-e1');
+    expect(document.title).toBe('Soroban Lens');
+
+    // Switching to the known XLM contract names it in the title.
+    fireEvent.click(screen.getByRole('button', { name: 'use the testnet XLM contract' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(document.title).toBe('XLM — Soroban Lens');
+
+    // The stream is live; hide the tab and deliver a new event over it
+    // (polling pauses while hidden, so the stream is what arrives then).
+    const hidden = vi.spyOn(document, 'hidden', 'get');
+    hidden.mockReturnValue(true);
+    const es = FakeEventSource.instances.at(-1)!;
+    act(() => {
+      es.onmessage?.({ data: JSON.stringify(makeEvent(0, { id: 'e9' })), lastEventId: 'x' });
+    });
+    expect(document.title).toBe('(1) XLM — Soroban Lens');
+
+    // Back in focus, the count clears.
+    hidden.mockReturnValue(false);
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(document.title).toBe('XLM — Soroban Lens');
+  });
+});
+
+describe('request id in errors (#204)', () => {
+  it('a failed request shows the X-Request-Id with a copy button', async () => {
+    vi.spyOn(api, 'events').mockRejectedValue(
+      new ApiRequestError(500, null, 'Request failed with 500.', 'req-abc-123'),
+    );
+
+    render(<App />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Request failed with 500.');
+    expect(alert.textContent).toContain('req-abc-123');
+    expect(alert.querySelector('code.mono')?.textContent).toBe('req-abc-123');
   });
 });
