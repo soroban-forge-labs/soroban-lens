@@ -336,6 +336,20 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] getStats counts a row whose decode failed (#160)`, async () => {
+    const store = await seeded();
+    // A value that is not decodable XDR: the decoder records decode_error on
+    // the row rather than throwing, and the stat must see it.
+    const bad: RawEventInput = {
+      ...fixtureEvents[0]!, id: 'decode-error-under-test', value: 'not valid xdr',
+    };
+    await store.insertEvents([bad]);
+    const stats = await store.getStats();
+    assert.equal(stats.eventCount, fixtureEvents.length + 1);
+    assert.equal(stats.decodeErrorCount, 1);
+    await store.close();
+  });
+
   test(`[${name}] getStats on an empty store reports zero, not an error`, async () => {
     const store = await createStore();
     const stats = await store.getStats();

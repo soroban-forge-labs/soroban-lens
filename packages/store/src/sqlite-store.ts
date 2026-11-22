@@ -113,6 +113,7 @@ export class SqliteEventStore implements EventStore {
   #statements: Statements | null = null;
   #checkpointTimer: ReturnType<typeof setInterval> | undefined;
   #searchAvailable = false;
+  readonly #readOnly: boolean;
 
   constructor(options: SqliteStoreOptions) {
     this.#path = options.path;
@@ -121,21 +122,28 @@ export class SqliteEventStore implements EventStore {
     this.#now = options.now ?? Date.now;
     this.#sizeTargetBytes = options.sizeTargetBytes;
     const readOnly = options.readOnly === true && options.path !== ':memory:';
+    this.#readOnly = readOnly;
     if (options.path !== ':memory:' && !readOnly) mkdirSync(dirname(options.path), { recursive: true });
     this.#db = new DatabaseSync(options.path, readOnly ? { readOnly: true } : {});
+    try {
+      // WAL lets the API read while the indexer writes, which is the whole point
+      // of running both against one file. NORMAL trades an fsync per commit for
+      // throughput; on a crash the worst case is replaying the last batch, which
+      // is already the delivery guarantee we have from Module 1.
+      if (options.path !== ':memory:' && !readOnly) this.#db.exec('PRAGMA journal_mode = WAL');
+      if (!readOnly) this.#db.exec('PRAGMA synchronous = NORMAL');
+      this.#db.exec('PRAGMA foreign_keys = ON');
+      // Wait rather than fail when the indexer holds the write lock.
+      this.#db.exec('PRAGMA busy_timeout = 5000');
 
-    // WAL lets the API read while the indexer writes, which is the whole point
-    // of running both against one file. NORMAL trades an fsync per commit for
-    // throughput; on a crash the worst case is replaying the last batch, which
-    // is already the delivery guarantee we have from Module 1.
-    if (options.path !== ':memory:' && !readOnly) this.#db.exec('PRAGMA journal_mode = WAL');
-    if (!readOnly) this.#db.exec('PRAGMA synchronous = NORMAL');
-    this.#db.exec('PRAGMA foreign_keys = ON');
-    // Wait rather than fail when the indexer holds the write lock.
-    this.#db.exec('PRAGMA busy_timeout = 5000');
-
-    this.#searchAvailable = options.forceDisableFts5 ? false : this.#hasFts5();
-    if (options.migrateOnOpen !== false && !readOnly) this.#migrateSync();
+      this.#searchAvailable = options.forceDisableFts5 ? false : this.#hasFts5();
+      if (options.migrateOnOpen !== false && !readOnly) this.#migrateSync();
+    } catch (error) {
+      // A rejected open — a newer schema (#161), a corrupt file — must not
+      // leak the connection: the handle keeps the file locked on Windows.
+      this.#db.close();
+      throw error;
+    }
 
     const defaultInterval = options.path === ':memory:' || readOnly ? 0 : 60_000;
     const checkpointIntervalMs = options.checkpointIntervalMs ?? defaultInterval;
@@ -156,11 +164,23 @@ export class SqliteEventStore implements EventStore {
     return this.#path;
   }
 
+  /**
+   * The `readOnly` open flag is the guarantee (#158); this guard exists so a
+   * write attempt reports the policy ("opened read-only") instead of
+   * surfacing SQLite's own error text. `writeProbe` is deliberately exempt —
+   * reporting writability is its job.
+   */
+  #ensureWritable(operation: string): void {
+    if (this.#readOnly) throw new Error(`store opened read-only: ${operation} cannot write`);
+  }
+
   async migrate(): Promise<void> {
+    this.#ensureWritable('migrate');
     this.#migrateSync();
   }
 
   async migrateDown(toVersion: number): Promise<number[]> {
+    this.#ensureWritable('migrateDown');
     const applied = (
       this.#db.prepare('SELECT version, name FROM schema_migrations ORDER BY version DESC').all() as {
         version: number;
@@ -216,6 +236,15 @@ export class SqliteEventStore implements EventStore {
         (r) => r.version,
       ),
     );
+    // A database migrated by a newer soroban-lens carries versions this build
+    // does not understand; carrying on would read a schema we cannot parse
+    // (#161). Report both versions and the remedy, not a SQL error.
+    const newestApplied = Math.max(0, ...applied);
+    if (newestApplied > LATEST_SCHEMA_VERSION) {
+      throw new Error(
+        `database schema is v${newestApplied}, but this build only knows migrations up to v${LATEST_SCHEMA_VERSION} — upgrade soroban-lens to open this database`,
+      );
+    }
     const pending = MIGRATIONS.filter((m) => !applied.has(m.version)).sort(
       (a, b) => a.version - b.version,
     );
@@ -263,6 +292,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async insertDecoded(events: LensEvent[]): Promise<number> {
+    this.#ensureWritable('insert events');
     if (events.length === 0) return 0;
     const stmt = this.#prepared().insert;
 
@@ -610,7 +640,8 @@ export class SqliteEventStore implements EventStore {
         `SELECT COUNT(*) AS event_count,
                 COUNT(DISTINCT contract_id) AS contract_count,
                 MIN(ledger) AS min_ledger,
-                MAX(ledger) AS max_ledger
+                MAX(ledger) AS max_ledger,
+                COUNT(decode_error) AS decode_error_count
          FROM events`,
       )
       .get() as {
@@ -618,6 +649,7 @@ export class SqliteEventStore implements EventStore {
       contract_count: number;
       min_ledger: number | null;
       max_ledger: number | null;
+      decode_error_count: number;
     };
     const version = this.#db
       .prepare('SELECT COALESCE(MAX(version), 0) AS v FROM schema_migrations')
@@ -629,11 +661,13 @@ export class SqliteEventStore implements EventStore {
       minLedger: row.min_ledger,
       maxLedger: row.max_ledger,
       schemaVersion: version.v,
+      decodeErrorCount: row.decode_error_count,
       ...this.#sizes(),
     };
   }
 
   async saveContractSpec(record: ContractSpecRecord): Promise<void> {
+    this.#ensureWritable('saveContractSpec');
     this.#db
       .prepare(
         `INSERT INTO contract_specs (contract_id, source, wasm_hash, entries_xdr, event_count, error, fetched_at)
@@ -674,6 +708,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async saveStreamState(state: StreamState): Promise<void> {
+    this.#ensureWritable('saveStreamState');
     this.#db
       .prepare(
         `INSERT INTO stream_state (key, cursor, ledger, updated_at, latest_ledger, latest_ledger_seen_at)
@@ -749,6 +784,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async deleteEvents(ids: string[]): Promise<number> {
+    this.#ensureWritable('deleteEvents');
     if (ids.length === 0) return 0;
     let removed = 0;
     this.#db.exec('BEGIN');
@@ -772,6 +808,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async pruneBefore(ledger: number): Promise<number> {
+    this.#ensureWritable('pruneBefore');
     // A separate count-then-delete rather than reading `changes` off the
     // DELETE: `changes` after a DELETE is exact too, but a second statement
     // that only counts what will go lets us log or reject a huge prune before
@@ -826,6 +863,7 @@ export class SqliteEventStore implements EventStore {
    * caller measures next actually reflects the prune.
    */
   async pruneToSize(targetBytes: number, chunkLedgers = 1000): Promise<PruneToSizeResult> {
+    this.#ensureWritable('pruneToSize');
     const CHUNK_LEDGERS = Math.max(1, chunkLedgers);
     let ledgers = 0;
     let events = 0;
@@ -891,6 +929,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async redecode(all = false): Promise<number> {
+    this.#ensureWritable('redecode');
     const rows = this.#rawRows(all ? '' : 'WHERE decode_error IS NOT NULL');
     if (rows.length === 0) return 0;
 
@@ -971,6 +1010,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async repairRow(id: string): Promise<void> {
+    this.#ensureWritable('repairRow');
     const rows = this.#rawRows('WHERE id = ?', [id]);
     if (rows.length === 0) return;
     const { params, event } = this.#recompute(rows[0]!);
@@ -1054,6 +1094,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async rebuildSearchIndex(): Promise<void> {
+    this.#ensureWritable('rebuildSearchIndex');
     if (!this.#searchAvailable) {
       throw new Error('rebuildSearchIndex requires the FTS5 SQLite extension, which this build does not have.');
     }
@@ -1114,6 +1155,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async importSnapshot(srcPath: string): Promise<number> {
+    this.#ensureWritable('importSnapshot');
     const lines = createInterface({ input: createReadStream(srcPath, { encoding: 'utf8' }) });
     const BATCH_SIZE = 500;
     let batch: LensEvent[] = [];
@@ -1152,6 +1194,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async checkpoint(mode: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE' = 'TRUNCATE'): Promise<void> {
+    this.#ensureWritable('checkpoint');
     if (this.#path === ':memory:') return; // no WAL file to checkpoint
     // The mode is typed and only ever one of four literal SQL keywords, never
     // interpolated from anything a caller could inject.
