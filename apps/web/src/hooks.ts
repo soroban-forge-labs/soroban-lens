@@ -92,12 +92,34 @@ export function useDebounced<T>(value: T, delayMs: number): T {
   return debounced;
 }
 
+/**
+ * Validate a persisted value against its defaults before using it (#194).
+ *
+ * A blob saved before a field existed, or one carrying a field that no longer
+ * exists, would otherwise produce `undefined`s and stale keys. Object-shaped
+ * state merges the stored keys over the defaults and drops keys the defaults
+ * do not know; a stored value that is not an object at all resets to the
+ * defaults. Primitive state is kept only when its type matches the default's.
+ */
+export function restorePersisted<T>(stored: unknown, defaults: T): T {
+  if (defaults !== null && typeof defaults === 'object' && !Array.isArray(defaults)) {
+    if (stored === null || typeof stored !== 'object' || Array.isArray(stored)) return defaults;
+    const storedRecord = stored as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(defaults as Record<string, unknown>)) {
+      out[key] = key in storedRecord ? storedRecord[key] : (defaults as Record<string, unknown>)[key];
+    }
+    return out as T;
+  }
+  return typeof stored === typeof defaults ? (stored as T) : defaults;
+}
+
 /** Persist a piece of UI state in localStorage, surviving a reload. */
 export function usePersistentState<T>(key: string, initial: T): [T, (value: T) => void] {
   const [state, setState] = useState<T>(() => {
     try {
       const stored = window.localStorage.getItem(key);
-      return stored === null ? initial : (JSON.parse(stored) as T);
+      return stored === null ? initial : restorePersisted(JSON.parse(stored), initial);
     } catch {
       return initial;
     }
@@ -164,9 +186,10 @@ export function useUrlState(
       if (f || n) {
         restored = {
           // Merge over the defaults: filters saved before a field existed
-          // (e.g. fromLedger/toLedger) must not come back undefined.
-          filters: f ? { ...initial.filters, ...(JSON.parse(f) as Partial<UrlState['filters']>) } : initial.filters,
-          network: n ? (JSON.parse(n) as string) : initial.network,
+          // (e.g. fromLedger/toLedger) must not come back undefined, and keys
+          // that no longer exist are dropped (#194).
+          filters: f ? restorePersisted(JSON.parse(f), initial.filters) : initial.filters,
+          network: n && typeof JSON.parse(n) === 'string' ? (JSON.parse(n) as string) : initial.network,
           expandedEventId: null,
         };
       }

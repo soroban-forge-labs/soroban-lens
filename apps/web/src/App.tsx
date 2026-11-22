@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiRequestError, buildStreamPath, configuredNetworks } from './api.js';
-import type { ContractActivity, ContractSummary, Health, IndexerStatus, LensEvent, TopicCount } from './types.js';
+import type { ContractActivity, ContractSummary, EventPage, Health, IndexerStatus, LensEvent, TopicCount } from './types.js';
 import { createLatestGate } from './requests.js';
+import { mergeLivePage } from './live.js';
 import { describeEmptyState } from './emptyState.js';
 import { Filters } from './components/Filters.js';
 import type { FilterState } from './route.js';
@@ -18,6 +19,8 @@ const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMPQVUU2HHGC
 const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
+/** Health refreshes on its own slower cadence, not on every live tick (#195). */
+const HEALTH_INTERVAL_MS = 30_000;
 /** Account or contract StrKey — the shape the API's `address=` accepts (#188). */
 const ADDRESS_PATTERN = /^[GC][A-Z2-7]{55}$/;
 const TIME_PRESET_SECONDS: Record<string, number> = { '15m': 15 * 60, '1h': 60 * 60, '24h': 24 * 60 * 60 };
@@ -68,6 +71,9 @@ function AppInner(): React.JSX.Element {
 
 
   const [events, setEvents] = useState<LensEvent[]>([]);
+  // Latest loaded rows for callbacks that must not take `events` as a dep.
+  const eventsRef = useRef<LensEvent[]>([]);
+  eventsRef.current = events;
   const [expandedEventIds, setExpandedEventIds] = useState<Set<string>>(
     () => new Set(expandedEventId ? [expandedEventId] : []),
   );
@@ -102,10 +108,42 @@ function AppInner(): React.JSX.Element {
   // state: an empty table means different things depending on both.
   const [indexerStatus, setIndexerStatus] = useState<IndexerStatus | null>(null);
   const [loadErrorStatus, setLoadErrorStatus] = useState<number | null>(null);
+  // "Load more" failures stay next to the button (#196) — the main banner is
+  // for first-page failures, where the rows on screen are still fine.
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [theme, toggleTheme] = useTheme();
   // Absolute vs relative timestamps in the Ledger column. Persisted so the
   // choice survives a reload, like the theme.
   const [absoluteTime, setAbsoluteTime] = usePersistentState('lens.absoluteTime', false);
+
+  // #195: /health and /status share one refresh on their own interval; a new
+  // call aborts the previous in-flight one so back-to-back triggers stay cheap.
+  const healthAbort = useRef<AbortController | null>(null);
+  const refreshHealth = useCallback((): void => {
+    healthAbort.current?.abort();
+    const controller = new AbortController();
+    healthAbort.current = controller;
+    api
+      .health(selected.baseUrl, controller.signal)
+      .then((h) => {
+        setHealth(h);
+        setHealthError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setHealth(null);
+        setHealthError(err instanceof ApiRequestError ? err.message : String(err));
+      });
+    // Refreshed with health, so "catching up" turns into results (or into
+    // "never ran") without a reload.
+    api
+      .status(selected.baseUrl, controller.signal)
+      .then(setIndexerStatus)
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setIndexerStatus(null);
+      });
+  }, [selected.baseUrl]);
 
   // Ordered: the first ticked event is the left side of the comparison.
   const [selectedIds, setSelectedIds] = useState<string[]>(readCompareParam);
@@ -352,23 +390,21 @@ function AppInner(): React.JSX.Element {
     };
   }, [selectedIds, events, selected.baseUrl]);
 
-  const loadFirstPage = useCallback(async (): Promise<void> => {
-    if (!contractIdValid || !ledgerRangeValid || !addressValid || !searchReady) return;
-    const isCurrent = requestGate.current.begin();
-    try {
-      const page = await api.events(selected.baseUrl, query);
-      if (!isCurrent()) return;
-      setEvents(page.events);
-      setTotal(page.total);
-      setTotalIsEstimate(page.totalIsEstimate ?? false);
-      setNextCursor(page.nextCursor);
-      setContractUnknown(false);
-      setEmptyReason(page.emptyReason ?? null);
-      setError(null);
-      setLoadErrorStatus(null);
-      setLastUpdated(Date.now());
-    } catch (err) {
-      if (!isCurrent()) return;
+  // Shared tail of every first-page-style request: a fresh page replaces the
+  // summary state, and a 404 on a contract means this indexer never saw it.
+  const applyPageState = useCallback((page: EventPage): void => {
+    setTotal(page.total);
+    setTotalIsEstimate(page.totalIsEstimate ?? false);
+    setContractUnknown(false);
+    setEmptyReason(page.emptyReason ?? null);
+    setError(null);
+    setLoadErrorStatus(null);
+    setLoadMoreError(null);
+    setLastUpdated(Date.now());
+  }, []);
+
+  const handlePageError = useCallback(
+    (err: unknown): void => {
       // ApiRequestError status 0 is "no response"; anything else threw after one.
       setLoadErrorStatus(err instanceof ApiRequestError ? err.status : -1);
       if (err instanceof ApiRequestError && err.status === 404 && query.contractId) {
@@ -384,14 +420,55 @@ function AppInner(): React.JSX.Element {
         return;
       }
       setError(err instanceof ApiRequestError ? err.message : String(err));
+      // #195: a failed request is exactly when the status bar is stale, so
+      // health refreshes right away rather than waiting for its interval.
+      refreshHealth();
+    },
+    [query.contractId, refreshHealth],
+  );
+
+  const loadFirstPage = useCallback(async (): Promise<void> => {
+    if (!contractIdValid || !ledgerRangeValid || !addressValid || !searchReady) return;
+    const isCurrent = requestGate.current.begin();
+    try {
+      const page = await api.events(selected.baseUrl, query);
+      if (!isCurrent()) return;
+      setEvents(page.events);
+      setNextCursor(page.nextCursor);
+      applyPageState(page);
+    } catch (err) {
+      if (!isCurrent()) return;
+      handlePageError(err);
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid, addressValid, searchReady]);
+  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid, addressValid, searchReady, applyPageState, handlePageError]);
+
+  // #186: a live tick re-reads page one but must not throw away rows the
+  // reader pulled in with "Load more". New ids land at the top; every loaded
+  // row stays put, and nextCursor keeps pointing past the oldest one.
+  const pollPage = useCallback(async (): Promise<void> => {
+    if (!contractIdValid || !ledgerRangeValid || !addressValid || !searchReady) return;
+    const isCurrent = requestGate.current.begin();
+    try {
+      const page = await api.events(selected.baseUrl, query);
+      if (!isCurrent()) return;
+      const freshLoad = eventsRef.current.length === 0;
+      setEvents((current) => mergeLivePage(current, page.events));
+      // When rows are already loaded the cursor stays put: it points past
+      // the oldest row, and page one's cursor would strand the deeper pages.
+      if (freshLoad) setNextCursor(page.nextCursor);
+      applyPageState(page);
+    } catch (err) {
+      if (!isCurrent()) return;
+      handlePageError(err);
+    }
+  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid, addressValid, searchReady, applyPageState, handlePageError]);
 
   const loadMore = useCallback(async (): Promise<void> => {
     if (!nextCursor || loadingMore) return;
     setLoadingMore(true);
+    setLoadMoreError(null);
     try {
       const page = await api.events(selected.baseUrl, { ...query, cursor: nextCursor });
       // Append by id, because a live refresh may have already added some of
@@ -404,7 +481,7 @@ function AppInner(): React.JSX.Element {
       setTotal(page.total);
       setTotalIsEstimate(page.totalIsEstimate ?? false);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : String(err));
+      setLoadMoreError(err instanceof ApiRequestError ? err.message : String(err));
     } finally {
       setLoadingMore(false);
     }
@@ -454,44 +531,28 @@ function AppInner(): React.JSX.Element {
         // A malformed message is skipped; the next poll or reconnect resyncs.
       }
     },
-    // A stream only carries events from now on, so catch up on connect.
+    // A stream only carries events from now on, so catch up on connect —
+    // merged, so rows loaded with "Load more" survive the resync (#186).
     () => {
-      void loadFirstPage();
+      void pollPage();
     },
   );
 
   usePolling(
     () => {
-      void loadFirstPage();
+      void pollPage();
     },
     LIVE_INTERVAL_MS,
     filters.live && !streaming && !activityRange,
   );
 
+  // #195: health/status run on their own slower cadence — refreshing on every
+  // live tick made the API answer /health as often as /events.
   useEffect(() => {
-    const controller = new AbortController();
-    api
-      .health(selected.baseUrl, controller.signal)
-      .then((h) => {
-        setHealth(h);
-        setHealthError(null);
-      })
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setHealth(null);
-        setHealthError(err instanceof ApiRequestError ? err.message : String(err));
-      });
-    // Refreshed with health, so "catching up" turns into results (or into
-    // "never ran") without a reload.
-    api
-      .status(selected.baseUrl, controller.signal)
-      .then(setIndexerStatus)
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setIndexerStatus(null);
-      });
-    return () => controller.abort();
-  }, [selected.baseUrl, lastUpdated]);
+    refreshHealth();
+    return () => healthAbort.current?.abort();
+  }, [refreshHealth]);
+  usePolling(refreshHealth, HEALTH_INTERVAL_MS, true);
 
   // Topic suggestions only exist per contract.
   useEffect(() => {
@@ -823,6 +884,15 @@ function AppInner(): React.JSX.Element {
         >
           {loadingMore ? t('loadingMore') : t('loadMore', { count: PAGE_SIZE })}
         </button>
+      )}
+
+      {loadMoreError && (
+        <p className="warning" role="alert">
+          {loadMoreError}{' '}
+          <button type="button" className="link-button" onClick={() => void loadMore()}>
+            {t('retry')}
+          </button>
+        </p>
       )}
 
       <footer className="app-footer">

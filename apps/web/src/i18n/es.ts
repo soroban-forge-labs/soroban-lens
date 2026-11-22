@@ -62,6 +62,7 @@ export const es: Partial<Catalogue> = {
 
   loadMore: 'Cargar {count} m\u00e1s',
   loadingMore: 'Cargando\u2026',
+  retry: 'Reintentar',
 
   footerTagline: 'Soroban Lens \u2014 una lente de lectura para los eventos de contratos Soroban.',
   sourceLink: 'C\u00f3digo fuente',
