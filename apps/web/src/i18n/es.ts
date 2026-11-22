@@ -21,6 +21,13 @@ export const es: Partial<Catalogue> = {
   eventCountWithTopic: '{count} evento{suffix} con el tema \u201c{topic}\u201d',
   eventCountForContractWithTopic:
     '{count} evento{suffix} para este contrato con el tema \u201c{topic}\u201d',
+  eventCountEstimate: 'aproximadamente {count} evento{suffix}',
+  eventCountForContractEstimate: 'aproximadamente {count} evento{suffix} para este contrato',
+  eventCountWithTopicEstimate: 'aproximadamente {count} evento{suffix} con el tema \u201c{topic}\u201d',
+  eventCountForContractWithTopicEstimate:
+    'aproximadamente {count} evento{suffix} para este contrato con el tema \u201c{topic}\u201d',
+  eventCountEstimateTitle:
+    'Total estimado \u2014 la API sirvi\u00f3 este recuento desde una cach\u00e9 de corta duraci\u00f3n en lugar de contar cada fila, as\u00ed que puede ir unos segundos por detr\u00e1s.',
   live: 'en vivo',
   streamingLive: 'Recibiendo actualizaciones en tiempo real',
   pollingFallback: 'Actualizando cada 5 segundos',
