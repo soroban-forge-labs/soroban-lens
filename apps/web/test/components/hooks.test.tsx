@@ -26,6 +26,12 @@ describe('restorePersisted (#194)', () => {
     expect(restorePersisted(true, false)).toBe(true);
     expect(restorePersisted('yes', false)).toBe(false);
   });
+
+  it('a null default keeps whatever was stored — it means "no saved choice yet"', () => {
+    // lens.theme's default is null; dropping the stored value left
+    // data-theme unset and broke the dark-theme accessibility test.
+    expect(restorePersisted('dark', null)).toBe('dark');
+  });
 });
 
 describe('usePersistentState (#194)', () => {

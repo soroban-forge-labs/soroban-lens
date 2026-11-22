@@ -99,7 +99,9 @@ export function useDebounced<T>(value: T, delayMs: number): T {
  * exists, would otherwise produce `undefined`s and stale keys. Object-shaped
  * state merges the stored keys over the defaults and drops keys the defaults
  * do not know; a stored value that is not an object at all resets to the
- * defaults. Primitive state is kept only when its type matches the default's.
+ * defaults. Primitive state is kept only when its type matches the default's —
+ * and with a `null` default there is no type to check, so anything stored is
+ * kept (e.g. `lens.theme`, where null just means "no saved choice yet").
  */
 export function restorePersisted<T>(stored: unknown, defaults: T): T {
   if (defaults !== null && typeof defaults === 'object' && !Array.isArray(defaults)) {
@@ -111,7 +113,7 @@ export function restorePersisted<T>(stored: unknown, defaults: T): T {
     }
     return out as T;
   }
-  return typeof stored === typeof defaults ? (stored as T) : defaults;
+  return defaults === null || typeof stored === typeof defaults ? (stored as T) : defaults;
 }
 
 /** Persist a piece of UI state in localStorage, surviving a reload. */
