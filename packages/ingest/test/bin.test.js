@@ -34,7 +34,7 @@ async function cli(args, env = {}) {
 test('--type rejects a value the RPC does not serve', async () => {
   const { code, stderr } = await cli(['-c', SAC, '--type', 'contracts']);
   assert.equal(code, 2);
-  assert.match(stderr, /--type must be contract, system or diagnostic/);
+  assert.match(stderr, /--type must be contract or system/);
 });
 
 test('--type is documented in the help text', async () => {

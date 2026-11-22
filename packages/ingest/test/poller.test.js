@@ -590,7 +590,7 @@ test('ingestionLag is the single definition every consumer shares', () => {
 });
 
 test('lag never goes negative when the node reports a stale latestLedger', () => {
-  assert.deepEqual(ingestionLag(200, 160), { lagLedgers: 0, lagSeconds: 0 });
+  assert.deepEqual(ingestionLag(200, 160), { lagLedgers: 0, lagSeconds: 0, measuredLagSeconds: null });
 });
 
 // ── #19 warn when a page hits the RPC ceiling ─────────────────────────────────

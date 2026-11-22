@@ -13,7 +13,6 @@ import type { EventBatch, EventFilter, PollerOptions, RawEvent, RetentionState }
 import type { IngestMetrics } from './metrics.js';
 import { AdaptivePageSize } from './page-size.js';
 import { DEFAULT_REORG_DEPTH, describeReorg, diffLedgerWindow, isEmptyDiff, type ReorgStore } from './reorg.js';
-import type { RawEvent } from './types.js';
 
 /**
  * The poller refuses to start when the node's passphrase does not match the
@@ -84,7 +83,16 @@ export interface PollerProgress {
   measuredLagSeconds: number | null;
 }
 
-export function ingestionLag(ledger: number, latestLedger: number): {
+/**
+ * One definition of lag, so the CLI, the metrics endpoint (#1) and the API
+ * cannot each compute a slightly different number.
+ */
+export function ingestionLag(
+  ledger: number,
+  latestLedger: number,
+  lastClosedAt?: string,
+  now: number = Date.now(),
+): {
   lagLedgers: number;
   lagSeconds: number;
   measuredLagSeconds: number | null;
@@ -97,12 +105,29 @@ export function ingestionLag(ledger: number, latestLedger: number): {
   return { lagLedgers, lagSeconds: lagLedgers * APPROX_LEDGER_SECONDS, measuredLagSeconds };
 }
 
-/** Base key derived from the RPC URL only (see #142 for why it excludes the set). */
-export function defaultCursorKey(rpcUrl: string): string {
-  return safeHost(rpcUrl);
+/**
+ * The key stored cursors are saved under. Covers the contract ids plus the
+ * filter knobs that change what "the stream" is (#127): switching --topic or
+ * --type must start a new stream rather than resume mid-history with a
+ * different filter.
+ */
+export function defaultCursorKey(
+  rpcUrl: string,
+  contractIds: readonly string[] = [],
+  filters: { eventType?: string | undefined; topics?: readonly (readonly string[])[] | undefined } = {},
+): string {
+  const host = safeHost(rpcUrl);
+  const ids = [...contractIds].sort().join(',') || 'all-contracts';
+  const eventType = filters.eventType ?? 'contract';
+  const topics = filters.topics ?? [];
+  if (eventType === 'contract' && topics.length === 0) return `${host}-${shortHash(ids)}`;
+  // Topic filters are order-sensitive within a filter (positional) but not
+  // between filters (any may match), so each is kept as is and the list sorted.
+  const topicPart = topics.map((t) => t.join('/')).sort().join('|');
+  return `${host}-${shortHash(`${ids};type=${eventType};topics=${topicPart}`)}`;
 }
 
-/** Derive a per-contract cursor key from the base key. */
+/** Derive a per-contract cursor key from a caller-named base key (#142). */
 export function contractCursorKey(baseKey: string, contractId: string): string {
   return `${baseKey}:${contractId}`;
 }
@@ -118,13 +143,18 @@ export class EventPoller {
   readonly #options: PollerOptions;
   readonly #metrics: IngestMetrics | undefined;
   readonly #reorgStore: ReorgStore | undefined;
+  readonly #explicitCursorKey: boolean;
 
   constructor(options: PollerOptions, deps: PollerDeps) {
     assertContractIds(options.contractIds);
     this.#options = options;
     this.#client = deps.client;
     this.#cursors = deps.cursors ?? new MemoryCursorStore();
-    this.#key = deps.cursorKey ?? defaultCursorKey(deps.client.rpcUrl);
+    this.#explicitCursorKey = deps.cursorKey !== undefined;
+    this.#key = deps.cursorKey ?? defaultCursorKey(deps.client.rpcUrl, options.contractIds, {
+      eventType: options.eventType,
+      topics: options.topics,
+    });
     this.#sleep = deps.sleep ?? defaultSleep;
     this.#now = deps.now ?? Date.now;
     this.#signal = deps.signal;
@@ -190,15 +220,26 @@ export class EventPoller {
       key: string;
       cursor: string | undefined;
       startLedger: number | undefined;
+      /** Bounded runs only: saw its short page, so it is never polled again. */
+      done: boolean;
     }
 
+    const filterOpts = { eventType, topics: this.#options.topics };
     const streams: PerContractStream[] = contractIds.length > 0
       ? contractIds.map((id) => ({
           contractId: id,
           filter: buildFilters([id], this.#options.topics, eventType)[0]!,
-          key: contractCursorKey(this.#key, id),
+          // A contract's saved position is keyed to that contract alone, so
+          // adding or removing a sibling does not shift it (#142). The key
+          // also covers the shared filters, so a changed --topic or --type
+          // starts every contract on a fresh stream (#127). An explicit
+          // cursorKey names the whole stream; the contract id is appended.
+          key: this.#explicitCursorKey
+            ? contractCursorKey(this.#key, id)
+            : defaultCursorKey(this.#client.rpcUrl, [id], filterOpts),
           cursor: undefined as string | undefined,
           startLedger: undefined as number | undefined,
+          done: false,
         }))
       : [{
           contractId: '*',
@@ -206,6 +247,7 @@ export class EventPoller {
           key: this.#key,
           cursor: undefined as string | undefined,
           startLedger: undefined as number | undefined,
+          done: false,
         }];
 
     let anyNeedBackfill = false;
@@ -234,7 +276,12 @@ export class EventPoller {
       }
     }
 
-    const seen = new RecentIds(pageSize * RECENT_ID_WINDOW_PAGES);
+    // At-least-once delivery means a crash mid-write replays the last batch.
+    // Module 2 absorbs that with INSERT OR IGNORE, but every other consumer —
+    // the NDJSON stdout path, for one — would emit the repeat. Drop repeats
+    // here so "at least once" is not every consumer's problem to solve.
+    // Sized for the largest page the stream may ask for, not the current one.
+    const seen = new RecentIds((bounds?.max ?? pager.size) * RECENT_ID_WINDOW_PAGES);
     const stalledThresholdMs = this.#options.stalledThresholdMs ?? DEFAULT_STALLED_THRESHOLD_MS;
     let observedLatestLedger: number | undefined;
     let latestLedgerUnchangedSince: number | undefined;
@@ -242,9 +289,17 @@ export class EventPoller {
     const endLedger = this.#options.endLedger;
 
     while (!this.#signal?.aborted) {
+      // A bounded stream that already saw its short page is done: it is not
+      // asked for another page, so a sibling's backfill does not make it
+      // re-read anything (#142).
+      const active = streams.filter((s) => !s.done);
+      if (active.length === 0) return;
+      // Fixed for this round of requests: `pager.size` may change once it is measured.
+      const pageSize = pager.size;
       let results: Array<{ stream: PerContractStream; batch: EventBatch }>;
+      const requestedAt = this.#now();
       try {
-        results = await Promise.all(streams.map(async (s) => {
+        results = await Promise.all(active.map(async (s) => {
           const args: GetEventsArgs & { fallbackLedger?: number } = {
             filters: [s.filter],
             limit: pageSize,
@@ -256,6 +311,8 @@ export class EventPoller {
           const batch = await this.#client.getEvents(args);
           return { stream: s, batch };
         }));
+        pager.recordPage(results.reduce((n, r) => n + r.batch.events.length, 0), this.#now() - requestedAt);
+        if (pager.size !== pageSize) this.#log(`page size ${pageSize} -> ${pager.size}`);
       } catch (error) {
         if (isCursorOutOfRange(error) && streams.some((s) => s.cursor)) {
           const { oldestLedger } = await this.#client.retention();
@@ -319,6 +376,11 @@ export class EventPoller {
         stallReported = true;
       }
 
+      // A short page marks a bounded stream finished; it drops out of the
+      // next round entirely. Unbounded streams never mark themselves done.
+      for (const r of results) {
+        if (endLedger !== undefined && r.batch.events.length < pageSize) r.stream.done = true;
+      }
       const caughtUp = results.every((r) => r.batch.events.length < pageSize);
       const fresh = allEvents.filter((event) => seen.add(event.id));
       const lastLedger = allEvents.at(-1)?.ledger ?? 0;
@@ -331,7 +393,9 @@ export class EventPoller {
         );
       }
 
-      const reachedEndLedger = endLedger !== undefined && caughtUp;
+      // A bounded run finishes when every stream saw its short page — done
+      // streams count because their last page was short by definition.
+      const reachedEndLedger = endLedger !== undefined && streams.every((s) => s.done);
 
       if (fresh.length > 0) {
         const firstCursor = results[0]?.batch.cursor ?? '';
@@ -346,7 +410,7 @@ export class EventPoller {
             latestLedger,
             caughtUp,
             reachedEndLedger,
-            ...ingestionLag(lastLedger, latestLedger),
+            ...ingestionLag(lastLedger, latestLedger, allEvents.at(-1)?.ledgerClosedAt, this.#now()),
           },
         };
       }
@@ -380,16 +444,68 @@ export class EventPoller {
         this.#reorgStore &&
         reorgDepth > 0 &&
         endLedger === undefined &&
-        batch.latestLedger !== lastReorgCheckTip
+        latestLedger !== lastReorgCheckTip
       ) {
-        lastReorgCheckTip = batch.latestLedger;
-        await this.#checkReorg(filters, batch.latestLedger, batch.oldestLedger, reorgDepth, pageSize);
+        lastReorgCheckTip = latestLedger;
+        await this.#checkReorg(
+          streams.map((s) => s.filter),
+          latestLedger,
+          oldestLedger,
+          reorgDepth,
+          pageSize,
+        );
       }
 
       if (caughtUp) {
         await this.#sleep(idleMs);
         if (allEvents.length === 0) idleMs = Math.min(maxIdleMs, Math.max(baseIdleMs, idleMs * 2));
       }
+    }
+  }
+
+  /**
+   * Re-reads the last `depth` ledgers worth of events and reports the
+   * difference to the store, so a chain re-org rewrites rows that no longer
+   * match the node's view of history.
+   *
+   * Each contract stream has its own filter, so the truth page is fetched once
+   * per stream; the store's window covers the whole contract set, and the
+   * merged truth is what it is compared against.
+   *
+   * Never fatal: a failed check is logged and the stream carries on, because
+   * an RPC blip during a reorg check must not stop indexing. The next new tip
+   * checks the window again.
+   */
+  async #checkReorg(
+    streamFilters: EventFilter[],
+    tip: number,
+    oldestLedger: number,
+    depth: number,
+    limit: number,
+  ): Promise<void> {
+    const store = this.#reorgStore;
+    if (!store) return;
+    const fromLedger = Math.max(oldestLedger, tip - depth + 1);
+    try {
+      const truth: RawEvent[] = [];
+      for (const filter of streamFilters) {
+        let page = await this.#client.getEvents({ filters: [filter], startLedger: fromLedger, limit });
+        for (;;) {
+          // The tip may have moved while paging; ledgers past it are the main
+          // stream's business, and are not stored yet to compare against.
+          truth.push(...page.events.filter((e) => e.ledger <= tip));
+          const last = page.events.at(-1);
+          if (page.events.length < limit || !last || last.ledger > tip) break;
+          page = await this.#client.getEvents({ filters: [filter], cursor: page.cursor, limit });
+        }
+      }
+      const stored = await store.eventsInLedgers(fromLedger, tip);
+      const diff = diffLedgerWindow({ fromLedger, toLedger: tip }, stored, truth);
+      if (isEmptyDiff(diff)) return;
+      this.#log(describeReorg(diff));
+      await store.applyReorg(diff);
+    } catch (error) {
+      this.#log(`reorg check for ledgers ${fromLedger}..${tip} failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }
@@ -409,6 +525,16 @@ function safeHost(url: string): string {
   } catch {
     return 'rpc';
   }
+}
+
+/** FNV-1a, 8 hex chars — the same digest earlier releases used for cursor keys. */
+function shortHash(input: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
 }
 
 const JSONRPC_INVALID_REQUEST = -32600;

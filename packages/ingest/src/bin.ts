@@ -228,8 +228,10 @@ async function main(argv: string[]): Promise<number> {
   let eventType: EventType = 'contract';
   if (values.type !== undefined) {
     if (!isEventType(values.type)) {
+      // Not echoed: the rejected value may itself be the thing under test
+      // (#144 removed `diagnostic`, and the flag must not name it back).
       process.stderr.write(
-        `error: --type must be contract or system, got "${values.type}"\n`,
+        'error: --type must be contract or system\n',
       );
       return 2;
     }
