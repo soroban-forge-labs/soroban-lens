@@ -51,9 +51,14 @@ jobs:
       - name: Install and build the base commit
         if: github.event_name == 'pull_request'
         working-directory: base
+        # The harness only runs the base checkout's store and api packages (see
+        # the root `bench` script), so build exactly those. Building the whole
+        # tree lets a base commit whose unrelated workspaces do not compile —
+        # e.g. a build fix still in flight on another PR — take down a
+        # comparison it never participates in.
         run: |
           npm ci
-          npm run build
+          npm run build -w @soroban-lens/store -w @soroban-lens/api
 
       - name: Benchmark the base commit
         if: github.event_name == 'pull_request'
