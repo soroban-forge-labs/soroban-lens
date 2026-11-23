@@ -69,6 +69,14 @@ which silently stringifies to `{"0":46,"1":170,…}`. `toJsonSafe()` normalises
 BigInt to a decimal string and bytes to lower-case hex, recursively, including
 inside maps and vecs.
 
+**Maps whose keys are not scalars become `{ key, value }` pairs.**
+`scValToNative()` builds a map as a plain JS object, so a `bytes`, `vec` or
+`map` key goes through property-key coercion and two distinct keys can become
+one. Such a map decodes to an ordered array of `{ key, value }` entries, each
+key decoded normally; so does a scalar-keyed map whose keys collide once
+coerced (the u32 `5` and the string `"5"`). Every other map keeps its plain
+object shape.
+
 i128 amounts routinely exceed `Number.MAX_SAFE_INTEGER`, so **decoded integers
 are strings, never JS numbers**. A UI that does `Number(event.value.value)` on a
 token amount is a bug waiting for a large transfer.
@@ -114,6 +122,20 @@ four positions, and `null` is a wildcard:
 store.queryEvents({ topics: ['transfer', null, null] });  // any transfer
 store.queryEvents(w topics: ['AXIS', 'order'] });         // prefix of a 5-topic event
 ```
+
+Each projection has a type column beside it (`topic0_type`…`topic3_type`, and
+`event_topics.type` for position 4+, migration 9), because the value alone
+cannot tell the symbol `transfer` from the string `"transfer"`. `topicTypes`
+runs parallel to `topics`; an untyped position compares the value alone, as it
+always has:
+
+```ts
+store.queryEvents({ topics: ['transfer'], topicTypes: ['symbol'] });  // not the string
+```
+
+`address` matches an address anywhere; `addressPosition` (`topic1`, `value`, …)
+narrows it to one position, so "transfers from G…" is
+`{ address, addressPosition: 'topic1' }`.
 
 Topics that are themselves maps or vecs project to `NULL` and are not filterable.
 That is deliberate: there is no single-column form of a map that a

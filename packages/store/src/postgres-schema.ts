@@ -182,4 +182,32 @@ export const POSTGRES_MIGRATIONS: PostgresMigration[] = [
     `,
     down: `DROP TABLE IF EXISTS event_topics;`,
   },
+  {
+    version: 9,
+    name: 'typed-topics',
+    up: `
+      -- The ScVal type of each indexed topic (#146), so a filter can tell the
+      -- symbol transfer from the string "transfer". See the SQLite migration.
+      ALTER TABLE events ADD COLUMN topic0_type TEXT;
+      ALTER TABLE events ADD COLUMN topic1_type TEXT;
+      ALTER TABLE events ADD COLUMN topic2_type TEXT;
+      ALTER TABLE events ADD COLUMN topic3_type TEXT;
+      ALTER TABLE event_topics ADD COLUMN type TEXT;
+
+      UPDATE events SET
+        topic0_type = CASE WHEN topic0 IS NULL THEN NULL ELSE topics_json->0->>'type' END,
+        topic1_type = CASE WHEN topic1 IS NULL THEN NULL ELSE topics_json->1->>'type' END,
+        topic2_type = CASE WHEN topic2 IS NULL THEN NULL ELSE topics_json->2->>'type' END,
+        topic3_type = CASE WHEN topic3 IS NULL THEN NULL ELSE topics_json->3->>'type' END;
+      UPDATE event_topics t SET type = e.topics_json->t.position->>'type'
+        FROM events e WHERE e.id = t.event_id;
+    `,
+    down: `
+      ALTER TABLE event_topics DROP COLUMN type;
+      ALTER TABLE events DROP COLUMN topic3_type;
+      ALTER TABLE events DROP COLUMN topic2_type;
+      ALTER TABLE events DROP COLUMN topic1_type;
+      ALTER TABLE events DROP COLUMN topic0_type;
+    `,
+  },
 ];

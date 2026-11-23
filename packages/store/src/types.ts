@@ -121,6 +121,15 @@ export interface EventQuery {
    * a filter can name.
    */
   topics?: (string | null)[] | undefined;
+  /**
+   * ScVal type per topic position, parallel to `topics` (#146): `['symbol']`
+   * with `topics: ['transfer']` matches the symbol `transfer` but not the
+   * string `"transfer"`. `null` (or a missing entry) leaves that position's
+   * type unconstrained, so an untyped query behaves exactly as before. A type
+   * with no value at the same position matches any value of that type.
+   * Types are the lower-cased arm names `DecodedValue.type` uses.
+   */
+  topicTypes?: (string | null)[] | undefined;
   /** Inclusive lower bound on ledger sequence. */
   fromLedger?: number | undefined;
   /** Inclusive upper bound on ledger sequence. */
@@ -142,6 +151,12 @@ export interface EventQuery {
    * columns, so this finds addresses a topic filter structurally cannot.
    */
   address?: string | undefined;
+  /**
+   * Narrow `address` to one position (#147): `'topic0'`…`'topicN'`, or
+   * `'value'` for anywhere inside the event data. For a SAC transfer, `topic1`
+   * is the sender and `topic2` the recipient. Ignored without `address`.
+   */
+  addressPosition?: string | undefined;
   /**
    * Substring match against a decoded event's topics and value, via the
    * trigram full-text index (#32). At least 3 characters — trigram indexes
