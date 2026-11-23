@@ -44,6 +44,7 @@ import { WebhookManager, type WebhookOptions } from './webhooks.js';
 import { ApiKeyAuthenticator } from './auth.js';
 import { TokenBucketLimiter, clientKey, type RateLimitOptions } from './rate-limit.js';
 import { EventStreamHub, type EventStreamOptions } from './stream.js';
+import { routeLabel, UNMATCHED_ROUTE, type ApiMetrics } from './metrics.js';
 
 export interface ApiServerOptions {
   store: EventStore;
@@ -87,6 +88,11 @@ export interface ApiServerOptions {
   graphql?: GraphQLOptions;
   /** Optional webhook subscriptions at /webhooks. Disabled unless `enabled: true` (#59). */
   webhooks?: WebhookOptions;
+  /**
+   * Record request counts and durations here (#184). Serving them is the
+   * caller's job, on a port of its own: see `startApiMetricsServer`.
+   */
+  metrics?: ApiMetrics;
 }
 
 /** Largest request body accepted by the POST routes. */
@@ -994,6 +1000,17 @@ export function createApiServer(options: ApiServerOptions): Server {
     if (draining.has(server)) res.setHeader('Connection', 'close');
 
     const started = Date.now();
+    // Set once a route matches; until then a request counts as unmatched, so
+    // an unknown path adds to one series instead of creating a new one.
+    let metricsRoute = UNMATCHED_ROUTE;
+    if (options.metrics) {
+      const metrics = options.metrics;
+      const startedAt = performance.now();
+      // 'close' fires for completed and aborted responses alike.
+      res.once('close', () => {
+        metrics.observe(metricsRoute, req.method, res.statusCode, (performance.now() - startedAt) / 1000);
+      });
+    }
     // The base is a placeholder; only pathname and search are ever read.
     const url = new URL(req.url ?? '/', 'http://localhost');
 
@@ -1037,6 +1054,11 @@ export function createApiServer(options: ApiServerOptions): Server {
     try {
       const path = url.pathname.replace(/\/+$/, '') || '/';
       const candidates = routes.filter((r) => r.pattern.test(path));
+      // Labelled from the pattern, a fixed string, before auth and the rate
+      // limit, so a 401 or 429 on a real route lands on that route's series;
+      // a 405 does too, since the path is known even when the method is not.
+      const labelled = candidates.find((r) => r.method === method) ?? candidates[0];
+      if (labelled) metricsRoute = routeLabel(labelled.pattern);
 
       // Before the 404 and the schema check, so a caller who is throttled or
       // unauthenticated learns nothing about which routes exist or what state the

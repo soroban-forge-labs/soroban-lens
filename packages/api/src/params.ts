@@ -9,6 +9,10 @@ const TX_HASH = /^[0-9a-fA-F]{64}$/;
 // StrKey: 'G' (account) or 'C' (contract) followed by 55 base32 characters.
 // Both are valid ScVal addresses, and #23's index does not distinguish them.
 const ADDRESS = /^[GC][A-Z2-7]{55}$/;
+/** Where event_addresses records an address: a topic position, or the value. */
+const ADDRESS_POSITION = /^(topic(0|[1-9][0-9]{0,2})|value)$/;
+/** A lower-cased ScVal arm name, as `DecodedValue.type` reports it. */
+const SCVAL_TYPE = /^[a-z][A-Za-z0-9]{0,31}$/;
 
 export function assertAddress(value: string): string {
   if (!ADDRESS.test(value)) {
@@ -150,6 +154,21 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     );
   }
 
+  const addressPosition = params.get('addressPosition') ?? undefined;
+  if (addressPosition !== undefined) {
+    if (!ADDRESS_POSITION.test(addressPosition)) {
+      throw ApiError.badRequest(
+        `"addressPosition" must be "topic0".."topicN" or "value", got "${addressPosition}".`,
+        'addressPosition',
+      );
+    }
+    // Without an address there is nothing for the position to narrow; saying
+    // so beats silently returning every event.
+    if (address === undefined) {
+      throw ApiError.badRequest('"addressPosition" needs "address".', 'addressPosition');
+    }
+  }
+
   // No minimum-length rejection: a 1-2 character search is a valid request
   // that the trigram index simply cannot match anything with, which is
   // honest behaviour (an empty page), not an error.
@@ -174,6 +193,7 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
 
   const successfulOnly = boolParam(params, 'successfulOnly');
   const topics = parseTopics(params);
+  const topicTypes = parseTopicTypes(params);
   const cursor = params.get('cursor');
 
   return {
@@ -186,12 +206,14 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     ...(toTime !== undefined ? { toTime } : {}),
     ...(txHash !== undefined ? { txHash } : {}),
     ...(address !== undefined ? { address } : {}),
+    ...(addressPosition !== undefined ? { addressPosition } : {}),
     ...(search !== undefined && search !== '' ? { search } : {}),
     ...(transactionIndex !== undefined ? { transactionIndex } : {}),
     ...(operationIndex !== undefined ? { operationIndex } : {}),
     ...(cursor ? { cursor } : {}),
     ...(successfulOnly !== undefined ? { successfulOnly } : {}),
     ...(topics ? { topics } : {}),
+    ...(topicTypes ? { topicTypes } : {}),
     ...(indexedAfter !== undefined ? { indexedAfter } : {}),
   };
 }
@@ -243,6 +265,27 @@ export function parseTopics(params: URLSearchParams): (string | null)[] | undefi
   const topics = params.getAll('topic');
   if (topics.length === 0) return undefined;
   return topics.map((t) => (t === '*' || t === '' ? null : t));
+}
+
+/**
+ * Repeated `?topicType=` parameters, positional like `?topic=` (#146):
+ * `?topic=transfer&topicType=symbol` matches the symbol `transfer` and not the
+ * string `"transfer"`. `*` or an empty value leaves a position untyped, so a
+ * request without `topicType` behaves exactly as it always has.
+ */
+export function parseTopicTypes(params: URLSearchParams): (string | null)[] | undefined {
+  const types = params.getAll('topicType');
+  if (types.length === 0) return undefined;
+  return types.map((t) => {
+    if (t === '*' || t === '') return null;
+    if (!SCVAL_TYPE.test(t)) {
+      throw ApiError.badRequest(
+        `"topicType" must be a ScVal type such as symbol, string, address, u32 or i128, got "${t}".`,
+        'topicType',
+      );
+    }
+    return t;
+  });
 }
 
 /** Top-level properties of an event that `?fields=` can select. */

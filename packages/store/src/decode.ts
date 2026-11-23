@@ -16,7 +16,71 @@ import type { DecodedValue, JsonValue, LensEvent, RawEventInput } from './types.
  */
 export function decodeScVal(base64: string): DecodedValue {
   const scv = xdr.ScVal.fromXDR(base64, 'base64');
-  return { type: scValTypeName(scv), value: toJsonSafe(scValToNative(scv)) };
+  return { type: scValTypeName(scv), value: scValToJson(scv) };
+}
+
+/**
+ * Map key arms that survive JS property-key coercion without colliding: each
+ * one renders to a string that identifies the key uniquely within its type.
+ * A map keyed only by these keeps the plain-object shape every caller expects.
+ */
+const SCALAR_KEY_TYPES = new Set([
+  'symbol',
+  'string',
+  'address',
+  'bool',
+  'u32',
+  'i32',
+  'u64',
+  'i64',
+  'u128',
+  'i128',
+  'u256',
+  'i256',
+  'timepoint',
+  'duration',
+]);
+
+/**
+ * `toJsonSafe(scValToNative(scv))`, except for maps whose keys are not scalars
+ * (#149).
+ *
+ * scValToNative builds a map as a plain object, so every key goes through
+ * property-key coercion: a `bytes` key becomes a comma-joined byte list, a
+ * `vec` key its joined elements, a `map` key `[object Object]`. Two distinct
+ * keys can coerce to the same string and one value silently replaces the
+ * other. Such a map is rendered as an ordered array of `{ key, value }` pairs
+ * instead, each key decoded the normal way; so is a scalar-keyed map whose
+ * keys still collide once coerced. The walk happens on the raw ScVal
+ * because by the time scValToNative returns, the collision has already
+ * happened.
+ */
+function scValToJson(scv: unknown): JsonValue {
+  const type = scValTypeName(scv);
+  if (type === 'vec') {
+    const elements = ((scv as xdr.ScValVec).value as unknown[] | null | undefined) ?? [];
+    return elements.map(scValToJson);
+  }
+  if (type === 'map') {
+    const entries = ((scv as xdr.ScValMap).value as xdr.ScMapEntry[] | null | undefined) ?? [];
+    if (entries.every((entry) => SCALAR_KEY_TYPES.has(scValTypeName(entry.key)))) {
+      const keys = entries.map((entry) => String(toJsonSafe(scValToNative(entry.key))));
+      // Scalar keys can still collide across types (the u32 5 and the string
+      // "5"); scValToNative refuses such a map, so it gets pairs as well.
+      if (new Set(keys).size === keys.length) {
+        // Built the way scValToNative + toJsonSafe built it before, so the
+        // output for a scalar-keyed map is unchanged: same coerced keys and
+        // the same engine key order.
+        const out: Record<string, JsonValue> = {};
+        entries.forEach((entry, i) => {
+          out[keys[i]!] = scValToJson(entry.val);
+        });
+        return out;
+      }
+    }
+    return entries.map((entry) => ({ key: scValToJson(entry.key), value: scValToJson(entry.val) }));
+  }
+  return toJsonSafe(scValToNative(scv as xdr.ScVal));
 }
 
 /** `ScValSymbol` -> `symbol`, `ScValI128` -> `i128`, `ScValLedgerKeyNonce` -> `ledgerKeyNonce`. */
@@ -131,6 +195,16 @@ export function topicKey(topic: DecodedValue | undefined): string | null {
   if (typeof v === 'string') return v;
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
   return null;
+}
+
+/**
+ * The ScVal type stored alongside `topicKey` (#146), so a filter can tell the
+ * symbol `transfer` from the string `"transfer"`, or the u32 `5` from the
+ * string `"5"`. Null exactly where `topicKey` is null: a topic with no
+ * indexable value has no indexable type either.
+ */
+export function topicType(topic: DecodedValue | undefined): string | null {
+  return topicKey(topic) === null ? null : topic!.type;
 }
 
 /**
