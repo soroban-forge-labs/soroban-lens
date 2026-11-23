@@ -296,6 +296,43 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE events DROP COLUMN topic0_type;
     `,
   },
+  {
+    version: 10,
+    name: 'muxed-account-addresses',
+    up: `
+      ALTER TABLE event_addresses ADD COLUMN muxed_id TEXT;
+      CREATE INDEX idx_event_addresses_address_muxed_id
+        ON event_addresses (address, muxed_id, event_id);
+
+      UPDATE event_addresses
+         SET muxed_id = (
+           SELECT json_extract(e.value_json, '$.value.to_muxed_id')
+             FROM events e
+            WHERE e.id = event_addresses.event_id
+              AND e.type = 'contract'
+              AND json_extract(e.topics_json, '$[0].value') = 'transfer'
+              AND json_extract(e.topics_json, '$[2].value') = event_addresses.address
+              AND json_type(e.value_json, '$.value.to_muxed_id') = 'text'
+              AND json_extract(e.value_json, '$.value.to_muxed_id') <> ''
+              AND json_extract(e.value_json, '$.value.to_muxed_id') NOT GLOB '*[^0-9]*'
+         )
+       WHERE position = 'topic2'
+         AND EXISTS (
+           SELECT 1 FROM events e
+            WHERE e.id = event_addresses.event_id
+              AND e.type = 'contract'
+              AND json_extract(e.topics_json, '$[0].value') = 'transfer'
+              AND json_extract(e.topics_json, '$[2].value') = event_addresses.address
+              AND json_type(e.value_json, '$.value.to_muxed_id') = 'text'
+              AND json_extract(e.value_json, '$.value.to_muxed_id') <> ''
+              AND json_extract(e.value_json, '$.value.to_muxed_id') NOT GLOB '*[^0-9]*'
+         );
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_event_addresses_address_muxed_id;
+      ALTER TABLE event_addresses DROP COLUMN muxed_id;
+    `,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.reduce(

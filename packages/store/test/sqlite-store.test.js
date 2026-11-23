@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, statSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
+import { xdr, nativeToScVal, Address, encodeMuxedAccount, encodeMuxedAccountToAddress } from '@stellar/stellar-sdk';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -1228,6 +1229,44 @@ test('filtering by address also finds one mentioned only inside the decoded valu
 
   const page = await store.queryEvents({ address: addressInValue, limit: MAX_QUERY_LIMIT });
   assert.ok(page.events.some((e) => e.id === event.id));
+  await store.close();
+});
+
+test('a muxed-account address finds its transfer while the base account still matches (#148)', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  const baseAddress = 'GDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB5GSA';
+  const sender = 'GBYRNL77SLMBVGJLFYVWB762E7ZJJVSGEDOU626FPOCGOMPG776JQHHT';
+  const muxedAddress = encodeMuxedAccountToAddress(encodeMuxedAccount(baseAddress, '7'));
+  const data = xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: nativeToScVal('amount', { type: 'symbol' }),
+      val: nativeToScVal(5n, { type: 'i128' }),
+    }),
+    new xdr.ScMapEntry({
+      key: nativeToScVal('to_muxed_id', { type: 'symbol' }),
+      val: nativeToScVal(7n, { type: 'u64' }),
+    }),
+  ]);
+  const symbol = (value) => nativeToScVal(value, { type: 'symbol' }).toXDR('base64');
+  const address = (value) => new Address(value).toScVal().toXDR('base64');
+  const string = (value) => nativeToScVal(value, { type: 'string' }).toXDR('base64');
+  const event = {
+    ...fixture.events[0],
+    id: 'muxed-account-transfer-test-event',
+    topic: [symbol('transfer'), address(sender), address(baseAddress), string('native')],
+    value: data.toXDR('base64'),
+  };
+  await store.insertEvents([event]);
+
+  const muxed = await store.queryEvents({ address: muxedAddress });
+  assert.deepEqual(muxed.events.map((result) => result.id), [event.id]);
+  assert.ok((await store.queryEvents({ address: baseAddress })).events.some((result) => result.id === event.id));
+  assert.equal((await store.queryEvents({ address: encodeMuxedAccountToAddress(encodeMuxedAccount(baseAddress, '8')) })).total, 0);
+  assert.equal((await store.summarizeAddress(muxedAddress))[0].eventCount, 1);
+
+  await store.migrateDown(LATEST_SCHEMA_VERSION - 1);
+  await store.migrate();
+  assert.deepEqual((await store.queryEvents({ address: muxedAddress })).events.map((result) => result.id), [event.id]);
   await store.close();
 });
 

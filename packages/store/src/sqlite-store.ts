@@ -7,7 +7,7 @@ import { createReadStream } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import { decodeEvent, topicKey, topicType, extractAddresses } from './decode.js';
+import { decodeEvent, topicKey, topicType, extractAddresses, parseMuxedAddress, transferToMuxedId } from './decode.js';
 import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
@@ -306,11 +306,14 @@ export class SqliteEventStore implements EventStore {
    */
   #insertAddresses(eventId: string, e: LensEvent): void {
     const stmt = this.#prepared().insertAddress;
+    const muxedId = transferToMuxedId(e);
     e.topicsXdr.forEach((topicXdr, i) => {
       const position = `topic${i}`; // topic0..topic3 are indexed; topic4+ still get a position
-      for (const address of extractAddresses(topicXdr)) stmt.run(eventId, address, position);
+      for (const address of extractAddresses(topicXdr)) {
+        stmt.run(eventId, address, position, i === 2 ? muxedId : null);
+      }
     });
-    for (const address of extractAddresses(e.valueXdr)) stmt.run(eventId, address, 'value');
+    for (const address of extractAddresses(e.valueXdr)) stmt.run(eventId, address, 'value', null);
     // Topics at position 4+ go to the event_topics side table (#164).
     const deep = this.#prepared().insertDeepTopic;
     e.topics.forEach((topic, i) => {
@@ -505,6 +508,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async summarizeAddress(address: string): Promise<AddressContractSummary[]> {
+    const muxedAddress = parseMuxedAddress(address);
     const rows = this.#db
       .prepare(
         `SELECT e.contract_id AS contract_id,
@@ -512,11 +516,16 @@ export class SqliteEventStore implements EventStore {
                 MIN(e.ledger) AS first_ledger,
                 MAX(e.ledger) AS last_ledger
          FROM event_addresses a JOIN events e ON e.id = a.event_id
-         WHERE a.address = ?
+         WHERE a.address = ? ${muxedAddress ? 'AND a.muxed_id = ?' : ''}
          GROUP BY e.contract_id
          ORDER BY event_count DESC, e.contract_id ASC`,
       )
-      .all(address) as { contract_id: string; event_count: number; first_ledger: number; last_ledger: number }[];
+      .all(...(muxedAddress ? [muxedAddress.baseAddress, muxedAddress.muxedId] : [address])) as {
+      contract_id: string;
+      event_count: number;
+      first_ledger: number;
+      last_ledger: number;
+    }[];
     return rows.map((r) => ({
       contractId: r.contract_id,
       eventCount: r.event_count,
@@ -1227,9 +1236,12 @@ function buildStatements(db: DatabaseSync): Statements {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     byId: db.prepare('SELECT * FROM events WHERE id = ?'),
-    insertAddress: db.prepare(
-      'INSERT OR IGNORE INTO event_addresses (event_id, address, position) VALUES (?, ?, ?)',
-    ),
+    insertAddress: db.prepare(`
+      INSERT INTO event_addresses (event_id, address, position, muxed_id)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (event_id, address, position) DO UPDATE SET muxed_id = excluded.muxed_id
+      WHERE excluded.muxed_id IS NOT NULL AND event_addresses.muxed_id IS NOT excluded.muxed_id
+    `),
     insertDeepTopic: db.prepare(
       'INSERT OR IGNORE INTO event_topics (event_id, position, topic, type) VALUES (?, ?, ?, ?)',
     ),
@@ -1314,24 +1326,32 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
     values.push(ftsPhraseQuery(query.search));
   }
   if (query.address) {
-    // IN (subquery), not a JOIN or a correlated EXISTS: a JOIN would multiply
-    // the row when an address appears at several positions in one event,
-    // before the pagination LIMIT ever sees it. A correlated EXISTS measured
-    // slower in practice — SQLite drove it from a full scan of events,
-    // checking event_addresses per row, rather than from the address index —
-    // confirmed with EXPLAIN QUERY PLAN before choosing this form over it.
-    // IN (SELECT ...) drives from idx_event_addresses_address instead: find
-    // the matching event_ids first, then look each up by primary key.
-    if (query.addressPosition !== undefined) {
-      // Narrowing the same subquery (#147). idx_event_addresses_address is
-      // (address, event_id) on a WITHOUT ROWID table whose primary key ends in
-      // position, so the index already carries position: the plan stays a
-      // covering-index search on address, with position checked in the index.
-      conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ? AND position = ?)');
-      values.push(query.address, query.addressPosition);
+    const muxedAddress = parseMuxedAddress(query.address);
+    if (muxedAddress) {
+      const position = query.addressPosition !== undefined ? ' AND position = ?' : '';
+      conditions.push(
+        `id IN (SELECT event_id FROM event_addresses WHERE address = ? AND muxed_id = ?${position})`,
+      );
+      values.push(muxedAddress.baseAddress, muxedAddress.muxedId);
+      if (query.addressPosition !== undefined) values.push(query.addressPosition);
     } else {
-      conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ?)');
-      values.push(query.address);
+      // IN (subquery), not a JOIN or a correlated EXISTS: a JOIN would multiply
+      // the row when an address appears at several positions in one event,
+      // before the pagination LIMIT ever sees it. A correlated EXISTS measured
+      // slower in practice — SQLite drove it from a full scan of events,
+      // checking event_addresses per row, rather than from the address index —
+      // confirmed with EXPLAIN QUERY PLAN before choosing this form over it.
+      // IN (SELECT ...) drives from idx_event_addresses_address instead: find
+      // the matching event_ids first, then look each up by primary key.
+      if (query.addressPosition !== undefined) {
+        // Narrowing the same subquery (#147). The address index includes
+        // position through the WITHOUT ROWID primary key.
+        conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ? AND position = ?)');
+        values.push(query.address, query.addressPosition);
+      } else {
+        conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ?)');
+        values.push(query.address);
+      }
     }
   }
   // Compared against undefined, not truthiness: index 0 is the first

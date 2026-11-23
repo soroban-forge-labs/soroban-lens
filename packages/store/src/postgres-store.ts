@@ -2,7 +2,14 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { decodeContractCursor, encodeContractCursor } from './contract-cursor.js';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
-import { decodeEvent, topicKey, topicType, extractAddresses } from './decode.js';
+import {
+  decodeEvent,
+  topicKey,
+  topicType,
+  extractAddresses,
+  parseMuxedAddress,
+  transferToMuxedId,
+} from './decode.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION } from './schema.js';
 import { POSTGRES_MIGRATIONS } from './postgres-schema.js';
@@ -306,15 +313,21 @@ export class PostgresEventStore implements EventStore {
 
   /** Mirrors `SqliteEventStore`: topics beyond the indexed four still get a `topicN` position. */
   async #insertAddresses(db: PgQueryable, eventId: string, e: LensEvent): Promise<void> {
-    const insert = (address: string, position: string): Promise<PgQueryResult> =>
+    const insert = (address: string, position: string, muxedId: string | null): Promise<PgQueryResult> =>
       db.query(
-        'INSERT INTO event_addresses (event_id, address, position) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [eventId, address, position],
+        `INSERT INTO event_addresses (event_id, address, position, muxed_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (event_id, address, position) DO UPDATE SET muxed_id = EXCLUDED.muxed_id
+         WHERE EXCLUDED.muxed_id IS NOT NULL AND event_addresses.muxed_id IS DISTINCT FROM EXCLUDED.muxed_id`,
+        [eventId, address, position, muxedId],
       );
+    const muxedId = transferToMuxedId(e);
     for (const [i, topicXdr] of e.topicsXdr.entries()) {
-      for (const address of extractAddresses(topicXdr)) await insert(address, `topic${i}`);
+      for (const address of extractAddresses(topicXdr)) {
+        await insert(address, `topic${i}`, i === 2 ? muxedId : null);
+      }
     }
-    for (const address of extractAddresses(e.valueXdr)) await insert(address, 'value');
+    for (const address of extractAddresses(e.valueXdr)) await insert(address, 'value', null);
     for (const [i, topic] of e.topics.entries()) {
       const key = i >= 4 ? topicKey(topic) : null;
       if (key === null) continue;
@@ -509,16 +522,17 @@ export class PostgresEventStore implements EventStore {
   }
 
   async summarizeAddress(address: string): Promise<AddressContractSummary[]> {
+    const muxedAddress = parseMuxedAddress(address);
     const { rows } = await this.#pool.query(
       `SELECT e.contract_id,
               COUNT(DISTINCT e.id)::int AS event_count,
               MIN(e.ledger) AS first_ledger,
               MAX(e.ledger) AS last_ledger
        FROM event_addresses a JOIN events e ON e.id = a.event_id
-       WHERE a.address = $1
+       WHERE a.address = $1 ${muxedAddress ? 'AND a.muxed_id = $2' : ''}
        GROUP BY e.contract_id
        ORDER BY event_count DESC, e.contract_id COLLATE "C" ASC`,
-      [address],
+      muxedAddress ? [muxedAddress.baseAddress, muxedAddress.muxedId] : [address],
     );
     return rows.map((r) => ({
       contractId: String(r['contract_id']),
@@ -1081,14 +1095,24 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
     conditions.push(`(topics_json::text ILIKE ${p} OR value_json::text ILIKE ${p})`);
   }
   if (query.address) {
-    // IN (subquery), as in the SQLite store: a JOIN would multiply an event that
-    // mentions the address at several positions before LIMIT sees it.
-    // addressPosition narrows the same subquery (#147).
-    const position =
-      query.addressPosition !== undefined ? ` AND position = ${param(query.addressPosition)}` : '';
-    conditions.push(
-      `id IN (SELECT event_id FROM event_addresses WHERE address = ${param(query.address)}${position})`,
-    );
+    const muxedAddress = parseMuxedAddress(query.address);
+    if (muxedAddress) {
+      const baseAddress = param(muxedAddress.baseAddress);
+      const muxedId = param(muxedAddress.muxedId);
+      const position = query.addressPosition !== undefined ? ` AND position = ${param(query.addressPosition)}` : '';
+      conditions.push(
+        `id IN (SELECT event_id FROM event_addresses WHERE address = ${baseAddress} AND muxed_id = ${muxedId}${position})`,
+      );
+    } else {
+      // IN (subquery), as in the SQLite store: a JOIN would multiply an event that
+      // mentions the address at several positions before LIMIT sees it.
+      // addressPosition narrows the same subquery (#147).
+      const position =
+        query.addressPosition !== undefined ? ` AND position = ${param(query.addressPosition)}` : '';
+      conditions.push(
+        `id IN (SELECT event_id FROM event_addresses WHERE address = ${param(query.address)}${position})`,
+      );
+    }
   }
   // Compared against undefined, not truthiness: index 0 is a real, common value.
   if (query.transactionIndex !== undefined) conditions.push(`transaction_index = ${param(query.transactionIndex)}`);
