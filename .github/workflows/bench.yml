@@ -50,23 +50,32 @@ jobs:
 
       - name: Install and build the base commit
         if: github.event_name == 'pull_request'
+        id: base-build
         working-directory: base
         run: |
           npm ci
-          npm run build
+          if npm run build; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            # A base that does not compile yields no numbers, so there is no
+            # baseline to compare against. Skipping — rather than failing — is
+            # what lets the PR that repairs a broken main ever go green.
+            echo "::warning title=Benchmarks::base commit ${{ github.event.pull_request.base.sha }} does not build; reporting head results without a comparison"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Benchmark the base commit
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.base-build.outputs.ok == 'true'
         # This commit's harness against the base commit's built packages, so a
         # PR that adds or changes the harness itself is still compared fairly.
         run: node bench/run.js --root base --out bench/results/base.json
 
       - name: Compare against the base (fails on a significant regression)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.base-build.outputs.ok == 'true'
         run: node bench/compare.js bench/results/base.json bench/results/head.json --md bench/results/report.md
 
       - name: Report results
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || steps.base-build.outputs.ok == 'false'
         run: node bench/compare.js bench/results/head.json --md bench/results/report.md
 
       - name: Upload results

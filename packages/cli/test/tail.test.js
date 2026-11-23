@@ -148,7 +148,12 @@ test('colour follows NO_COLOR, FORCE_COLOR and the TTY', () => {
 
 /** Spawn `lens tail`, resolving once `lines` lines of stdout have arrived (or it exits). */
 function tail(args, lines) {
-  const child = spawn('node', [BIN, 'tail', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn('node', [BIN, 'tail', ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    // --json asserts stderr is empty; node's own ExperimentalWarning for
+    // node:sqlite is runtime noise, not the program's output.
+    env: { ...process.env, NODE_OPTIONS: '--disable-warning=ExperimentalWarning' },
+  });
   let stdout = '';
   let stderr = '';
   const done = new Promise((resolve) => {

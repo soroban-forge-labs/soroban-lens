@@ -132,7 +132,10 @@ test('doctor warns, but does not fail, when no contract is configured', async ()
   assert.match(check.detail, /every contract/);
 });
 
-test('doctor fails on a read-only data directory', async () => {
+test('doctor fails on a read-only data directory', async (t) => {
+  // chmod 0500 does not stop an owner writing on Windows (no POSIX mode bits),
+  // so the writability probe can only fail on POSIX filesystems.
+  if (process.platform === 'win32') return t.skip('POSIX permission bits do not apply on Windows');
   const dir = await mkdtemp(join(tmpdir(), 'lens-doctor-ro-'));
   const readOnly = join(dir, 'locked');
   const config = resolveConfig({ dataDir: readOnly, db: join(dir, 'lens.db'), rpcUrl: DEAD_RPC }, {});

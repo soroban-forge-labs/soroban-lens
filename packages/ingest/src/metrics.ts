@@ -3,7 +3,7 @@ const BUCKETS = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30];
 /** Distinct `contract` label values before further contracts fold into `other`. */
 export const MAX_CONTRACT_LABELS = 50;
 const OTHER_CONTRACT = 'other';
-type RpcMethod = 'getHealth' | 'getLatestLedger' | 'getEvents';
+type RpcMethod = 'getHealth' | 'getLatestLedger' | 'getEvents' | 'getNetwork';
 type Histogram = { count: number; sum: number; buckets: number[] };
 
 /** Process-local metrics; event counts include at-least-once replay. */

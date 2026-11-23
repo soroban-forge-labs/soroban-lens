@@ -63,7 +63,7 @@ export class LensRpcClient {
     this.rpcUrl = options.rpcUrl;
     this.#server = new rpc.Server(options.rpcUrl, {
       allowHttp: options.allowHttp ?? options.rpcUrl.startsWith('http://'),
-      timeout: options.timeoutSeconds ?? 30,
+      timeout: (options.timeoutSeconds ?? 30) * 1000,
       ...(options.headers ? { headers: options.headers } : {}),
     });
     this.#retry = options.retry ?? {};

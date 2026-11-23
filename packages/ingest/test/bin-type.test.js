@@ -11,7 +11,8 @@ const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
 test('--type diagnostic is rejected before any network call (#144)', async () => {
   try {
     await run('node', [BIN, '-c', SAC, '--type', 'diagnostic', '--no-resume'], {
-      timeout: 10_000,
+      // Generous: spawning node under a parallel test run can take seconds.
+      timeout: 30_000,
     });
     assert.fail('expected the bin to reject --type diagnostic');
   } catch (error) {

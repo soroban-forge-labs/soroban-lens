@@ -34,7 +34,7 @@ async function cli(args, env = {}) {
 test('--type rejects a value the RPC does not serve', async () => {
   const { code, stderr } = await cli(['-c', SAC, '--type', 'contracts']);
   assert.equal(code, 2);
-  assert.match(stderr, /--type must be contract, system or diagnostic/);
+  assert.match(stderr, /--type must be contract or system/);
 });
 
 test('--type is documented in the help text', async () => {
@@ -163,6 +163,14 @@ test('SIGTERM finishes the in-flight batch and exits cleanly', {
     let body = '';
     for await (const chunk of request) body += chunk;
     const { id, method } = JSON.parse(body);
+    if (method === 'getNetwork') {
+      // The passphrase check (#139) runs before the first poll.
+      response.end(JSON.stringify({
+        jsonrpc: '2.0', id,
+        result: { passphrase: 'Test SDF Network ; September 2015', protocolVersion: 23 },
+      }));
+      return;
+    }
     if (method === 'getHealth') {
       response.end(JSON.stringify({
         jsonrpc: '2.0', id,

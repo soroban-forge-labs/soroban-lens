@@ -1,5 +1,5 @@
 import {
-  EventPoller, FailoverRpcClient, StellarArchiveSource, buildFilters, defaultCursorKey, describeClockSkew, IngestMetrics,
+  EventPoller, FailoverRpcClient, StellarArchiveSource, buildFilters, describeClockSkew, IngestMetrics,
   startMetricsServer, closeMetricsServer, parseMetricsPort,
 } from '@soroban-lens/ingest';
 import { existsSync, statSync } from 'node:fs';
@@ -180,7 +180,10 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
     },
   });
 
-  const cursorKey = defaultCursorKey(config.network.rpcUrl);
+  // No cursorKey override: the poller keys each contract's saved position to
+  // that contract plus the shared filters, so adding a contract does not
+  // disturb anyone else's resume point (#142) and a single-contract run keeps
+  // the key earlier versions produced (#127).
   const poller = new EventPoller(
     {
       contractIds: config.contractIds,
@@ -199,7 +202,6 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       metrics,
       cursors: new StoreBackedCursors(store),
       reorgStore: new StoreBackedReorgs(store, config.contractIds),
-      cursorKey,
       ...(options.signal ? { signal: options.signal } : {}),
       log,
     },
@@ -229,7 +231,7 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
     }
     log(
       `indexing ${config.network.name} (${config.network.rpcUrl}) tinto ${config.dbPath}; ` +
-        `${config.contractIds.length || 'all'} contract(s), stream "${cursorKey}"`,
+        `${config.contractIds.length || 'all'} contract(s), stream "${poller.cursorKey}"`,
     );
 
     if (config.archiveUrl && config.startLedger !== undefined) {
