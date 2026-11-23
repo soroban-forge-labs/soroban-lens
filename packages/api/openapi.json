@@ -220,6 +220,9 @@
             "$ref": "#/components/parameters/Topic"
           },
           {
+            "$ref": "#/components/parameters/TopicType"
+          },
+          {
             "$ref": "#/components/parameters/FromLedger"
           },
           {
@@ -236,6 +239,9 @@
           },
           {
             "$ref": "#/components/parameters/Address"
+          },
+          {
+            "$ref": "#/components/parameters/AddressPosition"
           },
           {
             "$ref": "#/components/parameters/Search"
@@ -582,6 +588,9 @@
             "$ref": "#/components/parameters/Topic"
           },
           {
+            "$ref": "#/components/parameters/TopicType"
+          },
+          {
             "$ref": "#/components/parameters/FromLedger"
           },
           {
@@ -598,6 +607,9 @@
           },
           {
             "$ref": "#/components/parameters/Address"
+          },
+          {
+            "$ref": "#/components/parameters/AddressPosition"
           },
           {
             "$ref": "#/components/parameters/Search"
@@ -748,6 +760,9 @@
             "$ref": "#/components/parameters/Topic"
           },
           {
+            "$ref": "#/components/parameters/TopicType"
+          },
+          {
             "$ref": "#/components/parameters/FromLedger"
           },
           {
@@ -764,6 +779,9 @@
           },
           {
             "$ref": "#/components/parameters/Address"
+          },
+          {
+            "$ref": "#/components/parameters/AddressPosition"
           },
           {
             "$ref": "#/components/parameters/Search"
@@ -1426,6 +1444,28 @@
           }
         }
       },
+      "TopicType": {
+        "name": "topicType",
+        "in": "query",
+        "description": "ScVal type per topic position, positional and repeatable like `topic`. `?topic=transfer&topicType=symbol` matches the symbol `transfer` but not the string `\"transfer\"`; `*` leaves a position untyped. A type with no `topic` value at the same position matches any value of that type. Without it, topic filters match on the rendered value alone, as before.",
+        "required": false,
+        "explode": true,
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^([a-z][A-Za-z0-9]{0,31}|\\*)?$"
+          }
+        },
+        "examples": {
+          "symbolTransfer": {
+            "summary": "The symbol transfer, not the string",
+            "value": [
+              "symbol"
+            ]
+          }
+        }
+      },
       "FromLedger": {
         "name": "fromLedger",
         "in": "query",
@@ -1522,6 +1562,17 @@
           "type": "string"
         },
         "example": "GBIBH5UV4Q5L7VVJIHWYBTCSUDHJQXQC2V6Y5LOW4D26XNU5NREMIKE4"
+      },
+      "AddressPosition": {
+        "name": "addressPosition",
+        "in": "query",
+        "description": "Narrow `address` to where it appears: `topic0`\u2026`topicN`, or `value` for anywhere in the event data. For a SAC transfer, `topic1` is the sender and `topic2` the recipient. Requires `address`.",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "pattern": "^(topic(0|[1-9][0-9]{0,2})|value)$"
+        },
+        "example": "topic1"
       },
       "Search": {
         "name": "search",

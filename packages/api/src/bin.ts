@@ -3,6 +3,7 @@
 import { parseArgs } from 'node:util';
 import { SqliteEventStore, createLogger } from '@soroban-lens/store';
 import { createApiServer, shutdownApiServer } from './server.js';
+import { ApiMetrics, parseMetricsPort, startApiMetricsServer } from './metrics.js';
 
 const USAGE = `
 soroban-lens-api — HTTP query API over indexed Soroban events
@@ -18,6 +19,12 @@ Options:
       --shutdown-timeout <ms>
                       How long to wait for in-flight requests on SIGINT/SIGTERM
                       before dropping them (default: 10000, env LENS_SHUTDOWN_TIMEOUT_MS)
+      --metrics-port <n>
+                      Serve Prometheus request metrics at /metrics on this
+                      separate port (default: off, env LENS_API_METRICS_PORT)
+      --metrics-host <addr>
+                      Bind address for the metrics port (default: 127.0.0.1,
+                      env LENS_API_METRICS_HOST)
   -h, --help          Show this help.
 
 Access control (all off unless set):
@@ -45,6 +52,8 @@ const { values } = parseArgs({
     host: { type: 'string' },
     cors: { type: 'string' },
     'shutdown-timeout': { type: 'string' },
+    'metrics-port': { type: 'string' },
+    'metrics-host': { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
 });
@@ -64,6 +73,18 @@ if (!/^\d+$/.test(rawPort) || !Number.isInteger(port) || port < 1 || port > 6553
   process.exit(2);
 }
 const host = values.host ?? process.env.LENS_API_HOST ?? '0.0.0.0';
+
+let metricsPort: number | undefined;
+try {
+  metricsPort = parseMetricsPort(values['metrics-port'] ?? process.env.LENS_API_METRICS_PORT);
+} catch (error) {
+  process.stderr.write(`soroban-lens-api: ${error instanceof Error ? error.message : String(error)}.
+`);
+  process.exit(2);
+}
+const metricsHost = values['metrics-host'] ?? process.env.LENS_API_METRICS_HOST ?? '127.0.0.1';
+// Only collected when it will be served: off by default, like the indexer's.
+const metrics = metricsPort !== undefined ? new ApiMetrics() : undefined;
 
 const shutdownTimeoutMs = Number(
   values['shutdown-timeout'] ?? process.env.LENS_SHUTDOWN_TIMEOUT_MS ?? 10_000,
@@ -114,6 +135,7 @@ const server = createApiServer({
     ? { corsOrigin: values.cors ?? (process.env.LENS_CORS_ORIGIN as string) }
     : {}),
   log,
+  ...(metrics ? { metrics } : {}),
   graphql: {
     enabled: process.env.LENS_GRAPHQL === '1',
     ...(graphqlMaxDepth !== undefined ? { maxDepth: graphqlMaxDepth } : {}),
@@ -131,6 +153,17 @@ server.listen(port, host, () => {
   log.info('listening', `openapi: http://${host}:${port}/openapi.json`);
 });
 
+const metricsServer =
+  metrics && metricsPort !== undefined
+    ? await startApiMetricsServer(metrics, metricsPort, metricsHost).catch((error: unknown) => {
+        log.error('config', `metrics port ${metricsHost}:${metricsPort} could not be bound: ${String(error)}`);
+        process.exit(1);
+      })
+    : undefined;
+if (metricsServer) {
+  log.info('listening', `metrics: http://${metricsHost}:${metricsPort}/metrics`, { metricsHost, metricsPort });
+}
+
 let shuttingDown = false;
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
@@ -142,6 +175,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     void shutdownApiServer(server, { timeoutMs: shutdownTimeoutMs })
       .then(({ forced }) => {
         if (forced) log.warn('shutdown', 'timed out waiting for in-flight requests; dropped them');
+        metricsServer?.close();
         return store.close();
       })
       .finally(() => process.exit(0));
