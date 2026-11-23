@@ -1705,3 +1705,66 @@ test('rebuildSearchIndex without FTS5 throws a clear error', async () => {
   await assert.rejects(() => store.rebuildSearchIndex(), /FTS5/);
   await store.close();
 });
+
+test('addressPosition still drives from idx_event_addresses_address (#147)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+  await store.close();
+
+  // The exact shape queryEvents({ address, addressPosition }) builds.
+  const db = new DatabaseSync(path);
+  const explained = db
+    .prepare(
+      `EXPLAIN QUERY PLAN SELECT * FROM events
+       WHERE id IN (SELECT event_id FROM event_addresses WHERE address = ? AND position = ?)
+       ORDER BY id DESC LIMIT ?`,
+    )
+    .all('GDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB5GSA', 'topic1', 50)
+    .map((r) => r.detail)
+    .join(' | ');
+  db.close();
+
+  // The index is (address, event_id) on a WITHOUT ROWID table whose primary
+  // key ends in position, so it already carries position: no new index needed.
+  assert.match(explained, /COVERING INDEX idx_event_addresses_address/, `planner chose: ${explained}`);
+  assert.ok(!/SCAN events/.test(explained), `still scanning events: ${explained}`);
+
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('migration 9 backfills topic types on rows written before it (#146)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const path = join(dir, 'lens.db');
+  const store = new SqliteEventStore({ path });
+  await store.insertEvents(fixture.events);
+  await store.close();
+
+  // Roll the database back to how a v8 store left it: no type columns at all.
+  const migration = MIGRATIONS.find((m) => m.version === 9);
+  const db = new DatabaseSync(path);
+  db.exec(migration.down);
+  db.prepare('DELETE FROM schema_migrations WHERE version = 9').run();
+  db.close();
+
+  // Reopening applies migration 9, which must fill the columns from topics_json.
+  const reopened = new SqliteEventStore({ path });
+  const typed = await reopened.queryEvents({ topics: ['transfer'], topicTypes: ['symbol'], limit: 1000 });
+  const untyped = await reopened.queryEvents({ topics: ['transfer'], limit: 1000 });
+  assert.ok(typed.events.length > 0, 'backfilled rows match a typed filter');
+  assert.equal(typed.events.length, untyped.events.length);
+  assert.equal((await reopened.queryEvents({ topics: ['transfer'], topicTypes: ['string'] })).events.length, 0);
+  await reopened.close();
+
+  const check = new DatabaseSync(path);
+  const missing = check
+    .prepare('SELECT COUNT(*) AS n FROM events WHERE topic0 IS NOT NULL AND topic0_type IS NULL')
+    .get();
+  const deepMissing = check.prepare('SELECT COUNT(*) AS n FROM event_topics WHERE type IS NULL').get();
+  check.close();
+  assert.equal(missing.n, 0);
+  assert.equal(deepMissing.n, 0);
+
+  await rm(dir, { recursive: true, force: true });
+});

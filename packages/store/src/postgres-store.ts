@@ -2,7 +2,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { decodeContractCursor, encodeContractCursor } from './contract-cursor.js';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
-import { decodeEvent, topicKey, extractAddresses } from './decode.js';
+import { decodeEvent, topicKey, topicType, extractAddresses } from './decode.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION } from './schema.js';
 import { POSTGRES_MIGRATIONS } from './postgres-schema.js';
@@ -328,8 +328,8 @@ export class PostgresEventStore implements EventStore {
       const key = i >= 4 ? topicKey(topic) : null;
       if (key === null) continue;
       await db.query(
-        'INSERT INTO event_topics (event_id, position, topic) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [eventId, i, key],
+        'INSERT INTO event_topics (event_id, position, topic, type) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+        [eventId, i, key, topicType(topic)],
       );
     }
   }
@@ -834,8 +834,9 @@ export class PostgresEventStore implements EventStore {
       `UPDATE events SET
          topics_json = $1::jsonb, topics_xdr_json = $2, topic_count = $3,
          topic0 = $4, topic1 = $5, topic2 = $6, topic3 = $7,
-         value_type = $8, value_json = $9::jsonb, value_xdr = $10, decode_error = $11
-       WHERE id = $12`,
+         topic0_type = $8, topic1_type = $9, topic2_type = $10, topic3_type = $11,
+         value_type = $12, value_json = $13::jsonb, value_xdr = $14, decode_error = $15
+       WHERE id = $16`,
       [
         JSON.stringify(event.topics),
         JSON.stringify(event.topicsXdr),
@@ -844,6 +845,10 @@ export class PostgresEventStore implements EventStore {
         topicKey(event.topics[1]),
         topicKey(event.topics[2]),
         topicKey(event.topics[3]),
+        topicType(event.topics[0]),
+        topicType(event.topics[1]),
+        topicType(event.topics[2]),
+        topicType(event.topics[3]),
         event.value.type,
         JSON.stringify(event.value),
         event.valueXdr,
@@ -983,11 +988,13 @@ const INSERT_EVENT = `
     id, contract_id, type, ledger, ledger_closed_at, closed_at_unix,
     tx_hash, transaction_index, operation_index, in_successful_call,
     topics_json, topics_xdr_json, topic_count, topic0, topic1, topic2, topic3,
+    topic0_type, topic1_type, topic2_type, topic3_type,
     value_type, value_json, value_xdr, decode_error, indexed_at
   ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
     $11::jsonb, $12, $13, $14, $15, $16, $17,
-    $18, $19::jsonb, $20, $21, $22
+    $18, $19, $20, $21,
+    $22, $23::jsonb, $24, $25, $26
   )
   ON CONFLICT (id) DO NOTHING
 `;
@@ -1012,6 +1019,10 @@ function insertParams(e: LensEvent): unknown[] {
     topicKey(e.topics[1]),
     topicKey(e.topics[2]),
     topicKey(e.topics[3]),
+    topicType(e.topics[0]),
+    topicType(e.topics[1]),
+    topicType(e.topics[2]),
+    topicType(e.topics[3]),
     e.value.type,
     JSON.stringify(e.value),
     e.valueXdr,
@@ -1115,7 +1126,12 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
   if (query.address) {
     // IN (subquery), as in the SQLite store: a JOIN would multiply an event that
     // mentions the address at several positions before LIMIT sees it.
-    conditions.push(`id IN (SELECT event_id FROM event_addresses WHERE address = ${param(query.address)})`);
+    // addressPosition narrows the same subquery (#147).
+    const position =
+      query.addressPosition !== undefined ? ` AND position = ${param(query.addressPosition)}` : '';
+    conditions.push(
+      `id IN (SELECT event_id FROM event_addresses WHERE address = ${param(query.address)}${position})`,
+    );
   }
   // Compared against undefined, not truthiness: index 0 is a real, common value.
   if (query.transactionIndex !== undefined) conditions.push(`transaction_index = ${param(query.transactionIndex)}`);
@@ -1127,17 +1143,24 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
   if (query.indexedAfter !== undefined) conditions.push(`indexed_at > ${param(query.indexedAfter)}`);
   if (query.successfulOnly === true) conditions.push('in_successful_call = TRUE');
 
-  query.topics?.forEach((topic, i) => {
-    if (topic === null || topic === undefined) return;
-    const column = TOPIC_COLUMNS[i];
+  // `topicTypes` runs parallel to `topics` (#146); see the SQLite store.
+  const columns = ['topic0', 'topic1', 'topic2', 'topic3'] as const;
+  const depth = Math.max(query.topics?.length ?? 0, query.topicTypes?.length ?? 0);
+  for (let i = 0; i < depth; i++) {
+    const topic = query.topics?.[i] ?? null;
+    const type = query.topicTypes?.[i] ?? null;
+    if (topic === null && type === null) continue;
+    const column = columns[i];
     if (!column) {
-      conditions.push(
-        `id IN (SELECT event_id FROM event_topics WHERE position = ${param(i)} AND topic = ${param(topic)})`,
-      );
-      return;
+      const parts = [`position = ${param(i)}`];
+      if (topic !== null) parts.push(`topic = ${param(topic)}`);
+      if (type !== null) parts.push(`type = ${param(type)}`);
+      conditions.push(`id IN (SELECT event_id FROM event_topics WHERE ${parts.join(' AND ')})`);
+      continue;
     }
-    conditions.push(`${column} = ${param(topic)}`);
-  });
+    if (topic !== null) conditions.push(`${column} = ${param(topic)}`);
+    if (type !== null) conditions.push(`${column}_type = ${param(type)}`);
+  }
 
   return { clause: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '', values };
 }

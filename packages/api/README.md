@@ -114,6 +114,7 @@ The schema covers events, contracts and topics: `events(...)`, `event(id)`,
 `contracts(limit)`, `contract(id)` and `topics(contractId, limit)`. `events`
 takes the same filters as the REST routes (`topics`, `fromLedger`, `toLedger`,
 `fromTime`, `toTime`, `txHash`, `address`, `search`, `successfulOnly`, `limit`,
+`topicTypes`, `addressPosition`,
 `cursor`, `order`) and validates them with the same code. `Event.contract`
 joins an event to its contract summary; `Contract.events` and `Contract.topics`
 go the other way. Queries only: mutations, subscriptions and introspection are
@@ -254,6 +255,18 @@ At most four, because only four positions are indexed — but events can carry
 more than four topics, so a prefix filter may need client-side narrowing to
 become an exact match.
 
+**Topic filters can be typed.** A topic filter compares the rendered value, so
+the symbol `transfer` and the string `"transfer"` both match `?topic=transfer`,
+as do the u32 `5` and the string `"5"` for `?topic=5`. `?topicType=` runs
+parallel to `?topic=` and pins a position's ScVal type:
+`?topic=transfer&topicType=symbol` excludes the string. `*` leaves a position
+untyped, and a request without `topicType` behaves exactly as before.
+
+**Address filters can be positional.** `?address=G…` matches the address
+anywhere in an event. Add `?addressPosition=topic1` (or `topic2`, …, or `value`)
+to ask where: for a SAC transfer, `topic1` is "transfers from" and `topic2` is
+"transfers to".
+
 **Bad parameters are rejected, not clamped.** `?limit=5000` is a `400` naming
 the offending parameter, not a silently truncated page. Errors are always
 `{"error":{"code","message","parameter?"}}`.
@@ -287,6 +300,17 @@ goal, and the key check, token bucket and event stream are each small enough
 | | `LENS_NDJSON_MAX_ROWS` | `1000000`. Most events one `application/x-ndjson` response carries. |
 | | `LENS_TRUST_PROXY` | off. `1` to key the limiter on `X-Forwarded-For`; only behind a proxy that sets it. |
 | `--shutdown-timeout` | `LENS_SHUTDOWN_TIMEOUT_MS` | `10000` |
+| `--metrics-port` | `LENS_API_METRICS_PORT` | off. Serve Prometheus request metrics at `/metrics` on this separate port. |
+| `--metrics-host` | `LENS_API_METRICS_HOST` | `127.0.0.1` |
+
+### Request metrics
+
+With a metrics port set, `/metrics` on that port (never the API port) serves
+`lens_api_requests_total` and the `lens_api_request_duration_seconds`
+histogram, in the same plain-text Prometheus format as the indexer's. Labels
+are the matched route's pattern (`/contracts/{id}/events`, never the raw path),
+the method and the status class (`2xx`…`5xx`). A path no route matches counts
+under `route="unmatched"`, so unknown URLs cannot grow the series set.
 
 On `SIGINT`/`SIGTERM` the API stops accepting connections, lets in-flight
 requests finish (telling keep-alive clients to reconnect via `Connection: close`),

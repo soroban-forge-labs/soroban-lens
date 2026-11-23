@@ -7,7 +7,7 @@ import { createReadStream } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import { decodeEvent, topicKey, extractAddresses } from './decode.js';
+import { decodeEvent, topicKey, topicType, extractAddresses } from './decode.js';
 import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
@@ -346,7 +346,7 @@ export class SqliteEventStore implements EventStore {
     const deep = this.#prepared().insertDeepTopic;
     e.topics.forEach((topic, i) => {
       const key = i >= INDEXED_TOPIC_DEPTH ? topicKey(topic) : null;
-      if (key !== null) deep.run(eventId, i, key);
+      if (key !== null) deep.run(eventId, i, key, topicType(topic));
     });
   }
 
@@ -1050,6 +1050,7 @@ export class SqliteEventStore implements EventStore {
       UPDATE events SET
         topics_json = ?, topics_xdr_json = ?, topic_count = ?,
         topic0 = ?, topic1 = ?, topic2 = ?, topic3 = ?,
+        topic0_type = ?, topic1_type = ?, topic2_type = ?, topic3_type = ?,
         value_type = ?, value_json = ?, value_xdr = ?, decode_error = ?
       WHERE id = ?
     `);
@@ -1084,6 +1085,10 @@ export class SqliteEventStore implements EventStore {
       topicKey(redecoded.topics[1]),
       topicKey(redecoded.topics[2]),
       topicKey(redecoded.topics[3]),
+      topicType(redecoded.topics[0]),
+      topicType(redecoded.topics[1]),
+      topicType(redecoded.topics[2]),
+      topicType(redecoded.topics[3]),
       redecoded.value.type,
       JSON.stringify(redecoded.value),
       encodeXdrColumn(redecoded.valueXdr),
@@ -1273,15 +1278,16 @@ function buildStatements(db: DatabaseSync): Statements {
         id, contract_id, type, ledger, ledger_closed_at, closed_at_unix,
         tx_hash, transaction_index, operation_index, in_successful_call,
         topics_json, topics_xdr_json, topic_count, topic0, topic1, topic2, topic3,
+        topic0_type, topic1_type, topic2_type, topic3_type,
         value_type, value_json, value_xdr, decode_error, indexed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     byId: db.prepare('SELECT * FROM events WHERE id = ?'),
     insertAddress: db.prepare(
       'INSERT OR IGNORE INTO event_addresses (event_id, address, position) VALUES (?, ?, ?)',
     ),
     insertDeepTopic: db.prepare(
-      'INSERT OR IGNORE INTO event_topics (event_id, position, topic) VALUES (?, ?, ?)',
+      'INSERT OR IGNORE INTO event_topics (event_id, position, topic, type) VALUES (?, ?, ?, ?)',
     ),
   };
 }
@@ -1308,6 +1314,10 @@ function insertParams(e: LensEvent): SqlParam[] {
     topicKey(e.topics[1]),
     topicKey(e.topics[2]),
     topicKey(e.topics[3]),
+    topicType(e.topics[0]),
+    topicType(e.topics[1]),
+    topicType(e.topics[2]),
+    topicType(e.topics[3]),
     e.value.type,
     JSON.stringify(e.value),
     encodeXdrColumn(e.valueXdr),
@@ -1392,8 +1402,17 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
     // confirmed with EXPLAIN QUERY PLAN before choosing this form over it.
     // IN (SELECT ...) drives from idx_event_addresses_address instead: find
     // the matching event_ids first, then look each up by primary key.
-    conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ?)');
-    values.push(query.address);
+    if (query.addressPosition !== undefined) {
+      // Narrowing the same subquery (#147). idx_event_addresses_address is
+      // (address, event_id) on a WITHOUT ROWID table whose primary key ends in
+      // position, so the index already carries position: the plan stays a
+      // covering-index search on address, with position checked in the index.
+      conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ? AND position = ?)');
+      values.push(query.address, query.addressPosition);
+    } else {
+      conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ?)');
+      values.push(query.address);
+    }
   }
   // Compared against undefined, not truthiness: index 0 is the first
   // transaction in a ledger and the first operation in a transaction, so it is
@@ -1435,18 +1454,42 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
   // Topic prefix match. `null` is a wildcard for that position; only the first
   // four positions are indexed, and positions beyond that are rejected by the
   // caller rather than silently ignored.
-  query.topics?.forEach((topic, i) => {
-    if (topic === null || topic === undefined) return;
-    const column = TOPIC_COLUMNS[i];
+  //
+  // `topicTypes` runs parallel to `topics` (#146): a non-null entry also
+  // requires that position's ScVal type, so `symbol` transfer excludes the
+  // string "transfer". An untyped position compares the value alone, exactly
+  // as before.
+  const columns = ['topic0', 'topic1', 'topic2', 'topic3'] as const;
+  const depth = Math.max(query.topics?.length ?? 0, query.topicTypes?.length ?? 0);
+  for (let i = 0; i < depth; i++) {
+    const topic = query.topics?.[i] ?? null;
+    const type = query.topicTypes?.[i] ?? null;
+    if (topic === null && type === null) continue;
+    const column = columns[i];
     if (!column) {
       // Position 4+: the event_topics side table (#164).
-      conditions.push('id IN (SELECT event_id FROM event_topics WHERE position = ? AND topic = ?)');
-      values.push(i, topic);
-      return;
+      const parts = ['position = ?'];
+      values.push(i);
+      if (topic !== null) {
+        parts.push('topic = ?');
+        values.push(topic);
+      }
+      if (type !== null) {
+        parts.push('type = ?');
+        values.push(type);
+      }
+      conditions.push(`id IN (SELECT event_id FROM event_topics WHERE ${parts.join(' AND ')})`);
+      continue;
     }
-    conditions.push(`${column} = ?`);
-    values.push(topic);
-  });
+    if (topic !== null) {
+      conditions.push(`${column} = ?`);
+      values.push(topic);
+    }
+    if (type !== null) {
+      conditions.push(`${column}_type = ?`);
+      values.push(type);
+    }
+  }
 
   return {
     clause: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '',

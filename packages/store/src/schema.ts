@@ -261,6 +261,41 @@ export const MIGRATIONS: Migration[] = [
     `,
     down: `DROP TABLE IF EXISTS event_topics;`,
   },
+  {
+    version: 9,
+    name: 'typed-topics',
+    up: `
+      -- topic0..3 and event_topics.topic hold only the rendered value, so the
+      -- symbol transfer and the string "transfer" were the same key, as were
+      -- the u32 5, the i128 5 and the string "5" (#146). The ScVal type goes
+      -- in a parallel column so a filter can ask for one; untyped filters
+      -- keep comparing the value column alone and see no change.
+      ALTER TABLE events ADD COLUMN topic0_type TEXT;
+      ALTER TABLE events ADD COLUMN topic1_type TEXT;
+      ALTER TABLE events ADD COLUMN topic2_type TEXT;
+      ALTER TABLE events ADD COLUMN topic3_type TEXT;
+      ALTER TABLE event_topics ADD COLUMN type TEXT;
+
+      -- Backfill from the decoded topics already stored. Set only where the
+      -- value column is, matching topicType().
+      UPDATE events SET
+        topic0_type = CASE WHEN topic0 IS NULL THEN NULL ELSE json_extract(topics_json, '$[0].type') END,
+        topic1_type = CASE WHEN topic1 IS NULL THEN NULL ELSE json_extract(topics_json, '$[1].type') END,
+        topic2_type = CASE WHEN topic2 IS NULL THEN NULL ELSE json_extract(topics_json, '$[2].type') END,
+        topic3_type = CASE WHEN topic3 IS NULL THEN NULL ELSE json_extract(topics_json, '$[3].type') END;
+      UPDATE event_topics SET type = (
+        SELECT json_extract(e.topics_json, '$[' || event_topics.position || '].type')
+          FROM events e WHERE e.id = event_topics.event_id
+      );
+    `,
+    down: `
+      ALTER TABLE event_topics DROP COLUMN type;
+      ALTER TABLE events DROP COLUMN topic3_type;
+      ALTER TABLE events DROP COLUMN topic2_type;
+      ALTER TABLE events DROP COLUMN topic1_type;
+      ALTER TABLE events DROP COLUMN topic0_type;
+    `,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.reduce(

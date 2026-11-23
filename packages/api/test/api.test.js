@@ -2169,3 +2169,124 @@ test('the API serves from a read-only connection; an unmigrated db gives 503 (#1
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #146 / #147 typed topics and address position ───────────────────────────
+
+test('GET /events?topic=transfer&topicType=symbol matches symbols; topicType=string does not (#146)', async () => {
+  await withServer(async ({ get }) => {
+    const untyped = await get('/events?topic=transfer&limit=1000');
+    const symbol = await get('/events?topic=transfer&topicType=symbol&limit=1000');
+    const string = await get('/events?topic=transfer&topicType=string&limit=1000');
+    assert.equal(symbol.res.status, 200);
+    assert.ok(symbol.body.events.length > 0);
+    // Every fixture transfer is a symbol, so typing it changes nothing...
+    assert.equal(symbol.body.events.length, untyped.body.events.length);
+    // ...and asking for the string excludes all of them.
+    assert.equal(string.body.events.length, 0);
+    const wildcard = await get('/events?topic=transfer&topicType=*&limit=1000');
+    assert.equal(wildcard.body.events.length, untyped.body.events.length);
+  });
+});
+
+test('GET /events?topicType= rejects something that is not a type name (#146)', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?topic=transfer&topicType=Not%20A%20Type');
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'topicType');
+  });
+});
+
+test('GET /events?address=&addressPosition=topic1 returns only events where it is the sender (#147)', async () => {
+  await withServer(async ({ get }) => {
+    const address = 'GDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB5GSA';
+    const anywhere = await get(`/events?address=${address}&limit=1000`);
+    const sender = await get(`/events?address=${address}&addressPosition=topic1&limit=1000`);
+    assert.equal(sender.res.status, 200);
+    assert.ok(sender.body.events.length > 0);
+    assert.ok(sender.body.events.every((e) => e.topics[1].value === address));
+    assert.ok(anywhere.body.events.length > sender.body.events.length);
+  });
+});
+
+test('GET /events?addressPosition= is validated and needs address (#147)', async () => {
+  await withServer(async ({ get }) => {
+    const bad = await get('/events?address=GDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB5GSA&addressPosition=sender');
+    assert.equal(bad.res.status, 400);
+    assert.equal(bad.body.error.parameter, 'addressPosition');
+    const alone = await get('/events?addressPosition=topic1');
+    assert.equal(alone.res.status, 400);
+    assert.equal(alone.body.error.parameter, 'addressPosition');
+  });
+});
+
+// ── #184 request metrics ────────────────────────────────────────────────────
+
+test('request metrics: bounded series by route pattern, and unknown paths add none (#184)', async () => {
+  const { ApiMetrics, startApiMetricsServer } = await import('../dist/index.js');
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await store.insertEvents(fixture.events);
+  const metrics = new ApiMetrics();
+  const server = createApiServer({ store, metrics });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const metricsServer = await startApiMetricsServer(metrics, 0, '127.0.0.1');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const metricsUrl = `http://127.0.0.1:${metricsServer.address().port}/metrics`;
+  const scrape = async () => {
+    // Responses are counted on 'close', just after the client has the body.
+    await new Promise((r) => setTimeout(r, 20));
+    return (await fetch(metricsUrl)).text();
+  };
+  const series = (text) => text.split('\n').filter((l) => l && !l.startsWith('#'));
+  try {
+    const ids = fixture.events.slice(0, 3).map((e) => e.id);
+    for (const id of ids) await (await fetch(`${base}/events/${id}`)).text();
+    await (await fetch(`${base}/contracts/${SAC}/events?limit=1`)).text();
+    await (await fetch(`${base}/events/does-not-exist`)).text();
+    await (await fetch(`${base}/no/such/path`)).text();
+
+    const first = await scrape();
+    assert.match(first, /# TYPE lens_api_requests_total counter/);
+    assert.match(first, /# TYPE lens_api_request_duration_seconds histogram/);
+    // Three different ids, one series: the label is the pattern, not the path.
+    assert.match(first, /lens_api_requests_total\{route="\/events\/\{id\}",method="GET",status="2xx"\} 3/);
+    assert.match(first, /lens_api_requests_total\{route="\/events\/\{id\}",method="GET",status="4xx"\} 1/);
+    assert.match(first, /lens_api_requests_total\{route="\/contracts\/\{id\}\/events",method="GET",status="2xx"\} 1/);
+    assert.match(first, /lens_api_requests_total\{route="unmatched",method="GET",status="4xx"\} 1/);
+    assert.ok(!first.includes(ids[0]) && !first.includes(SAC) && !first.includes('no/such'), 'no raw path in any label');
+    assert.match(first, /lens_api_request_duration_seconds_count\{route="\/events\/\{id\}",method="GET"\} 4/);
+
+    // More unknown paths and more ids: counts grow, the series set does not.
+    for (let i = 0; i < 5; i++) await (await fetch(`${base}/random-${i}/${i}`)).text();
+    for (const id of ids) await (await fetch(`${base}/events/${id}`)).text();
+    const second = await scrape();
+    assert.equal(series(second).length, series(first).length);
+    assert.match(second, /lens_api_requests_total\{route="unmatched",method="GET",status="4xx"\} 6/);
+    assert.match(second, /lens_api_requests_total\{route="\/events\/\{id\}",method="GET",status="2xx"\} 6/);
+
+    // The API port itself does not serve metrics.
+    assert.equal((await fetch(`${base}/metrics`)).status, 404);
+  } finally {
+    metricsServer.close();
+    server.close();
+    await once(server, 'close');
+    await store.close();
+  }
+});
+
+test('createApiServer without metrics records nothing and still serves (#184)', async () => {
+  await withServer(async ({ get }) => {
+    const { res } = await get('/health');
+    assert.equal(res.status, 200);
+  });
+});
+
+test('routeLabel turns route patterns into templates (#184)', async () => {
+  const { routeLabel, parseMetricsPort } = await import('../dist/index.js');
+  assert.equal(routeLabel(/^\/contracts\/([^/]+)\/events$/), '/contracts/{id}/events');
+  assert.equal(routeLabel(/^\/openapi\.json$/), '/openapi.json');
+  assert.equal(routeLabel(/^\/webhooks\/([^/]+)\/dead-letters$/), '/webhooks/{id}/dead-letters');
+  assert.equal(parseMetricsPort(undefined), undefined, 'off by default');
+  assert.equal(parseMetricsPort('9464'), 9464);
+  assert.throws(() => parseMetricsPort('0'));
+});
