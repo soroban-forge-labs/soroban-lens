@@ -61,7 +61,10 @@ test('migrate() is idempotent', async () => {
 test('contract summaries backfill when their migration is applied to an existing event store', async () => {
   const store = await seeded();
   const expected = await store.listContracts(MAX_QUERY_LIMIT);
-  assert.deepEqual(await store.migrateDown(LATEST_SCHEMA_VERSION - 1), [LATEST_SCHEMA_VERSION]);
+  const migration = MIGRATIONS.find((item) => item.name === 'contract-summaries');
+  if (!migration) throw new Error('contract-summaries migration is missing');
+  const rolledBack = await store.migrateDown(migration.version - 1);
+  assert.ok(rolledBack.includes(migration.version));
 
   await store.migrate();
   assert.deepEqual(await store.listContracts(MAX_QUERY_LIMIT), expected);
