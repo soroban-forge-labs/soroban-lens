@@ -2,6 +2,7 @@
 export { createApiServer, shutdownApiServer } from './server.js';
 export type { ApiServerOptions, ShutdownOptions } from './server.js';
 export { ApiError } from './errors.js';
+export { ApiMetrics, startApiMetricsServer, parseMetricsPort, routeLabel } from './metrics.js';
 export { TokenBucketLimiter } from './rate-limit.js';
 export type { RateLimitOptions, RateLimitDecision } from './rate-limit.js';
 export { ApiKeyAuthenticator } from './auth.js';
@@ -11,6 +12,7 @@ export type { ApiErrorBody, ProblemDetails } from './errors.js';
 export {
   parseEventQuery,
   parseTopics,
+  parseTopicTypes,
   parseIds,
   parseFields,
   parseActivityQuery,

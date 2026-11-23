@@ -40,7 +40,7 @@ export type { PostgresStoreOptions, PgPool, PgClient, PgQueryable, PgQueryResult
 export { POSTGRES_MIGRATIONS } from './postgres-schema.js';
 export type { PostgresMigration } from './postgres-schema.js';
 
-export { decodeEvent, decodeScVal, toJsonSafe, scValTypeName, topicKey, extractAddresses } from './decode.js';
+export { decodeEvent, decodeScVal, toJsonSafe, scValTypeName, topicKey, topicType, extractAddresses } from './decode.js';
 export {
   ContractTypedDecoder,
   SpecCache,

@@ -553,12 +553,14 @@ const SCALARS = new Set(['String', 'Int', 'Float', 'Boolean', 'JSON']);
 /** Filters shared by `Query.events` and `Contract.events`. */
 const PAGE_ARGS: Record<string, ArgDef> = {
   topics: { type: '[String]' },
+  topicTypes: { type: '[String]' },
   fromLedger: { type: 'Int' },
   toLedger: { type: 'Int' },
   fromTime: { type: 'Int' },
   toTime: { type: 'Int' },
   txHash: { type: 'String' },
   address: { type: 'String' },
+  addressPosition: { type: 'String' },
   search: { type: 'String' },
   successfulOnly: { type: 'Boolean' },
   limit: { type: 'Int' },
@@ -576,6 +578,8 @@ function eventQueryFromArgs(args: Record<string, unknown>, contractId?: string) 
     if (value === undefined || value === null) continue;
     if (key === 'topics') {
       for (const topic of value as (string | null)[]) params.append('topic', topic ?? '*');
+    } else if (key === 'topicTypes') {
+      for (const type of value as (string | null)[]) params.append('topicType', type ?? '*');
     } else {
       params.set(key, String(value));
     }

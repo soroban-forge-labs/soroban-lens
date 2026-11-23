@@ -400,6 +400,73 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] a typed topic filter tells a symbol from a string (#146)`, async () => {
+    const store = await createStore();
+    const SYMBOL_TRANSFER = 'AAAADwAAAAh0cmFuc2Zlcg==';
+    const STRING_TRANSFER = 'AAAADgAAAAh0cmFuc2Zlcg==';
+    const base = fixtureEvents.find((e) => e.topic[0] === SYMBOL_TRANSFER);
+    assert.ok(base, 'fixtureEvents needs a symbol transfer event');
+    // Same event with the first topic re-encoded as the string "transfer",
+    // under an id no fixture event uses.
+    const asString: RawEventInput = { ...base, id: `${base.id.slice(0, -10)}9999999999`, topic: [STRING_TRANSFER, ...base.topic.slice(1)] };
+    await store.insertEvents([base, asString]);
+
+    const untyped = await store.queryEvents({ topics: ['transfer'], limit: 1000 });
+    assert.deepEqual(untyped.events.map((e) => e.id).sort(), [base.id, asString.id].sort(),
+      'an untyped filter still matches both, exactly as before');
+
+    const symbol = await store.queryEvents({ topics: ['transfer'], topicTypes: ['symbol'], limit: 1000 });
+    assert.deepEqual(symbol.events.map((e) => e.id), [base.id]);
+
+    const string = await store.queryEvents({ topics: ['transfer'], topicTypes: ['string'], limit: 1000 });
+    assert.deepEqual(string.events.map((e) => e.id), [asString.id]);
+
+    // A type with no value matches any value of that type at that position.
+    const anyString = await store.queryEvents({ topicTypes: ['string'], limit: 1000 });
+    assert.deepEqual(anyString.events.map((e) => e.id), [asString.id]);
+
+    // Positions are independent: the sender is an address, not a symbol.
+    const wrong = await store.queryEvents({ topicTypes: [null, 'symbol'], limit: 1000 });
+    assert.equal(wrong.events.length, 0);
+    await store.close();
+  });
+
+  test(`[${name}] a deep topic filter can be typed too (#146)`, async () => {
+    const store = await seeded();
+    const deep = fixtureEvents.find((e) => e.topic.length >= 5);
+    assert.ok(deep, 'fixtureEvents needs an event with at least 5 topics');
+    const probe = (await store.getEvent(deep.id))!;
+    const topic = probe.topics[4]!;
+    const value = String((topic as { value: unknown }).value);
+    const hit = await store.queryEvents({ topics: [null, null, null, null, value], topicTypes: [null, null, null, null, topic.type], limit: 1000 });
+    assert.ok(hit.events.some((e) => e.id === deep.id));
+    const miss = await store.queryEvents({ topics: [null, null, null, null, value], topicTypes: [null, null, null, null, 'no-such-type'], limit: 1000 });
+    assert.equal(miss.events.length, 0);
+    await store.close();
+  });
+
+  test(`[${name}] addressPosition narrows an address filter to one position (#147)`, async () => {
+    const store = await seeded();
+    // Pick an address that is the sender of one transfer and the recipient of
+    // another, so "anywhere" and "as sender" must give different answers.
+    const decoded = await Promise.all(fixtureEvents.map((e) => store.getEvent(e.id)));
+    const transfers = decoded.filter((e) => e && e.topics[0]?.type === 'symbol' && e.topics[0].value === 'transfer');
+    const senders = new Set(transfers.map((e) => e!.topics[1]?.value));
+    const both = transfers.map((e) => e!.topics[2]?.value).find((a) => typeof a === 'string' && senders.has(a));
+    assert.ok(typeof both === 'string', 'fixtureEvents needs an address that both sends and receives');
+
+    const anywhere = await store.queryEvents({ address: both, limit: 1000 });
+    const asSender = await store.queryEvents({ address: both, addressPosition: 'topic1', limit: 1000 });
+    const asRecipient = await store.queryEvents({ address: both, addressPosition: 'topic2', limit: 1000 });
+
+    assert.ok(asSender.events.length > 0);
+    assert.ok(asSender.events.every((e) => e.topics[1]?.value === both), 'every topic1 hit has it as the sender');
+    assert.ok(asRecipient.events.every((e) => e.topics[2]?.value === both), 'every topic2 hit has it as the recipient');
+    assert.ok(asRecipient.events.length > 0);
+    assert.ok(anywhere.events.length > asSender.events.length, 'the unpositioned filter is still the union');
+    await store.close();
+  });
+
   test(`[${name}] indexedAfter returns only events indexed after the timestamp (#165)`, async () => {
     const store = await createStore();
     const half = Math.floor(fixtureEvents.length / 2);

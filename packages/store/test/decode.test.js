@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { decodeScVal, decodeEvent, toJsonSafe, scValTypeName, topicKey } from '../dist/index.js';
+import { decodeScVal, decodeEvent, toJsonSafe, scValTypeName, topicKey, topicType } from '../dist/index.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
 const byContract = (id) => fixture.events.filter((e) => e.contractId === id);
@@ -241,4 +241,91 @@ test('encodeXdrColumn compresses a long value, and it still decodes correctly', 
   assert.notEqual(typeof encoded, 'string', 'expected the long value to be compressed');
   assert.ok(encoded.length < Buffer.byteLength(long, 'utf8'));
   assert.equal(decompressXdrColumn(encoded), long);
+});
+
+// ---------------------------------------------------------------------------
+// #149: maps whose keys are not scalars
+// ---------------------------------------------------------------------------
+
+import { scValToNative } from '@stellar/stellar-sdk';
+
+const b64 = (scv) => scv.toXDR('base64');
+const mapOf = (pairs) => xdr.ScVal.scvMap(pairs.map(([key, val]) => new xdr.ScMapEntry({ key, val })));
+
+test('a map with two distinct vec keys decodes to two entries, not one (#149)', () => {
+  const keyA = xdr.ScVal.scvVec([xdr.ScVal.scvU32(1), xdr.ScVal.scvU32(2)]);
+  const keyB = xdr.ScVal.scvVec([xdr.ScVal.scvString('1,2')]);
+  // Both keys coerce to the property key "1,2"; scValToNative keeps only one.
+  const scv = mapOf([[keyA, xdr.ScVal.scvSymbol('first')], [keyB, xdr.ScVal.scvSymbol('second')]]);
+  // Both coerce to "1,2". Older SDKs kept one value; this one refuses the map
+  // outright, which left the whole event undecodable.
+  assert.throws(() => scValToNative(scv), /more than one key/);
+
+  const decoded = decodeScVal(b64(scv));
+  assert.equal(decoded.type, 'map');
+  assert.deepEqual(decoded.value, [
+    { key: [1, 2], value: 'first' },
+    { key: ['1,2'], value: 'second' },
+  ]);
+});
+
+test('bytes and map keys are decoded the normal way, in order (#149)', () => {
+  const inner = mapOf([[xdr.ScVal.scvSymbol('a'), xdr.ScVal.scvU32(1)]]);
+  const scv = mapOf([
+    [xdr.ScVal.scvBytes(Buffer.from([0xde, 0xad])), xdr.ScVal.scvU32(1)],
+    [inner, xdr.ScVal.scvU32(2)],
+  ]);
+  assert.deepEqual(decodeScVal(b64(scv)).value, [
+    { key: 'dead', value: 1 },
+    { key: { a: 1 }, value: 2 },
+  ]);
+});
+
+test('a non-scalar-keyed map nested in a scalar-keyed one is handled too (#149)', () => {
+  const nested = mapOf([[xdr.ScVal.scvVec([xdr.ScVal.scvU32(7)]), xdr.ScVal.scvBool(true)]]);
+  const scv = mapOf([[xdr.ScVal.scvSymbol('outer'), nested]]);
+  assert.deepEqual(decodeScVal(b64(scv)).value, { outer: [{ key: [7], value: true }] });
+});
+
+test('scalar-keyed maps are byte-for-byte unchanged (#149)', () => {
+  const scalarKeyed = [
+    nativeToScVal({ amount: 100n, to: 'x', nested: { b: 1, a: [1, 2] } }),
+    mapOf([
+      [xdr.ScVal.scvU32(10), xdr.ScVal.scvString('ten')],
+      [xdr.ScVal.scvU32(2), xdr.ScVal.scvString('two')],
+      [xdr.ScVal.scvString('z'), xdr.ScVal.scvBytes(Buffer.from([1]))],
+      [xdr.ScVal.scvBool(true), xdr.ScVal.scvVoid()],
+    ]),
+    mapOf([[nativeToScVal(5n, { type: 'i128' }), xdr.ScVal.scvVec([xdr.ScVal.scvU64(xdr.Uint64.fromString('9'))])]]),
+  ];
+  for (const scv of scalarKeyed) {
+    const before = JSON.stringify(toJsonSafe(scValToNative(scv)));
+    assert.equal(JSON.stringify(decodeScVal(b64(scv)).value), before);
+  }
+  // And every event in the fixture decodes exactly as the plain SDK path does.
+  for (const raw of fixture.events) {
+    for (const x of [...raw.topic, raw.value]) {
+      const before = JSON.stringify(toJsonSafe(scValToNative(xdr.ScVal.fromXDR(x, 'base64'))));
+      assert.equal(JSON.stringify(decodeScVal(x).value), before, raw.id);
+    }
+  }
+});
+
+test('scalar keys that coerce to the same string fall back to pairs as well (#149)', () => {
+  const scv = mapOf([
+    [xdr.ScVal.scvU32(5), xdr.ScVal.scvSymbol('number')],
+    [xdr.ScVal.scvString('5'), xdr.ScVal.scvSymbol('text')],
+  ]);
+  assert.deepEqual(decodeScVal(b64(scv)).value, [
+    { key: 5, value: 'number' },
+    { key: '5', value: 'text' },
+  ]);
+});
+
+test('topicType carries the ScVal type exactly where topicKey has a value (#146)', () => {
+  assert.equal(topicType({ type: 'symbol', value: 'transfer' }), 'symbol');
+  assert.equal(topicType({ type: 'string', value: 'transfer' }), 'string');
+  assert.equal(topicType({ type: 'u32', value: 5 }), 'u32');
+  assert.equal(topicType({ type: 'vec', value: [1] }), null);
+  assert.equal(topicType(undefined), null);
 });
