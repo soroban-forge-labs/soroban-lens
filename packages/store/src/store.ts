@@ -268,6 +268,19 @@ export function resolveMaxQueryLimit(raw: string | undefined): number {
   return Math.trunc(value);
 }
 export const DEFAULT_QUERY_LIMIT = 50;
+export const MAX_CONTRACT_IDS = 20;
+
+export function validateContractFilter(query: EventQuery): void {
+  if (query.contractId !== undefined && query.contractIds !== undefined) {
+    throw new Error('contractId and contractIds cannot be used together');
+  }
+  if (
+    query.contractIds !== undefined &&
+    (query.contractIds.length === 0 || query.contractIds.length > MAX_CONTRACT_IDS)
+  ) {
+    throw new Error(`contractIds must contain between 1 and ${MAX_CONTRACT_IDS} ids`);
+  }
+}
 
 export function normaliseLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_QUERY_LIMIT;

@@ -30,6 +30,7 @@ export {
   DEFAULT_QUERY_LIMIT,
   resolveMaxQueryLimit,
   normaliseLimit,
+  MAX_CONTRACT_IDS,
 } from './store.js';
 
 export { SqliteEventStore, INDEXED_TOPIC_DEPTH } from './sqlite-store.js';

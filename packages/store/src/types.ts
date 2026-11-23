@@ -114,6 +114,8 @@ export interface ContractSpecRecord {
 /** Filter for `EventStore.queryEvents`. All fields are ANDed. */
 export interface EventQuery {
   contractId?: string | undefined;
+  /** Match events from several contracts. Mutually exclusive with `contractId`; capped at 20 ids. */
+  contractIds?: string[] | undefined;
   /**
    * Match a topic prefix: `['transfer']` matches any event whose first topic is
    * `transfer`. A `null` entry is a wildcard for that position.

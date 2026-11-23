@@ -11,7 +11,12 @@ import { decodeEvent, topicKey, topicType, extractAddresses } from './decode.js'
 import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
-import { normaliseLimit, type EventStore, type PruneToSizeResult } from './store.js';
+import {
+  normaliseLimit,
+  validateContractFilter,
+  type EventStore,
+  type PruneToSizeResult,
+} from './store.js';
 import type {
   ContractSpecRecord,
   AddressContractSummary,
@@ -1297,9 +1302,14 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
   const conditions: string[] = [];
   const values: SqlParam[] = [];
 
+  validateContractFilter(query);
   if (query.contractId) {
     conditions.push('contract_id = ?');
     values.push(query.contractId);
+  }
+  if (query.contractIds !== undefined) {
+    conditions.push(`contract_id IN (${query.contractIds.map(() => '?').join(', ')})`);
+    values.push(...query.contractIds);
   }
   if (query.txHash) {
     conditions.push('tx_hash = ?');

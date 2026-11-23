@@ -6,7 +6,12 @@ import { decodeEvent, topicKey, topicType, extractAddresses } from './decode.js'
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION } from './schema.js';
 import { POSTGRES_MIGRATIONS } from './postgres-schema.js';
-import { normaliseLimit, type EventStore, type PruneToSizeResult } from './store.js';
+import {
+  normaliseLimit,
+  validateContractFilter,
+  type EventStore,
+  type PruneToSizeResult,
+} from './store.js';
 import type {
   ContractSpecRecord,
   AddressContractSummary,
@@ -1071,7 +1076,11 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
     return `$${values.length}`;
   };
 
+  validateContractFilter(query);
   if (query.contractId) conditions.push(`contract_id = ${param(query.contractId)}`);
+  if (query.contractIds !== undefined) {
+    conditions.push(`contract_id IN (${query.contractIds.map((id) => param(id)).join(', ')})`);
+  }
   if (query.txHash) conditions.push(`tx_hash = ${param(query.txHash)}`);
   if (query.search) {
     // A substring match over the stored JSON text, case-insensitive like the

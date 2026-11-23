@@ -193,6 +193,42 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] filtering by contractIds returns one ordered, pageable stream`, async () => {
+    const store = await seeded();
+    const selected = contractIds.slice(0, 2);
+    const expected = fixtureEvents
+      .filter((event) => selected.includes(event.contractId))
+      .map((event) => event.id)
+      .sort()
+      .reverse();
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let guard = 0; guard < 100; guard++) {
+      const page = await store.queryEvents({
+        contractIds: selected,
+        limit: 3,
+        ...(cursor ? { cursor } : {}),
+      });
+      assert.ok(page.events.every((event) => selected.includes(event.contractId)));
+      seen.push(...page.events.map((event) => event.id));
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    assert.deepEqual(seen, expected);
+    await store.close();
+  });
+
+  test(`[${name}] contractIds rejects conflicting or invalid filters`, async () => {
+    const store = await createStore();
+    await assert.rejects(
+      store.queryEvents({ contractId: someContract, contractIds: [someContract] }),
+      /cannot be used together/,
+    );
+    await assert.rejects(store.queryEvents({ contractIds: [] }), /between 1 and 20/);
+    await assert.rejects(store.queryEvents({ contractIds: Array(21).fill(someContract) }), /between 1 and 20/);
+    await store.close();
+  });
+
   test(`[${name}] filtering by txHash returns only that transaction's events`, async () => {
     const store = await seeded();
     const txHash = fixtureEvents[0]!.txHash;
