@@ -50,23 +50,39 @@ jobs:
 
       - name: Install and build the base commit
         if: github.event_name == 'pull_request'
+        id: base-build
         working-directory: base
+        # The base commit is pinned by the pull_request event, not chosen by
+        # this workflow. When it cannot be installed or built (e.g. main is
+        # red, fixed only by the PR under test) there is nothing to compare
+        # against, so report the head numbers instead of going red for a
+        # failure no change on this branch could fix.
+        continue-on-error: true
         run: |
           npm ci
           npm run build
 
+      - name: Note when the base cannot be benchmarked
+        if: steps.base-build.outcome == 'failure'
+        run: |
+          echo "::warning title=Benchmark comparison skipped::Base commit ${{ github.event.pull_request.base.sha }} failed 'npm ci && npm run build'; only the head numbers are reported."
+          {
+            echo "**Benchmark comparison skipped:** the base commit (\`${{ github.event.pull_request.base.sha }}\`) failed \`npm ci && npm run build\`. Only the head numbers are reported below."
+            echo ''
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Benchmark the base commit
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.base-build.outcome == 'success'
         # This commit's harness against the base commit's built packages, so a
         # PR that adds or changes the harness itself is still compared fairly.
         run: node bench/run.js --root base --out bench/results/base.json
 
       - name: Compare against the base (fails on a significant regression)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.base-build.outcome == 'success'
         run: node bench/compare.js bench/results/base.json bench/results/head.json --md bench/results/report.md
 
       - name: Report results
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || steps.base-build.outcome != 'success'
         run: node bench/compare.js bench/results/head.json --md bench/results/report.md
 
       - name: Upload results
