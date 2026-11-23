@@ -296,6 +296,25 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE events DROP COLUMN topic0_type;
     `,
   },
+  {
+    version: 10,
+    name: 'contract-summaries',
+    up: `
+      CREATE TABLE contract_summaries (
+        contract_id  TEXT    PRIMARY KEY,
+        event_count  INTEGER NOT NULL,
+        first_ledger INTEGER NOT NULL,
+        last_ledger  INTEGER NOT NULL,
+        last_seen_at TEXT    NOT NULL
+      ) WITHOUT ROWID;
+
+      INSERT INTO contract_summaries (contract_id, event_count, first_ledger, last_ledger, last_seen_at)
+      SELECT contract_id, COUNT(*), MIN(ledger), MAX(ledger), MAX(ledger_closed_at)
+        FROM events
+       GROUP BY contract_id;
+    `,
+    down: `DROP TABLE IF EXISTS contract_summaries;`,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.reduce(

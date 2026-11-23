@@ -251,6 +251,39 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] listContractsPage keeps its ledger snapshot while new events arrive`, async () => {
+    const store = await seeded();
+    const expected = await store.listContracts(1000);
+    expected.sort(
+      (a, b) => b.lastLedger - a.lastLedger || (a.contractId < b.contractId ? -1 : a.contractId > b.contractId ? 1 : 0),
+    );
+    const first = await store.listContractsPage(1);
+    assert.deepEqual(first.contracts, expected.slice(0, 1));
+    const firstCursor = first.nextCursor;
+    if (firstCursor === null) throw new Error('the contract fixture must span multiple pages');
+
+    const lastLedger = Math.max(...fixtureEvents.map((event) => event.ledger));
+    const laterLedger = lastLedger + 1;
+    const laterEvent = {
+      ...fixtureEvents[0]!,
+      id: `${(BigInt(laterLedger) * 4294967296n).toString().padStart(19, '0')}-0000000000`,
+      contractId: first.contracts[0]!.contractId,
+      ledger: laterLedger,
+      ledgerClosedAt: new Date(new Date(fixtureEvents.at(-1)!.ledgerClosedAt).getTime() + 5000).toISOString(),
+    };
+    await store.insertEvents([laterEvent]);
+
+    const seen = [...first.contracts];
+    let cursor: string | null = firstCursor;
+    while (cursor) {
+      const page = await store.listContractsPage(1, cursor);
+      seen.push(...page.contracts);
+      cursor = page.nextCursor;
+    }
+    assert.deepEqual(seen, expected);
+    await store.close();
+  });
+
   test(`[${name}] getStats reflects what was actually inserted`, async () => {
     const store = await seeded();
     const stats = await store.getStats();

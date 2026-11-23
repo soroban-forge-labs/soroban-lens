@@ -39,7 +39,7 @@ Usage:
   lens tail   [filters] [--json]     Follow events as they are indexed, colourised or as NDJSON.
   lens prune --before-ledger <n>     Delete events below a ledger and reclaim disk space.
   lens redecode [--all]              Re-run the decoder over previously-failed rows.
-  lens verify [--repair]             Check stored-row invariants; optionally fix them.
+  lens verify [--repair]             Check event rows and contract summaries.
   lens migrate --down --to <n>       Roll back migrations above version <n>.
   lens export <path>                 Write every event as NDJSON, backend-portable.
   lens backup <path>                 Consistent copy of the whole database, safe while indexing.
@@ -78,7 +78,7 @@ Options:
       --fixture <path>    seed: file to load (default fixtures/testnet-events.json).
       --before-ledger <n> prune: delete events with ledger below this.
       --all               redecode: re-run over every row, not only failures.
-      --repair            verify: recompute derived columns for any bad row found.
+      --repair            verify: recompute derived rows and contract summaries.
       --down              migrate: roll back rather than apply forward.
       --to <n>            migrate --down: target schema version.
       --fix               doctor: create .env and data/, run pending migrations. Never
@@ -405,15 +405,24 @@ async function main(argv: string[]): Promise<number> {
           process.stderr.write('[lens] verify: all rows are internally consistent\n');
           return 0;
         }
-        for (const { id, problems: rowProblems } of problems) {
-          process.stderr.write(`[lens] ${id}: ${rowProblems.join('; ')}\n`);
+        for (const { kind, id, problems: rowProblems } of problems) {
+          const label = kind === 'contract_summary' ? `contract summary ${id}` : id;
+          process.stderr.write(`[lens] ${label}: ${rowProblems.join('; ')}\n`);
         }
         if (values.repair) {
-          for (const { id } of problems) await store.repairRow(id);
-          process.stderr.write(`[lens] repaired ${problems.length} row(s)\n`);
-          return 0;
+          for (const { kind, id } of problems) {
+            if (kind === 'contract_summary') await store.repairContractSummary(id);
+            else await store.repairRow(id);
+          }
+          const remaining = await store.checkIntegrity();
+          if (remaining.length === 0) {
+            process.stderr.write(`[lens] repaired ${problems.length} problem(s); verification passed\n`);
+            return 0;
+          }
+          process.stderr.write(`[lens] repair left ${remaining.length} problem(s)\n`);
+          return 1;
         }
-        process.stderr.write(`[lens] verify: ${problems.length} row(s) with problems. Re-run with --repair to fix.\n`);
+        process.stderr.write(`[lens] verify: ${problems.length} problem(s). Re-run with --repair to fix.\n`);
         return 1;
       } finally {
         await store.close();
@@ -624,7 +633,7 @@ _lens() {
     'tail:Follow events as they are indexed'
     'prune:Delete events below a ledger'
     'redecode:Re-run the decoder over failed rows'
-    'verify:Check stored-row invariants'
+    'verify:Check event rows and contract summaries'
     'migrate:Roll migrations forward or back'
     'export:Write an NDJSON snapshot'
     'import:Load an NDJSON snapshot'
@@ -647,7 +656,7 @@ complete -c lens -n "__fish_use_subcommand" -a stats -d "Print database statisti
 complete -c lens -n "__fish_use_subcommand" -a tail -d "Follow events as they are indexed"
 complete -c lens -n "__fish_use_subcommand" -a prune -d "Delete events below a ledger"
 complete -c lens -n "__fish_use_subcommand" -a redecode -d "Re-run the decoder over failed rows"
-complete -c lens -n "__fish_use_subcommand" -a verify -d "Check stored-row invariants"
+complete -c lens -n "__fish_use_subcommand" -a verify -d "Check event rows and contract summaries"
 complete -c lens -n "__fish_use_subcommand" -a migrate -d "Roll migrations forward or back"
 complete -c lens -n "__fish_use_subcommand" -a export -d "Write an NDJSON snapshot"
 complete -c lens -n "__fish_use_subcommand" -a import -d "Load an NDJSON snapshot"

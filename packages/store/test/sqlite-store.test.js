@@ -58,6 +58,17 @@ test('migrate() is idempotent', async () => {
   await store.close();
 });
 
+test('contract summaries backfill when their migration is applied to an existing event store', async () => {
+  const store = await seeded();
+  const expected = await store.listContracts(MAX_QUERY_LIMIT);
+  assert.deepEqual(await store.migrateDown(LATEST_SCHEMA_VERSION - 1), [LATEST_SCHEMA_VERSION]);
+
+  await store.migrate();
+  assert.deepEqual(await store.listContracts(MAX_QUERY_LIMIT), expected);
+  assert.deepEqual(await store.checkIntegrity(), []);
+  await store.close();
+});
+
 test('the whole fixture inserts with correct types', async () => {
   const store = await seeded();
   const stats = await store.getStats();
@@ -233,6 +244,45 @@ test('listContracts summarises each contract, most recent first', async () => {
   const ledgers = contracts.map((c) => c.lastLedger);
   assert.deepEqual(ledgers, [...ledgers].sort((a, b) => b - a));
   await store.close();
+});
+
+test('contract summaries stay consistent through snapshot import, delete, and prune', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-contract-summaries-'));
+  const snapshotPath = join(dir, 'snapshot.ndjson');
+  const source = await seeded();
+  await source.exportSnapshot(snapshotPath);
+  const expected = await source.listContracts(MAX_QUERY_LIMIT);
+
+  const target = new SqliteEventStore({ path: ':memory:' });
+  await target.importSnapshot(snapshotPath);
+  assert.deepEqual(await target.listContracts(MAX_QUERY_LIMIT), expected);
+  assert.deepEqual(await target.checkIntegrity(), []);
+
+  const firstEvent = fixture.events[0];
+  const before = expected.find((summary) => summary.contractId === firstEvent.contractId);
+  await target.deleteEvents([firstEvent.id]);
+  const after = (await target.listContracts(MAX_QUERY_LIMIT)).find(
+    (summary) => summary.contractId === firstEvent.contractId,
+  );
+  assert.equal(after.eventCount, before.eventCount - 1);
+  assert.deepEqual(await target.checkIntegrity(), []);
+
+  const lastLedger = Math.max(...fixture.events.map((event) => event.ledger));
+  await target.pruneBefore(lastLedger + 1);
+  assert.deepEqual(await target.listContracts(MAX_QUERY_LIMIT), []);
+  assert.deepEqual(await target.checkIntegrity(), []);
+
+  const sizeStore = new SqliteEventStore({ path: join(dir, 'size.db') });
+  await sizeStore.insertEvents(fixture.events);
+  const sizePrune = await sizeStore.pruneToSize(0, 1);
+  assert.equal(sizePrune.rowsRemoved, fixture.events.length);
+  assert.deepEqual(await sizeStore.listContracts(MAX_QUERY_LIMIT), []);
+  assert.deepEqual(await sizeStore.checkIntegrity(), []);
+
+  await source.close();
+  await target.close();
+  await sizeStore.close();
+  await rm(dir, { recursive: true, force: true });
 });
 
 test('listTopics ranks a contract distinct topics by frequency', async () => {
