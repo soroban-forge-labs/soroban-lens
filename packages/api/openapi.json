@@ -603,6 +603,15 @@
             "$ref": "#/components/parameters/ToTime"
           },
           {
+            "$ref": "#/components/parameters/EventType"
+          },
+          {
+            "$ref": "#/components/parameters/ContractIdFilter"
+          },
+          {
+            "$ref": "#/components/parameters/ContractIds"
+          },
+          {
             "$ref": "#/components/parameters/TxHash"
           },
           {
@@ -1687,6 +1696,35 @@
           "type": "string",
           "pattern": "^C[A-Z2-7]{55}$"
         }
+      },
+      "ContractIds": {
+        "name": "contractIds",
+        "in": "query",
+        "description": "Comma-separated contract ids to match, at most 100 (the store's `MAX_CONTRACT_IDS`). Mutually exclusive with `contractId`.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+      },
+      "EventType": {
+        "name": "type",
+        "in": "query",
+        "description": "Only events of this type.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "contract",
+            "system"
+          ]
+        }
+      },
+      "ContractIdFilter": {
+        "name": "contractId",
+        "in": "query",
+        "description": "Only events from this contract. Mutually exclusive with `contractIds`.",
+        "schema": {
+          "$ref": "#/components/schemas/ContractIdString"
+        }
       }
     },
     "responses": {
@@ -2181,6 +2219,10 @@
           "lastSeenAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "label": {
+            "type": "string",
+            "description": "Operator-assigned name from the `LENS_CONTRACT_LABELS` file. Absent when the contract has no label."
           }
         }
       },

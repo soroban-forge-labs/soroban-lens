@@ -2279,3 +2279,90 @@ test('routeLabel turns route patterns into templates (#184)', async () => {
   assert.equal(parseMetricsPort('9464'), 9464);
   assert.throws(() => parseMetricsPort('0'));
 });
+
+test('every response pins nosniff and no-referrer; only /docs carries a CSP', async () => {
+  await withServer(async ({ base }) => {
+    for (const path of ['/health', '/events', '/nope', '/docs']) {
+      const res = await fetch(base + path);
+      assert.equal(res.headers.get('x-content-type-options'), 'nosniff', path);
+      assert.equal(res.headers.get('referrer-policy'), 'no-referrer', path);
+    }
+    const docs = await fetch(base + '/docs');
+    const csp = docs.headers.get('content-security-policy');
+    assert.match(csp, /script-src https:\/\/cdn\.jsdelivr\.net/);
+    assert.match(csp, /connect-src 'self'/);
+    assert.match(csp, /default-src 'none'/);
+    assert.match(await docs.text(), /redoc@2\.5\.4/);
+    assert.equal((await fetch(base + '/health')).headers.get('content-security-policy'), null);
+  });
+});
+
+test('configured timeouts are applied to the created server', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  const server = createApiServer({
+    store,
+    timeouts: { headersTimeoutMs: 1111, requestTimeoutMs: 2222, keepAliveTimeoutMs: 3333 },
+  });
+  assert.equal(server.headersTimeout, 1111);
+  assert.equal(server.requestTimeout, 2222);
+  assert.equal(server.keepAliveTimeout, 3333);
+  await store.close();
+});
+
+test('/events filters by type and contractIds, and rejects bad combinations', async () => {
+  await withServer(async ({ get }) => {
+    const all = await get('/events?limit=1000');
+    const ids = [...new Set(all.body.events.map((e) => e.contractId))];
+    const one = await get(`/events?contractIds=${ids[0]}&limit=1000`);
+    assert.equal(one.res.status, 200);
+    assert.ok(one.body.events.length > 0);
+    assert.ok(one.body.events.every((e) => e.contractId === ids[0]));
+    const many = await get(`/events?contractIds=${ids.join(',')}&limit=1000`);
+    assert.equal(many.body.events.length, all.body.events.length);
+
+    const sys = await get('/events?type=system&limit=1000');
+    assert.ok(sys.body.events.every((e) => e.type === 'system'));
+    assert.equal((await get('/events?type=bogus')).res.status, 400);
+
+    assert.equal((await get(`/events?contractId=${ids[0]}&contractIds=${ids[0]}`)).res.status, 400);
+    assert.equal((await get('/events?contractIds=nope')).res.status, 400);
+    const tooMany = Array.from({ length: 101 }, (_, i) => 'C' + String(i).padStart(55, 'A').replaceAll('0', 'A')).join(',');
+    assert.equal((await get(`/events?contractIds=${tooMany}`)).res.status, 400);
+  });
+});
+
+test('contract labels appear on /contracts and /contracts/{id}/stats', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await store.insertEvents(fixture.events);
+  const server = createApiServer({ store, contractLabels: { [SAC]: 'USDC SAC' } });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const list = await (await fetch(base + '/contracts')).json();
+    assert.equal(list.contracts.find((c) => c.contractId === SAC)?.label, 'USDC SAC');
+    assert.ok(list.contracts.filter((c) => c.contractId !== SAC).every((c) => !('label' in c)));
+    const stats = await (await fetch(`${base}/contracts/${SAC}/stats`)).json();
+    assert.equal(stats.label, 'USDC SAC');
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+  }
+});
+
+test('loadContractLabels: missing file is no labels, bad ids fail', async () => {
+  const { loadContractLabels } = await import('../dist/index.js');
+  const { writeFileSync } = await import('node:fs');
+  assert.deepEqual(loadContractLabels(undefined), {});
+  assert.deepEqual(loadContractLabels('/nonexistent/labels.json'), {});
+  const dir = await mkdtemp(join(tmpdir(), 'labels-'));
+  try {
+    writeFileSync(join(dir, 'ok.json'), JSON.stringify({ [SAC]: 'USDC SAC' }));
+    assert.deepEqual(loadContractLabels(join(dir, 'ok.json')), { [SAC]: 'USDC SAC' });
+    writeFileSync(join(dir, 'bad.json'), JSON.stringify({ nope: 'x' }));
+    assert.throws(() => loadContractLabels(join(dir, 'bad.json')), /not a contract id/);
+  } finally {
+    await rm(dir, { recursive: true });
+  }
+});

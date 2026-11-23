@@ -248,6 +248,9 @@ export interface PruneToSizeResult {
 /** Ceiling on `limit`, enforced by every implementation. */
 export const DEFAULT_MAX_QUERY_LIMIT = 1000;
 
+/** Most contract ids one `contractIds` filter may name. */
+export const MAX_CONTRACT_IDS = 100;
+
 /**
  * Ceiling on `limit`, overridable with `LENS_MAX_QUERY_LIMIT`.
  *

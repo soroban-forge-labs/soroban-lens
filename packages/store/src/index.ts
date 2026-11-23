@@ -27,6 +27,7 @@ export type { EventStore, PruneToSizeResult } from './store.js';
 export {
   MAX_QUERY_LIMIT,
   DEFAULT_MAX_QUERY_LIMIT,
+  MAX_CONTRACT_IDS,
   DEFAULT_QUERY_LIMIT,
   resolveMaxQueryLimit,
   normaliseLimit,

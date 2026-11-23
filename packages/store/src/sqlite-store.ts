@@ -1301,6 +1301,14 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
     conditions.push('contract_id = ?');
     values.push(query.contractId);
   }
+  if (query.contractIds?.length) {
+    conditions.push(`contract_id IN (${query.contractIds.map(() => '?').join(', ')})`);
+    values.push(...query.contractIds);
+  }
+  if (query.type) {
+    conditions.push('type = ?');
+    values.push(query.type);
+  }
   if (query.txHash) {
     conditions.push('tx_hash = ?');
     values.push(query.txHash);

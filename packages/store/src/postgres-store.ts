@@ -1072,6 +1072,10 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
   };
 
   if (query.contractId) conditions.push(`contract_id = ${param(query.contractId)}`);
+  if (query.contractIds?.length) {
+    conditions.push(`contract_id IN (${query.contractIds.map((id) => param(id)).join(', ')})`);
+  }
+  if (query.type) conditions.push(`type = ${param(query.type)}`);
   if (query.txHash) conditions.push(`tx_hash = ${param(query.txHash)}`);
   if (query.search) {
     // A substring match over the stored JSON text, case-insensitive like the
