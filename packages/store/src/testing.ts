@@ -193,6 +193,20 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] filtering by type returns only matching event types`, async () => {
+    const store = await createStore();
+    const systemEvent = { ...fixtureEvents[0]!, id: 'type-filter-system-event', type: 'system' as const };
+    await store.insertEvents([...fixtureEvents, systemEvent]);
+
+    for (const type of ['contract', 'system'] as const) {
+      const page = await store.queryEvents({ type, limit: 1000 });
+      assert.ok(page.events.length > 0);
+      assert.ok(page.events.every((event) => event.type === type));
+      assert.equal(page.total, fixtureEvents.filter((event) => event.type === type).length + (type === 'system' ? 1 : 0));
+    }
+    await store.close();
+  });
+
   test(`[${name}] filtering by txHash returns only that transaction's events`, async () => {
     const store = await seeded();
     const txHash = fixtureEvents[0]!.txHash;
