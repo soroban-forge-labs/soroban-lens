@@ -883,9 +883,10 @@ test('a migration can be applied and rolled back', async () => {
   const store = new SqliteEventStore({ path: ':memory:' });
   assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
 
-  const rolledBack = await store.migrateDown(LATEST_SCHEMA_VERSION - 1);
+  const previousVersion = MIGRATIONS.filter((migration) => migration.version < LATEST_SCHEMA_VERSION).at(-1)?.version ?? 0;
+  const rolledBack = await store.migrateDown(previousVersion);
   assert.deepEqual(rolledBack, [LATEST_SCHEMA_VERSION]);
-  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION - 1);
+  assert.equal((await store.getStats()).schemaVersion, previousVersion);
 
   // And forward again, via the ordinary migrate() path.
   await store.migrate();

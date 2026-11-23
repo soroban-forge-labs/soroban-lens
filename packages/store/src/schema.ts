@@ -297,7 +297,7 @@ export const MIGRATIONS: Migration[] = [
     `,
   },
   {
-    version: 10,
+    version: 11,
     name: 'muxed-account-addresses',
     up: `
       ALTER TABLE event_addresses ADD COLUMN muxed_id TEXT;
