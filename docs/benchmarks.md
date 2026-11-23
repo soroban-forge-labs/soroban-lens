@@ -72,6 +72,14 @@ worse (`--threshold`), ignoring latency changes smaller than 0.5 ms
 Compare runs from the same machine. Absolute numbers depend on hardware, which
 is why there is no committed baseline file.
 
+### Contract summaries (#152)
+
+On the 1,000,000-event fixture (seed 1), listing 100 contracts took 12,190.555
+ms p50 / 13,035.985 ms p95 with a fresh `GROUP BY events` scan, compared with
+0.468 ms p50 / 0.722 ms p95 through `listContracts` and the summary table
+(seven samples per path). This run used Node v24.15.0 on Windows x64 with an
+Intel Core i7-7600U; absolute timings are machine-specific.
+
 ## In CI
 
 `.github/workflows/bench.yml`:
