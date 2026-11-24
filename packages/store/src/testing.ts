@@ -293,6 +293,95 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] prune by contract leaves every other contract untouched`, async () => {
+    const store = await seeded();
+    const byContract = new Map<string, number>();
+    for (const event of fixtureEvents) {
+      byContract.set(event.contractId, (byContract.get(event.contractId) ?? 0) + 1);
+    }
+    // The busiest contract, so this removes several rows rather than one and
+    // the "everything else survived" assertion has something to say.
+    const [target, expected] = [...byContract.entries()].sort((a, b) => b[1] - a[1])[0]!;
+
+    const removed = await store.prune({ contractId: target });
+    assert.equal(removed, expected);
+    assert.equal((await store.queryEvents({ contractId: target, limit: 1000 })).total, 0);
+
+    for (const [contractId, count] of byContract) {
+      if (contractId === target) continue;
+      assert.equal(
+        (await store.queryEvents({ contractId, limit: 1000 })).total,
+        count,
+        `${contractId} lost rows to another contract's prune`,
+      );
+    }
+    assert.equal((await store.getStats()).eventCount, fixtureEvents.length - expected);
+    // Nothing internally inconsistent survived it — `lens verify` reads this.
+    assert.deepEqual(await store.checkIntegrity(), []);
+    await store.close();
+  });
+
+  test(`[${name}] prune by age uses ledger close time, not when the row was indexed`, async () => {
+    const store = await seeded();
+    const closes = fixtureEvents
+      .map((e) => Math.floor(new Date(e.ledgerClosedAt).getTime() / 1000))
+      .sort((a, b) => a - b);
+    const oldest = closes[0]!;
+    const newest = closes[closes.length - 1]!;
+
+    // The fixture is real captured data, so it is already years old by now:
+    // an age far past it keeps everything, and one just inside it keeps none.
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const daysSinceNewest = (nowSeconds - newest) / 86_400;
+    const daysSinceOldest = (nowSeconds - oldest) / 86_400;
+
+    assert.equal(await store.prune({ olderThanDays: daysSinceOldest + 1 }), 0);
+    assert.equal((await store.getStats()).eventCount, fixtureEvents.length);
+
+    const removed = await store.prune({ olderThanDays: Math.max(daysSinceNewest - 1, 0.5) });
+    assert.ok(removed > 0, 'expected the fixture to be older than the cutoff');
+    await store.close();
+  });
+
+  test(`[${name}] prune combines its filters with AND`, async () => {
+    const store = await seeded();
+    const contractId = fixtureEvents[0]!.contractId;
+    const ledgers = [...new Set(fixtureEvents.map((e) => e.ledger))].sort((a, b) => a - b);
+    const threshold = ledgers[Math.floor(ledgers.length / 2)]!;
+
+    const expected = fixtureEvents.filter((e) => e.contractId === contractId && e.ledger < threshold).length;
+    const removed = await store.prune({ contractId, beforeLedger: threshold });
+    assert.equal(removed, expected);
+
+    // Other contracts keep their rows below the threshold: the ledger bound
+    // alone would have taken them.
+    const others = fixtureEvents.filter((e) => e.contractId !== contractId && e.ledger < threshold);
+    for (const event of others.slice(0, 5)) {
+      assert.ok(await store.getEvent(event.id), `${event.id} was pruned by another contract's filter`);
+    }
+    await store.close();
+  });
+
+  test(`[${name}] prune refuses an empty filter`, async () => {
+    const store = await seeded();
+    await assert.rejects(() => store.prune({}), /at least one of/);
+    await assert.rejects(() => store.prune({ olderThanDays: 0 }), /positive number of days/);
+    await assert.rejects(() => store.prune({ olderThanDays: -1 }), /positive number of days/);
+    // Nothing was deleted on the way to refusing.
+    assert.equal((await store.getStats()).eventCount, fixtureEvents.length);
+    await store.close();
+  });
+
+  test(`[${name}] prune does not touch stream state`, async () => {
+    const store = await seeded();
+    await store.saveStreamState({ key: 'k', cursor: 'abc', ledger: 1, updatedAt: '2026-01-01T00:00:00Z' });
+    await store.prune({ contractId: fixtureEvents[0]!.contractId });
+    assert.deepEqual(await store.loadStreamState('k'), {
+      key: 'k', cursor: 'abc', ledger: 1, updatedAt: '2026-01-01T00:00:00Z',
+    });
+    await store.close();
+  });
+
   test(`[${name}] pruneBefore does not touch stream state`, async () => {
     const store = await seeded();
     await store.saveStreamState({ key: 'k', cursor: 'abc', ledger: 1, updatedAt: '2026-01-01T00:00:00Z' });

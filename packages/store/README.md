@@ -144,6 +144,48 @@ user could predict or type.
 Event ids are fixed-width 30 characters and sort lexicographically in ledger
 order, which is why keyset pagination is a plain string comparison.
 
+## Pruning
+
+`prune(filter)` deletes events by contract, by age, or both (#154). It is the
+general form of `pruneBefore`, which is now a call to it.
+
+```js
+await store.prune({ contractId: 'C...' });            // drop a contract entirely
+await store.prune({ olderThanDays: 30 });             // keep the last 30 days
+await store.prune({ contractId: 'C...', olderThanDays: 30 });  // both: AND
+await store.prune({ beforeLedger: 4695320 });         // what pruneBefore does
+```
+
+`olderThanDays` resolves against `closed_at_unix` — ledger close time, not when
+the row was indexed, so a backfill does not get a fresh lease on life. It takes
+fractions, and the cutoff is computed from the store's injectable `now`, which
+is how the tests place it between two fixture events instead of waiting.
+
+An empty filter **throws**. Matching everything is the one intent a caller never
+means to express by leaving a field out, and `pruneBefore(Number.MAX_SAFE_INTEGER)`
+already says it out loud for anyone who does.
+
+Nothing in `prune` touches the side tables. `event_addresses` and `event_topics`
+carry `ON DELETE CASCADE` and `events_fts` has an `AFTER DELETE` trigger, so all
+three follow the events inside the same transaction — which means the only thing
+standing between a correct prune and a search that still matches deleted events
+is `PRAGMA foreign_keys = ON` in the constructor. `test/prune.test.js` asserts
+the orphan counts for exactly that reason; note that `lens verify`
+(`checkIntegrity`) would not catch it, since it only reads the events table's own
+columns.
+
+From the CLI, where at least one bound is required:
+
+```bash
+lens prune -c CDLZ...              # one contract
+lens prune --older-than-days 30    # anything that closed over 30 days ago
+lens prune --before-ledger 4695320
+```
+
+Like `pruneBefore`, a prune never touches `stream_state`: it is about disk, not
+about where the indexer resumes from, and a pruned database is still a valid
+place to keep polling forward from.
+
 ## Retention by database size
 
 Pruning by ledger count is not how disk actually fills up. A ledger of big

@@ -11,7 +11,14 @@ import { decodeEvent, topicKey, topicType, extractAddresses } from './decode.js'
 import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
-import { normaliseLimit, type EventStore, type PruneToSizeResult } from './store.js';
+import {
+  normaliseLimit,
+  resolvePruneFilter,
+  type EventStore,
+  type PruneFilter,
+  type PruneToSizeResult,
+  type ResolvedPruneFilter,
+} from './store.js';
 import type {
   ContractSpecRecord,
   AddressContractSummary,
@@ -813,34 +820,54 @@ export class SqliteEventStore implements EventStore {
   }
 
   async pruneBefore(ledger: number): Promise<number> {
+    // Guarded here as well as in prune(), so a read-only store names the method
+    // the caller actually called rather than the one it delegates to.
     this.#assertWritable('pruneBefore');
+    return this.prune({ beforeLedger: ledger });
+  }
+
+  async prune(filter: PruneFilter): Promise<number> {
+    this.#assertWritable('prune');
+    const where = pruneWhere(resolvePruneFilter(filter, this.#now()));
+
     // A separate count-then-delete rather than reading `changes` off the
     // DELETE: `changes` after a DELETE is exact too, but a second statement
     // that only counts what will go lets us log or reject a huge prune before
     // it happens if we ever want to; today it just returns the number.
-    const before = (this.#db.prepare('SELECT COUNT(*) AS n FROM events WHERE ledger < ?').get(ledger) as {
-      n: number;
-    }).n;
+    const before = (
+      this.#db.prepare(`SELECT COUNT(*) AS n FROM events ${where.clause}`).get(...where.values) as {
+        n: number;
+      }
+    ).n;
     if (before === 0) return 0;
 
+    // One transaction, which is what keeps the side tables honest: the
+    // event_addresses and event_topics rows go with their events through
+    // ON DELETE CASCADE, and events_fts through trg_events_fts_delete. Nothing
+    // here deletes from them by hand, so there is no second code path to
+    // forget when a fourth side table arrives -- but there is also nothing in
+    // this method proving it, hence the orphan assertions in the tests.
     this.#db.exec('BEGIN');
     try {
-      this.#db.prepare('DELETE FROM events WHERE ledger < ?').run(ledger);
+      this.#db.prepare(`DELETE FROM events ${where.clause}`).run(...where.values);
       this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.exec('ROLLBACK');
       throw error;
     }
 
+    // Those rows are gone, but a cached COUNT(*) would still report them.
+    this.#countCache.clear();
+
     // VACUUM cannot run inside a transaction and reclaims the space the
-    // deleted rows held — without it the file never shrinks, which defeats
+    // deleted rows held -- without it the file never shrinks, which defeats
     // the entire point of pruning for disk usage. It takes an exclusive lock
     // and rewrites the whole file, so it is deliberately synchronous with the
     // delete rather than deferred: a caller running `lens prune` wants the
     // file smaller when the command returns, not eventually.
     //
     // In WAL mode VACUUM writes its result through the WAL rather than
-    // truncating the main file directly — the file on disk does not actually
+    // truncating the main file directly -- the file on disk does not actually
     // shrink until a checkpoint flushes and truncates that WAL, so both run
     // together here.
     if (this.#path !== ':memory:') {
@@ -851,22 +878,6 @@ export class SqliteEventStore implements EventStore {
     return before;
   }
 
-  /**
-   * Prune the oldest ledgers until the database plus its WAL fits under
-   * `targetBytes`, then checkpoint. Returns what was removed.
-   *
-   * Deletes in chunks (whole ledgers at a time, oldest first) rather than one
-   * giant DELETE: a single statement over millions of rows holds the write
-   * lock for the whole scan, and the indexer cannot insert behind it. A chunk
-   * is a bounded pause, and re-measuring between chunks is what lets the loop
-   * stop as soon as the file is actually small enough — the file size, not a
-   * row count, is the thing being targeted.
-   *
-   * VACUUM runs once at the end, not per chunk: it rewrites the whole file,
-   * so doing it per chunk would be O(chunks × file size) of work for the same
-   * result. The final checkpoint flushes the WAL so the on-disk total the
-   * caller measures next actually reflects the prune.
-   */
   async pruneToSize(targetBytes: number, chunkLedgers = 1000): Promise<PruneToSizeResult> {
     this.#assertWritable('pruneToSize');
     const CHUNK_LEDGERS = Math.max(1, chunkLedgers);
@@ -1488,6 +1499,33 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
  * quotes, doubling any quote already inside (FTS5's own escaping rule for a
  * quote character within a quoted string).
  */
+/**
+ * The WHERE clause for a prune, built once and used by both the count and the
+ * DELETE so they cannot disagree about what is about to go.
+ *
+ * Both columns it filters on are already indexed --
+ * `idx_events_contract_id_desc` and `idx_events_closed_at_unix` -- so neither
+ * shape is a full scan.
+ */
+function pruneWhere(filter: ResolvedPruneFilter): { clause: string; values: SqlParam[] } {
+  const conditions: string[] = [];
+  const values: SqlParam[] = [];
+  if (filter.contractId !== undefined) {
+    conditions.push('contract_id = ?');
+    values.push(filter.contractId);
+  }
+  if (filter.beforeLedger !== undefined) {
+    conditions.push('ledger < ?');
+    values.push(filter.beforeLedger);
+  }
+  if (filter.beforeClosedAtUnix !== undefined) {
+    conditions.push('closed_at_unix < ?');
+    values.push(filter.beforeClosedAtUnix);
+  }
+  // resolvePruneFilter has already refused an empty filter.
+  return { clause: `WHERE ${conditions.join(' AND ')}`, values };
+}
+
 function ftsPhraseQuery(text: string): string {
   return `"${text.replace(/"/g, '""')}"`;
 }

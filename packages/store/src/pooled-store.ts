@@ -7,7 +7,7 @@ import {
   type ReadMethod,
   type ReadWorkerData,
 } from './pool-protocol.js';
-import type { EventStore, PruneToSizeResult } from './store.js';
+import type { EventStore, PruneFilter, PruneToSizeResult } from './store.js';
 import type {
   AddressContractSummary,
   ContractPage,
@@ -380,6 +380,10 @@ export class PooledSqliteEventStore implements EventStore {
 
   async pruneBefore(ledger: number): Promise<number> {
     return this.#writer.pruneBefore(ledger);
+  }
+
+  async prune(filter: PruneFilter): Promise<number> {
+    return this.#writer.prune(filter);
   }
 
   async deleteEvents(ids: string[]): Promise<number> {
