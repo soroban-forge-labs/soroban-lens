@@ -177,6 +177,46 @@ Node's built-in driver, not `better-sqlite3`. No native compilation, so
 which is what makes the READMG's zero-setup claim true. WAL mode is on, so the
 API reads while the indexer writes.
 
+## Pooled reads
+
+Because `node:sqlite` is synchronous, a store method runs to completion on the
+event loop of whichever thread calls it. In the API that is the thread serving
+HTTP, so one `?search=` matching most of the table holds up every other
+request, `/health` included (#159).
+
+`PooledSqliteEventStore` serves reads from a small pool of worker threads, each
+with its own `readOnly: true` connection:
+
+```js
+import { PooledSqliteEventStore } from '@soroban-lens/store';
+
+const store = await PooledSqliteEventStore.open({ path: './data/lens.db', readOnly: true, poolSize: 2 });
+```
+
+It implements `EventStore` and nothing else — **the trait above is unchanged**,
+which is the point: the API takes it by injection, and the shared conformance
+suite runs against it unmodified. A factory rather than a constructor because
+spawning a thread is async, the same reason `PostgresEventStore.connect` exists.
+The API uses it by default at two workers; `LENS_READ_POOL_SIZE=0` serves every
+read on the request thread, as builds before this did.
+
+Writes are not pooled. SQLite has one writer and the schema belongs to it, so
+every write, every migration, and the three read-shaped methods that actually
+write — `exportSnapshot`, `checkpoint`, `writeProbe` — run on the calling
+thread. `getLatestEventId` is also left there deliberately: it is `SELECT
+MAX(id)` on an indexed column and the round trip to a worker costs more than
+the query.
+
+Three things to know before reaching for it. A pool needs a real file —
+`:memory:` is private to one connection, so `open()` rejects it rather than
+handing back workers that read an empty database. Each worker keeps its own
+count cache, so `EventPage.totalIsEstimate` can differ between two identical
+requests within the cache's TTL. And `log` and `now` are not forwarded to
+workers, because functions do not survive `postMessage`; a test injecting a
+fake clock wants the unpooled store.
+
+See [ADR-009](../../docs/adr/009-pooled-reads.md) for the alternatives that lost.
+
 ## Adding a backend
 
 1. Implement `EventStore`.
@@ -218,7 +258,7 @@ loses nothing.
 
 ## Performance
 
-Two benchmarks live in `bench/`, not `test/` — they insert hundreds of
+Six benchmarks live in `bench/`, not `test/` — they insert hundreds of
 thousands to a million synthetic rows, which is slow and irrelevant to
 correctness, so they never run in `npm test` or CI:
 
@@ -228,6 +268,7 @@ npm run bench:insert -w @soroban-lens/store            # #27
 npm run bench:xdr-compression -w @soroban-lens/store   # #35
 npm run bench:address-index -w @soroban-lens/store     # #23
 npm run bench:fts-search -w @soroban-lens/store         # #32
+npm run bench:read-pool -w @soroban-lens/store         # #159
 ```
 
 `insert-strategies.bench.js` (#27) measured `insertDecoded`'s one-prepared-statement-per-row approach against multi-row `VALUES` batching and PRRAMA
@@ -261,6 +302,26 @@ parse, plus extractAddresses' walk of the raw ScVal tree) to find what it
 mentions. Both numbers are reported as measured, not smoothed over — the
 address filter is for the selective case, and the benchmark shows both where
 it wins and where it does not.
+
+`read-pool.bench.js` (#159) inserted 100,000 synthetic rows and kept one
+unselective `?search=` running while cheap point lookups arrived every 20ms on a
+fixed schedule, measured from when each *should* have been served rather than
+from dispatch — on a blocked thread a request cannot even be dispatched on time,
+and measuring from dispatch hides the whole stall. Served on the calling thread,
+those cheap reads saw a p99 of 379ms and the event loop ran up to 721ms late.
+On two worker threads: p99 15.9ms and 15.5ms of lag, a 24x improvement on the
+number the API's other clients actually feel.
+
+The pool achieves that by moving the waiting, not by making anything faster, and
+the same benchmark's isolated phase is there to keep that claim honest: with
+nothing competing, the search costs 238ms unpooled and 245ms pooled, while a
+point lookup goes from 0.109ms to 0.428ms — the message round trip, and the
+reason `getLatestEventId` is deliberately left on the calling thread. Opening
+the pool costs about 1.3s for two workers, almost all of it the Stellar SDK
+loading in each thread rather than thread creation. The count of completed
+searches is reported but should be read as noise unless it moves a long way: it
+has landed both above and below the unpooled count across runs of the same
+configuration.
 
 ## Tests
 

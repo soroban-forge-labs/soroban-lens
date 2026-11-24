@@ -17,7 +17,8 @@
     "bench:insert": "npm run build && node bench/insert-strategies.bench.js",
     "bench:xdr-compression": "npm run build && node bench/xdr-compression.bench.js",
     "bench:address-index": "npm run build && node bench/address-index.bench.js",
-    "bench:fts-search": "npm run build && node bench/fts-search.bench.js"
+    "bench:fts-search": "npm run build && node bench/fts-search.bench.js",
+    "bench:read-pool": "npm run build && node bench/read-pool.bench.js"
   },
   "dependencies": { "@stellar/stellar-sdk": "^17.4.0" },
   "peerDependencies": { "pg": "^8.13.0" },

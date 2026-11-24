@@ -13,6 +13,7 @@ that were rejected. Read these before reopening a settled design discussion.
 | [006](006-raw-xdr.md) | Retain raw XDR and never throw on decode |
 | [007](007-eventstore-trait.md) | The API depends on `EventStore`, not SQLite |
 | [008](008-v01-boundaries.md) | v0.1 has no auth, one network per database, no deep backfill |
+| [009](009-pooled-reads.md) | Serve store reads from a worker thread pool |
 
 New records use [000-template.md](000-template.md). Copy it, number it with the
 next free three-digit number, and open a PR. Superseding a decision means adding

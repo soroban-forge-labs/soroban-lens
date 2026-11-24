@@ -35,6 +35,9 @@ export {
 export { SqliteEventStore, INDEXED_TOPIC_DEPTH } from './sqlite-store.js';
 export type { SqliteStoreOptions } from './sqlite-store.js';
 
+export { PooledSqliteEventStore } from './pooled-store.js';
+export type { PooledStoreOptions } from './pooled-store.js';
+
 export { PostgresEventStore } from './postgres-store.js';
 export type { PostgresStoreOptions, PgPool, PgClient, PgQueryable, PgQueryResult } from './postgres-store.js';
 export { POSTGRES_MIGRATIONS } from './postgres-schema.js';
