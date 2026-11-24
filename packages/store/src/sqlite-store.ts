@@ -36,8 +36,18 @@ export interface SqliteStoreOptions {
   migrateOnOpen?: boolean;
   /**
    * Open the file read-only: no migration, no WAL setup, no checkpoint timer,
-   * and SQLite refuses every write. For consumers that never write (the API).
-   * An unmigrated database is then reported by getStats/health, not fixed.
+   * and every write method throws before it reaches SQLite. For consumers that
+   * never write (the API), and for pointing a reader at a snapshot another
+   * process owns. An unmigrated database is then reported by getStats/health,
+   * not fixed.
+   *
+   * `exportSnapshot` and `backupTo` still work: both only read this store and
+   * write somewhere else, which is exactly what a read-only snapshot is for.
+   * `writeProbe` answers `{ ok: false }` rather than throwing, since "can this
+   * be written to" is the question it exists to answer.
+   *
+   * Rejected for ':memory:', which this connection creates empty — there would
+   * be nothing to read.
    */
   readOnly?: boolean;
   /**
@@ -108,6 +118,7 @@ export class SqliteEventStore implements EventStore {
   readonly #countCacheTtlMs: number;
   readonly #now: () => number;
   readonly #sizeTargetBytes: number | undefined;
+  readonly #readOnly: boolean;
   readonly #countCache = new Map<string, { total: number; expiresAt: number }>();
   #statements: Statements | null = null;
   #checkpointTimer: ReturnType<typeof setInterval> | undefined;
@@ -119,7 +130,15 @@ export class SqliteEventStore implements EventStore {
     this.#countCacheTtlMs = options.countCacheTtlMs ?? 2000;
     this.#now = options.now ?? Date.now;
     this.#sizeTargetBytes = options.sizeTargetBytes;
-    const readOnly = options.readOnly === true && options.path !== ':memory:';
+    // ':memory:' is created by this connection, so there is nothing to open
+    // read-only and nothing another process could be writing. Honouring the
+    // flag is impossible and ignoring it silently gave a store that cheerfully
+    // accepted writes, so it is refused.
+    if (options.readOnly === true && options.path === ':memory:') {
+      throw new Error('readOnly has no meaning for an in-memory database, which this connection creates empty');
+    }
+    const readOnly = options.readOnly === true;
+    this.#readOnly = readOnly;
     if (options.path !== ':memory:' && !readOnly) mkdirSync(dirname(options.path), { recursive: true });
     this.#db = new DatabaseSync(options.path, readOnly ? { readOnly: true } : {});
 
@@ -155,11 +174,35 @@ export class SqliteEventStore implements EventStore {
     return this.#path;
   }
 
+  /** Whether this connection was opened read-only. */
+  get readOnly(): boolean {
+    return this.#readOnly;
+  }
+
+  /**
+   * Refuse a write on a read-only connection, before SQLite does.
+   *
+   * SQLite's own refusal is correct but unhelpful: `attempt to write a readonly
+   * database` says nothing about *why* this database is read-only, and for
+   * `PRAGMA wal_checkpoint` it surfaces as `disk I/O error`, which reads like
+   * failing hardware. An operator who pointed the indexer at a read-only
+   * snapshot deserves to be told that, not sent to check their disk.
+   */
+  #assertWritable(method: string): void {
+    if (!this.#readOnly) return;
+    throw new Error(
+      `${method}() needs to write, but this store was opened read-only (${this.#path}). ` +
+        'Open it without `readOnly` to write, or point the writer at a database it owns.',
+    );
+  }
+
   async migrate(): Promise<void> {
+    this.#assertWritable('migrate');
     this.#migrateSync();
   }
 
   async migrateDown(toVersion: number): Promise<number[]> {
+    this.#assertWritable('migrateDown');
     const applied = (
       this.#db.prepare('SELECT version, name FROM schema_migrations ORDER BY version DESC').all() as {
         version: number;
@@ -258,10 +301,12 @@ export class SqliteEventStore implements EventStore {
   }
 
   async insertEvents(events: RawEventInput[]): Promise<number> {
+    this.#assertWritable('insertEvents');
     return this.insertDecoded(events.map((e) => decodeEvent(e)));
   }
 
   async insertDecoded(events: LensEvent[]): Promise<number> {
+    this.#assertWritable('insertDecoded');
     if (events.length === 0) return 0;
     const stmt = this.#prepared().insert;
 
@@ -621,6 +666,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async saveContractSpec(record: ContractSpecRecord): Promise<void> {
+    this.#assertWritable('saveContractSpec');
     this.#db
       .prepare(
         `INSERT INTO contract_specs (contract_id, source, wasm_hash, entries_xdr, event_count, error, fetched_at)
@@ -661,6 +707,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async saveStreamState(state: StreamState): Promise<void> {
+    this.#assertWritable('saveStreamState');
     this.#db
       .prepare(
         `INSERT INTO stream_state (key, cursor, ledger, updated_at, latest_ledger, latest_ledger_seen_at)
@@ -720,6 +767,12 @@ export class SqliteEventStore implements EventStore {
    * a concurrent reader could observe half-applied.
    */
   async writeProbe(): Promise<{ ok: boolean; detail: string }> {
+    // Deliberately not #assertWritable: this method's whole job is to answer
+    // "can this store be written to", and a read-only store is a legitimate
+    // answer of no, not an error for the caller to handle.
+    if (this.#readOnly) {
+      return { ok: false, detail: `opened read-only, so writes are refused by configuration (${this.#path})` };
+    }
     try {
       this.#db.exec('BEGIN IMMEDIATE');
       try {
@@ -736,6 +789,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async deleteEvents(ids: string[]): Promise<number> {
+    this.#assertWritable('deleteEvents');
     if (ids.length === 0) return 0;
     let removed = 0;
     this.#db.exec('BEGIN');
@@ -759,6 +813,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async pruneBefore(ledger: number): Promise<number> {
+    this.#assertWritable('pruneBefore');
     // A separate count-then-delete rather than reading `changes` off the
     // DELETE: `changes` after a DELETE is exact too, but a second statement
     // that only counts what will go lets us log or reject a huge prune before
@@ -813,6 +868,7 @@ export class SqliteEventStore implements EventStore {
    * caller measures next actually reflects the prune.
    */
   async pruneToSize(targetBytes: number, chunkLedgers = 1000): Promise<PruneToSizeResult> {
+    this.#assertWritable('pruneToSize');
     const CHUNK_LEDGERS = Math.max(1, chunkLedgers);
     let ledgers = 0;
     let events = 0;
@@ -878,6 +934,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async redecode(all = false): Promise<number> {
+    this.#assertWritable('redecode');
     const rows = this.#rawRows(all ? '' : 'WHERE decode_error IS NOT NULL');
     if (rows.length === 0) return 0;
 
@@ -958,6 +1015,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async repairRow(id: string): Promise<void> {
+    this.#assertWritable('repairRow');
     const rows = this.#rawRows('WHERE id = ?', [id]);
     if (rows.length === 0) return;
     const { params, event } = this.#recompute(rows[0]!);
@@ -1046,6 +1104,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async rebuildSearchIndex(): Promise<void> {
+    this.#assertWritable('rebuildSearchIndex');
     if (!this.#searchAvailable) {
       throw new Error('rebuildSearchIndex requires the FTS5 SQLite extension, which this build does not have.');
     }
@@ -1070,12 +1129,17 @@ export class SqliteEventStore implements EventStore {
    * `VACUUM INTO` reads one snapshot — and refuses to overwrite an existing file.
    */
   async backupTo(destPath: string): Promise<void> {
+    // Writes only destPath; see exportSnapshot for why read-only is fine here.
     if (this.#path === ':memory:') throw new Error('an in-memory database has nothing on disk to back up');
     if (existsSync(destPath)) throw new Error(`${destPath} already exists; refusing to overwrite it`);
     this.#db.prepare('VACUUM INTO ?').run(destPath);
   }
 
   async exportSnapshot(destPath: string): Promise<number> {
+    // Not #assertWritable, deliberately: every write here lands in destPath and
+    // a temporary file beside it, never in this store. Exporting from a
+    // read-only snapshot is a reason the option exists, not a violation of it.
+    //
     // VACUUM INTO takes a consistent, point-in-time copy even while another
     // connection (the indexer) is mid-write — it is SQLite's own supported
     // mechanism for exactly this, which is why the issue names it directly.
@@ -1106,6 +1170,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async importSnapshot(srcPath: string): Promise<number> {
+    this.#assertWritable('importSnapshot');
     const lines = createInterface({ input: createReadStream(srcPath, { encoding: 'utf8' }) });
     const BATCH_SIZE = 500;
     let batch: LensEvent[] = [];
@@ -1144,6 +1209,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async checkpoint(mode: 'PASSIVE' | 'FULL' | 'RESTART' | 'TRUNCATE' = 'TRUNCATE'): Promise<void> {
+    this.#assertWritable('checkpoint');
     if (this.#path === ':memory:') return; // no WAL file to checkpoint
     // The mode is typed and only ever one of four literal SQL keywords, never
     // interpolated from anything a caller could inject.

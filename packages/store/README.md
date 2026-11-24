@@ -177,6 +177,35 @@ Node's built-in driver, not `better-sqlite3`. No native compilation, so
 which is what makes the READMG's zero-setup claim true. WAL mode is on, so the
 API reads while the indexer writes.
 
+## Read-only
+
+`readOnly: true` opens the file with SQLite's read-only flag and skips the
+migration, the WAL pragma and the checkpoint timer. The API uses it so a bug in
+a handler cannot write, and it is how you point a reader at a snapshot another
+process owns — a read-only store tracks a file the indexer is still writing,
+which is what WAL is for.
+
+```js
+const store = new SqliteEventStore({ path: './data/lens.db', readOnly: true });
+await store.insertEvents(events); // throws, naming the method and the file
+```
+
+Every write method throws before reaching SQLite (#158). The guard exists for
+the error message rather than the refusal: SQLite already says `attempt to write
+a readonly database`, which does not say *why* this database is read-only, and
+for `PRAGMA wal_checkpoint` it surfaces as `disk I/O error` — which sends an
+operator to check their disk instead of their configuration.
+
+Three deliberate exceptions. `exportSnapshot` and `backupTo` keep working,
+because both only read this store and write elsewhere; exporting from a
+read-only snapshot is a reason the option exists. And `writeProbe` answers
+`{ ok: false }` instead of throwing, since "can this be written to" is the
+question it exists to answer — `lens doctor` prints the answer.
+
+`readOnly` is refused for `:memory:`, which the connection creates empty: there
+would be nothing to read, and the option used to be dropped silently, leaving a
+store that accepted every write.
+
 ## Pooled reads
 
 Because `node:sqlite` is synchronous, a store method runs to completion on the
