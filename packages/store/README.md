@@ -144,6 +144,38 @@ user could predict or type.
 Event ids are fixed-width 30 characters and sort lexicographically in ledger
 order, which is why keyset pagination is a plain string comparison.
 
+## Topic counts by position
+
+`listTopics` counts one topic position for a contract, most frequent first. It
+defaults to position 0, which is where the event name lives:
+
+```js
+await store.listTopics(id);                  // transfer=2, fee=34
+await store.listTopics(id, { position: 1 }); // who: 18 distinct addresses
+await store.listTopics(id, { position: 2 }); // the counterparty
+await store.listTopics(id, { position: 1, limit: 10 });
+```
+
+Position 0 answers "what kinds of event does this contract emit"; the question
+people actually have about a SAC is usually "who", and that is position 1 or 2
+(#153). Positions run 0–3, the four held in their own columns — past that they
+live in the `event_topics` side table (#164) and an out-of-range position
+throws rather than quietly returning nothing.
+
+Values at those positions are addresses, and a Stellar address is an account
+(`G…`) **or** a contract (`C…`) — the fixture contains one transfer sent by a
+contract, so code that assumes `G` is wrong one time in eighteen there.
+
+No index was added. `EXPLAIN QUERY PLAN` shows positions 1–3 served by
+`idx_events_contract_id_desc`, narrowing on the contract and then grouping in a
+temp B-tree — an index search, not the full scan #153 made the condition for
+adding one. It is not free: at 40,000 rows for a single contract, position 0
+took about 5ms against 33ms for position 1, because only position 0 has the
+covering `idx_events_contract_topic0`. Three more covering indexes would close
+that gap and cost three more writes on every insert, which is a trade worth
+making against a measurement rather than ahead of one.
+`test/topics.test.js` asserts the plan so a regression to a scan fails loudly.
+
 ## Pruning
 
 `prune(filter)` deletes events by contract, by age, or both (#154). It is the

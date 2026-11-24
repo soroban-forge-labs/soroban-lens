@@ -622,7 +622,7 @@ const schema: Record<string, ObjectDef> = {
         size: 'limit',
         args: { contractId: { type: 'String', required: true }, limit: { type: 'Int' } },
         resolve: (_s, args, { store }) =>
-          store.listTopics(assertContractId(args['contractId'] as string), boundedLimit(args['limit'])),
+          store.listTopics(assertContractId(args['contractId'] as string), { limit: boundedLimit(args['limit']) }),
       },
     },
   },
@@ -676,7 +676,7 @@ const schema: Record<string, ObjectDef> = {
         size: 'limit',
         args: { limit: { type: 'Int' } },
         resolve: (source, args, { store }) =>
-          store.listTopics((source as ContractSummary).contractId, boundedLimit(args['limit'])),
+          store.listTopics((source as ContractSummary).contractId, { limit: boundedLimit(args['limit']) }),
       },
       events: {
         type: { name: 'EventPage', nonNull: true },

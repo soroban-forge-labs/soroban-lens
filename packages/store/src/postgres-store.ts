@@ -7,6 +7,8 @@ import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION } from './schema.js';
 import { POSTGRES_MIGRATIONS } from './postgres-schema.js';
 import {
+  topicColumn,
+  type ListTopicsOptions,
   normaliseLimit,
   resolvePruneFilter,
   type EventStore,
@@ -534,15 +536,18 @@ export class PostgresEventStore implements EventStore {
     }));
   }
 
-  async listTopics(contractId: string, limit = 50): Promise<{ topic: string; count: number }[]> {
+  async listTopics(contractId: string, options: ListTopicsOptions = {}): Promise<{ topic: string; count: number }[]> {
+    // Interpolated, not bound: a column name cannot be a parameter. Safe
+    // because topicColumn() returns one of four literals or throws.
+    const column = topicColumn(options.position);
     const { rows } = await this.#pool.query(
-      `SELECT topic0 AS topic, COUNT(*)::int AS count
+      `SELECT ${column} AS topic, COUNT(*)::int AS count
        FROM events
-       WHERE contract_id = $1 AND topic0 IS NOT NULL
-       GROUP BY topic0
+       WHERE contract_id = $1 AND ${column} IS NOT NULL
+       GROUP BY ${column}
        ORDER BY count DESC, topic COLLATE "C" ASC
        LIMIT $2`,
-      [contractId, normaliseLimit(limit)],
+      [contractId, normaliseLimit(options.limit)],
     );
     return rows.map((r) => ({ topic: String(r['topic']), count: Number(r['count']) }));
   }

@@ -7,7 +7,7 @@ import {
   type ReadMethod,
   type ReadWorkerData,
 } from './pool-protocol.js';
-import type { EventStore, PruneFilter, PruneToSizeResult } from './store.js';
+import type { EventStore, ListTopicsOptions, PruneFilter, PruneToSizeResult } from './store.js';
 import type {
   AddressContractSummary,
   ContractPage,
@@ -277,8 +277,11 @@ export class PooledSqliteEventStore implements EventStore {
     return this.#read('summarizeAddress', [address]);
   }
 
-  async listTopics(contractId: string, limit?: number): Promise<{ topic: string; count: number }[]> {
-    return this.#read('listTopics', [contractId, limit]);
+  async listTopics(
+    contractId: string,
+    options?: ListTopicsOptions,
+  ): Promise<{ topic: string; count: number }[]> {
+    return this.#read('listTopics', [contractId, options]);
   }
 
   async countByTopic(limit?: number): Promise<TopicCount[]> {

@@ -12,6 +12,8 @@ import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
 import {
+  topicColumn,
+  type ListTopicsOptions,
   normaliseLimit,
   resolvePruneFilter,
   type EventStore,
@@ -577,17 +579,20 @@ export class SqliteEventStore implements EventStore {
     }));
   }
 
-  async listTopics(contractId: string, limit = 50): Promise<{ topic: string; count: number }[]> {
+  async listTopics(contractId: string, options: ListTopicsOptions = {}): Promise<{ topic: string; count: number }[]> {
+    // Interpolated, not bound: a column name cannot be a parameter. Safe
+    // because topicColumn() returns one of four literals or throws.
+    const column = topicColumn(options.position);
     const rows = this.#db
       .prepare(
-        `SELECT topic0 AS topic, COUNT(*) AS count
+        `SELECT ${column} AS topic, COUNT(*) AS count
          FROM events
-         WHERE contract_id = ? AND topic0 IS NOT NULL
-         GROUP BY topic0
+         WHERE contract_id = ? AND ${column} IS NOT NULL
+         GROUP BY ${column}
          ORDER BY count DESC
          LIMIT ?`,
       )
-      .all(contractId, normaliseLimit(limit)) as { topic: string; count: number }[];
+      .all(contractId, normaliseLimit(options.limit)) as { topic: string; count: number }[];
     return rows.map((r) => ({ topic: r.topic, count: r.count }));
   }
 

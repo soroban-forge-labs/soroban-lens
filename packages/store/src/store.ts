@@ -110,8 +110,16 @@ export interface EventStore {
   /** Per-contract counts and first/last ledger for events mentioning `address`. */
   summarizeAddress(address: string): Promise<AddressContractSummary[]>;
 
-  /** Distinct first-topic values for a contract, for building filter UIs. */
-  listTopics(contractId: string, limit?: number): Promise<{ topic: string; count: number }[]>;
+  /**
+   * Distinct topic values at one position for a contract, most frequent first,
+   * for building filter UIs.
+   *
+   * Defaults to position 0, which for a SAC is just `transfer`/`mint`/`burn`.
+   * The interesting question is usually a position further in: on a SAC
+   * transfer, `position: 1` is the senders and `position: 2` the receivers
+   * (#153).
+   */
+  listTopics(contractId: string, options?: ListTopicsOptions): Promise<{ topic: string; count: number }[]>;
 
   /**
    * Distinct first-topic values across every indexed contract, most frequent
@@ -252,6 +260,48 @@ export interface EventStore {
   repairRow(id: string): Promise<void>;
 
   close(): Promise<void>;
+}
+
+/**
+ * A topic position held in its own indexed column, `topic0`…`topic3`.
+ *
+ * Positions past this live in the `event_topics` side table instead (#164) and
+ * are not countable this way; see `INDEXED_TOPIC_DEPTH`.
+ */
+export type TopicPosition = 0 | 1 | 2 | 3;
+
+export interface ListTopicsOptions {
+  limit?: number;
+  /** Which topic position to count. Defaults to 0. */
+  position?: TopicPosition;
+}
+
+/**
+ * Validate a topic position and return the column holding it.
+ *
+ * Shared by every implementation for two reasons: so none of them disagrees
+ * about the accepted range, and because the result is interpolated into SQL
+ * rather than bound — a column name cannot be a parameter. Returning the name
+ * from one validated switch is what keeps that safe; building `topic${n}` from
+ * an unchecked number at each call site would not be.
+ */
+export function topicColumn(position: TopicPosition | undefined): string {
+  switch (position) {
+    case undefined:
+    case 0:
+      return 'topic0';
+    case 1:
+      return 'topic1';
+    case 2:
+      return 'topic2';
+    case 3:
+      return 'topic3';
+    default:
+      throw new Error(
+        `listTopics: position must be 0, 1, 2 or 3, got ${String(position)}. ` +
+          'Topics past the fourth are stored in event_topics, not a column of their own.',
+      );
+  }
 }
 
 /**

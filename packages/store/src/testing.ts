@@ -293,6 +293,98 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  /**
+   * The contract with the most events carrying a topic at `position`, and the
+   * counts it should produce.
+   *
+   * Derived from the store's own decoded events rather than hardcoded, because
+   * the fixture is real captured data and a replacement should move these
+   * numbers rather than break the test. `queryEvents` is independently covered
+   * above, so leaning on it here is not circular in any way that matters.
+   */
+  async function expectedTopics(store: EventStore, position: number) {
+    const all = await store.queryEvents({ limit: 1000 });
+    const perContract = new Map<string, Map<string, number>>();
+    for (const event of all.events) {
+      const value = event.topics[position]?.value;
+      if (typeof value !== 'string') continue;
+      const counts = perContract.get(event.contractId) ?? new Map<string, number>();
+      counts.set(value, (counts.get(value) ?? 0) + 1);
+      perContract.set(event.contractId, counts);
+    }
+    const [contractId, counts] = [...perContract.entries()].sort(
+      (a, b) => [...b[1].values()].reduce((x, y) => x + y, 0) - [...a[1].values()].reduce((x, y) => x + y, 0),
+    )[0]!;
+    return { contractId, counts };
+  }
+
+  test(`[${name}] listTopics counts the first topic by default`, async () => {
+    const store = await seeded();
+    const { contractId, counts } = await expectedTopics(store, 0);
+
+    const topics = await store.listTopics(contractId);
+    assert.deepEqual(
+      new Map(topics.map((t) => [t.topic, t.count])),
+      counts,
+      'the default output changed',
+    );
+    // Every spelling of "position 0" agrees, so the default is genuinely the
+    // old behaviour and not merely similar to it.
+    assert.deepEqual(await store.listTopics(contractId, {}), topics);
+    assert.deepEqual(await store.listTopics(contractId, { position: 0 }), topics);
+    // Most frequent first.
+    for (let i = 1; i < topics.length; i++) assert.ok(topics[i - 1]!.count >= topics[i]!.count);
+    await store.close();
+  });
+
+  test(`[${name}] listTopics counts a later position, which is where the addresses are`, async () => {
+    const store = await seeded();
+    // On a SAC transfer, topic0 is just `transfer` and topic1 is the sender —
+    // the question #153 exists to answer.
+    const { contractId, counts } = await expectedTopics(store, 1);
+    assert.ok(counts.size > 0, 'the fixture needs a contract with a second topic');
+
+    const topics = await store.listTopics(contractId, { position: 1 });
+    assert.deepEqual(new Map(topics.map((t) => [t.topic, t.count])), counts);
+    for (let i = 1; i < topics.length; i++) assert.ok(topics[i - 1]!.count >= topics[i]!.count);
+
+    // And it is genuinely different from position 0, or this proves nothing.
+    const first = await store.listTopics(contractId, { position: 0 });
+    assert.notDeepEqual(
+      topics.map((t) => t.topic),
+      first.map((t) => t.topic),
+    );
+    await store.close();
+  });
+
+  test(`[${name}] listTopics respects limit alongside position`, async () => {
+    const store = await seeded();
+    const { contractId, counts } = await expectedTopics(store, 1);
+    if (counts.size < 2) {
+      await store.close();
+      return;
+    }
+    const capped = await store.listTopics(contractId, { position: 1, limit: 1 });
+    assert.equal(capped.length, 1);
+    assert.equal(capped[0]!.count, Math.max(...counts.values()));
+    await store.close();
+  });
+
+  test(`[${name}] listTopics refuses a position without a column`, async () => {
+    const store = await seeded();
+    const { contractId } = await expectedTopics(store, 0);
+    // Positions past the fourth live in event_topics (#164), so counting them
+    // this way would silently return nothing rather than fail.
+    for (const position of [4, -1, 1.5]) {
+      await assert.rejects(
+        () => store.listTopics(contractId, { position: position as 0 | 1 | 2 | 3 }),
+        /position must be 0, 1, 2 or 3/,
+        `position ${position} was accepted`,
+      );
+    }
+    await store.close();
+  });
+
   test(`[${name}] prune by contract leaves every other contract untouched`, async () => {
     const store = await seeded();
     const byContract = new Map<string, number>();
