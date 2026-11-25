@@ -9,6 +9,7 @@ import type {
   EventPage,
   EventQuery,
   LensEvent,
+  ListTopicsOptions,
   RawEventInput,
   StoreStats,
   StreamState,
@@ -110,8 +111,15 @@ export interface EventStore {
   /** Per-contract counts and first/last ledger for events mentioning `address`. */
   summarizeAddress(address: string): Promise<AddressContractSummary[]>;
 
-  /** Distinct first-topic values for a contract, for building filter UIs. */
-  listTopics(contractId: string, limit?: number): Promise<{ topic: string; count: number }[]>;
+  /**
+   * Distinct values at one topic position for a contract, for building
+   * filter UIs. A bare number keeps its old meaning (`limit`); an options
+   * object may also name the `position` (0–3, default 0) to count (#153).
+   */
+  listTopics(
+    contractId: string,
+    options?: number | ListTopicsOptions,
+  ): Promise<{ topic: string; count: number }[]>;
 
   /**
    * Distinct first-topic values across every indexed contract, most frequent
@@ -268,19 +276,12 @@ export function resolveMaxQueryLimit(raw: string | undefined): number {
   return Math.trunc(value);
 }
 export const DEFAULT_QUERY_LIMIT = 50;
-export const MAX_CONTRACT_IDS = 20;
 
-export function validateContractFilter(query: EventQuery): void {
-  if (query.contractId !== undefined && query.contractIds !== undefined) {
-    throw new Error('contractId and contractIds cannot be used together');
-  }
-  if (
-    query.contractIds !== undefined &&
-    (query.contractIds.length === 0 || query.contractIds.length > MAX_CONTRACT_IDS)
-  ) {
-    throw new Error(`contractIds must contain between 1 and ${MAX_CONTRACT_IDS} ids`);
-  }
-}
+/**
+ * Most contracts a single `EventQuery.contractIds` may OR together. Bound for
+ * the same reason `limit` is: an unbounded `IN` list is an unbounded plan.
+ */
+export const MAX_QUERY_CONTRACT_IDS = 20;
 
 export function normaliseLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_QUERY_LIMIT;
