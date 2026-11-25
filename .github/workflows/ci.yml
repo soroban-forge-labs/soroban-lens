@@ -127,6 +127,18 @@ jobs:
         # a type error, and a spec version bump without a client bump is caught
         # by check-version.
         run: npm run build
+      - name: Fail when client types drift from openapi.json
+        # Regenerates the client's request/response types from the committed
+        # spec and fails with a diff if the checked-in types are stale. Run
+        # `npm run generate:types` in packages/client to refresh them.
+        run: |
+          set -euo pipefail
+          npm run generate:types
+          if ! git diff --exit-code -- src/generated; then
+            echo "::error::Client types are out of date with packages/api/openapi.json. Run 'npm run generate:types' in packages/client and commit the result."
+            git --no-pager diff -- src/generated
+            exit 1
+          fi
 
   docker:
     name: docker compose builds and serves

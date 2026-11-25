@@ -79,6 +79,18 @@ Committed, and the same file the server serves at `/openapi.json`, so the two
 cannot drift. A test asserts every implemented route appears in the spec: add a
 route without documenting it and CI fails.
 
+The client's request/response types in `apps/web/src/types.ts` are generated
+from `openapi.json`. Do not hand-edit them. After changing the spec, regenerate
+and commit the result:
+
+```bash
+npm run gen:types        # regenerate apps/web/src/types.ts from openapi.json
+npm run check:types      # verify committed types match the spec (CI runs this)
+```
+
+`check:types` fails the build with a diff when the committed types are stale, so
+a spec change that forgets the client types cannot land.
+
 ## Getting set up
 
 ```bash
