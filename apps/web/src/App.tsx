@@ -87,6 +87,7 @@ function AppInner(): React.JSX.Element {
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityRange, setActivityRange] = useState<ActivityRange | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorRequestId, setErrorRequestId] = useState<string | undefined>(undefined);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -340,6 +341,7 @@ function AppInner(): React.JSX.Element {
         return;
       }
       setError(err instanceof ApiRequestError ? err.message : String(err));
+      setErrorRequestId(err instanceof ApiRequestError ? err.requestId : undefined);
     } finally {
       if (isCurrent()) setLoading(false);
     }
@@ -361,6 +363,7 @@ function AppInner(): React.JSX.Element {
       setTotalIsEstimate(page.totalIsEstimate ?? false);
     } catch (err) {
       setError(err instanceof ApiRequestError ? err.message : String(err));
+      setErrorRequestId(err instanceof ApiRequestError ? err.requestId : undefined);
     } finally {
       setLoadingMore(false);
     }
@@ -634,6 +637,20 @@ function AppInner(): React.JSX.Element {
       {error && contractIdValid && (
         <p className="warning banner" role="alert">
           {error}
+          {errorRequestId && (
+            <span style={{ display: 'block', marginTop: '4px', fontSize: '11px' }}>
+              Request ID:{' '}
+              <code style={{ fontFamily: 'monospace' }}>{errorRequestId}</code>{' '}
+              <button
+                type="button"
+                className="link-button"
+                style={{ fontSize: '11px' }}
+                onClick={() => void navigator.clipboard.writeText(errorRequestId)}
+              >
+                copy
+              </button>
+            </span>
+          )}
         </p>
       )}
 
