@@ -66,8 +66,8 @@ export function Filters({
         >
           <option value="">Choose an indexed contract…</option>
           {knownContracts.map((contract) => (
-            <option key={contract.contractId} value={contract.contractId}>
-              {contract.contractId} · {contract.eventCount.toLocaleString()} events · Last activity{' '}
+            <option key={contract.contractId} value={contract.contractId} title={contract.label ? contract.contractId : undefined}>
+              {contract.label ? `${contract.label} (${contract.contractId.slice(0, 8)}…)` : contract.contractId} · {contract.eventCount.toLocaleString()} events · Last activity{' '}
               {new Date(contract.lastSeenAt).toLocaleString()}
             </option>
           ))}

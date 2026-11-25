@@ -751,6 +751,7 @@ function AppInner(): React.JSX.Element {
           onTopicClick={(topic) => changeFilters({ ...filters, topic })}
           absolute={absoluteTime}
           emptyMessage={emptyMessage}
+          contractLabels={Object.fromEntries(contracts.filter((c) => c.label).map((c) => [c.contractId, c.label!]))}
         />
       </ErrorBoundary>
 

@@ -24,6 +24,8 @@ interface Props {
   onToggleSelect: (id: string) => void;
   /** Whether the Ledger column shows absolute time instead of relative. */
   absolute: boolean;
+  /** Lookup from contractId to its human-readable label (Module 3). */
+  contractLabels?: Record<string, string>;
 }
 
 interface Viewport {
@@ -43,6 +45,7 @@ interface Viewport {
  */
 export function EventTable({
   events, network, expandedEventIds, onToggleExpanded, showContract, onTopicClick, loading, emptyMessage, selectedIds, onToggleSelect, absolute,
+  contractLabels,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
   const virtualized = events.length > VIRTUALIZE_ABOVE;
@@ -210,6 +213,7 @@ export function EventTable({
             onToggleSelect={onToggleSelect}
             absolute={absolute}
             onNavigate={navigate}
+            contractLabel={contractLabels?.[event.contractId]}
             // +2: aria-rowindex is 1-based and the header row is row 1.
             rowIndex={virtualized ? range.start + i + 2 : undefined}
           />

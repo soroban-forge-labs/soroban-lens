@@ -26,12 +26,14 @@ interface Props {
   onNavigate: (eventId: string, delta: 1 | -1) => void;
   /** 1-based position among all loaded rows, for screen readers when only some are rendered. */
   rowIndex?: number | undefined;
+  /** Human-readable label for this event's contract, when available (Module 3). Full id shown on hover. */
+  contractLabel?: string | undefined;
 }
 
 /** One table row, expanding in place to show the full decoded payload. */
 export function EventRow({
   event, network, expanded, onToggleExpanded, showContract, onTopicClick, selected, onToggleSelect, absolute,
-  onNavigate, rowIndex,
+  onNavigate, rowIndex, contractLabel,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
   const firstTopic = event.topics[0];
@@ -97,7 +99,7 @@ export function EventRow({
         </td>
         {showContract && (
           <td className="col-contract" title={event.contractId}>
-            <span className="mono">{truncate(event.contractId)}</span>
+            <span className="mono">{contractLabel ?? truncate(event.contractId)}</span>
             <CopyButton value={event.contractId} label="contract ID" />
           </td>
         )}
