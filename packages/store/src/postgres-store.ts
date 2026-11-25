@@ -301,13 +301,55 @@ export class PostgresEventStore implements EventStore {
     // and Module 1 replays it on restart.
     return this.#tx(async (db) => {
       let inserted = 0;
+      const summaryDeltas = new Map<
+        string,
+        { contractId: string; eventCount: number; firstLedger: number; lastLedger: number; lastSeenAt: string }
+      >();
       for (const e of events) {
         // ON CONFLICT DO NOTHING gives idempotency on the event id, which is what
         // makes Module 1's at-least-once delivery safe to replay.
         const result = await db.query(INSERT_EVENT, insertParams(e));
         const changed = result.rowCount ?? 0;
         inserted += changed;
-        if (changed > 0) await this.#insertAddresses(db, e.id, e);
+        if (changed > 0) {
+          const delta = summaryDeltas.get(e.contractId);
+          if (delta) {
+            delta.eventCount++;
+            delta.firstLedger = Math.min(delta.firstLedger, e.ledger);
+            delta.lastLedger = Math.max(delta.lastLedger, e.ledger);
+            delta.lastSeenAt = delta.lastSeenAt > e.ledgerClosedAt ? delta.lastSeenAt : e.ledgerClosedAt;
+          } else {
+            summaryDeltas.set(e.contractId, {
+              contractId: e.contractId,
+              eventCount: 1,
+              firstLedger: e.ledger,
+              lastLedger: e.ledger,
+              lastSeenAt: e.ledgerClosedAt,
+            });
+          }
+          await this.#insertAddresses(db, e.id, e);
+        }
+      }
+      const deltas = [...summaryDeltas.values()];
+      if (deltas.length > 0) {
+        await db.query(
+          `INSERT INTO contract_summaries (contract_id, event_count, first_ledger, last_ledger, last_seen_at)
+           SELECT delta.contract_id, delta.event_count, delta.first_ledger, delta.last_ledger, delta.last_seen_at
+             FROM unnest($1::text[], $2::integer[], $3::integer[], $4::integer[], $5::text[])
+                  AS delta(contract_id, event_count, first_ledger, last_ledger, last_seen_at)
+           ON CONFLICT (contract_id) DO UPDATE SET
+             event_count = contract_summaries.event_count + EXCLUDED.event_count,
+             first_ledger = LEAST(contract_summaries.first_ledger, EXCLUDED.first_ledger),
+             last_ledger = GREATEST(contract_summaries.last_ledger, EXCLUDED.last_ledger),
+             last_seen_at = GREATEST(contract_summaries.last_seen_at, EXCLUDED.last_seen_at)`,
+          [
+            deltas.map((delta) => delta.contractId),
+            deltas.map((delta) => delta.eventCount),
+            deltas.map((delta) => delta.firstLedger),
+            deltas.map((delta) => delta.lastLedger),
+            deltas.map((delta) => delta.lastSeenAt),
+          ],
+        );
       }
       return inserted;
     });
@@ -461,12 +503,11 @@ export class PostgresEventStore implements EventStore {
   async listContracts(limit = 100): Promise<ContractSummary[]> {
     const { rows } = await this.#pool.query(
       `SELECT contract_id,
-              COUNT(*)::int         AS event_count,
-              MIN(ledger)           AS first_ledger,
-              MAX(ledger)           AS last_ledger,
-              MAX(ledger_closed_at) AS last_seen_at
-       FROM events
-       GROUP BY contract_id
+              event_count,
+              first_ledger,
+              last_ledger,
+              last_seen_at
+       FROM contract_summaries
        ORDER BY last_ledger DESC, contract_id ASC
        LIMIT $1`,
       [normaliseLimit(limit)],
@@ -487,15 +528,25 @@ export class PostgresEventStore implements EventStore {
       c?.snapshot ??
       Number((await this.#pool.query('SELECT COALESCE(MAX(ledger), 0) AS m FROM events')).rows[0]?.['m'] ?? 0);
     const { rows } = await this.#pool.query(
-      `SELECT contract_id,
-              COUNT(*)::int         AS event_count,
-              MIN(ledger)           AS first_ledger,
-              MAX(ledger)           AS last_ledger,
-              MAX(ledger_closed_at) AS last_seen_at
-       FROM events
-       WHERE ledger <= $1
-       GROUP BY contract_id
-       ${c ? 'HAVING MAX(ledger) < $3 OR (MAX(ledger) = $3 AND contract_id COLLATE "C" > $4)' : ''}
+      `WITH snapshot AS (SELECT $1::integer AS ledger),
+       affected AS (
+         SELECT contract_id FROM contract_summaries
+          WHERE last_ledger > (SELECT ledger FROM snapshot)
+       ),
+       snapshot_summaries AS (
+         SELECT contract_id, event_count, first_ledger, last_ledger, last_seen_at
+           FROM contract_summaries
+          WHERE last_ledger <= (SELECT ledger FROM snapshot)
+         UNION ALL
+         SELECT e.contract_id, COUNT(*)::int, MIN(e.ledger), MAX(e.ledger), MAX(e.ledger_closed_at)
+           FROM events e
+           JOIN affected a ON a.contract_id = e.contract_id
+          WHERE e.ledger <= (SELECT ledger FROM snapshot)
+          GROUP BY e.contract_id
+       )
+       SELECT contract_id, event_count, first_ledger, last_ledger, last_seen_at
+         FROM snapshot_summaries
+       ${c ? 'WHERE last_ledger < $3 OR (last_ledger = $3 AND contract_id COLLATE "C" > $4)' : ''}
        ORDER BY last_ledger DESC, contract_id COLLATE "C" ASC
        LIMIT $2`,
       c ? [snapshot, size + 1, c.lastLedger, c.contractId] : [snapshot, size + 1],
@@ -721,17 +772,32 @@ export class PostgresEventStore implements EventStore {
 
   async deleteEvents(ids: string[]): Promise<number> {
     if (ids.length === 0) return 0;
-    // One array parameter rather than a list of placeholders; event_addresses
-    // rows go via ON DELETE CASCADE, as for pruneBefore.
-    const result = await this.#pool.query('DELETE FROM events WHERE id = ANY($1::text[])', [ids]);
-    return result.rowCount ?? 0;
+    return this.#tx(async (db) => {
+      const { rows: affected } = await db.query(
+        'SELECT DISTINCT contract_id FROM events WHERE id = ANY($1::text[])',
+        [ids],
+      );
+      const result = await db.query('DELETE FROM events WHERE id = ANY($1::text[])', [ids]);
+      await this.#refreshContractSummaries(
+        db,
+        affected.map((row) => String(row['contract_id'])),
+      );
+      return result.rowCount ?? 0;
+    });
   }
 
   async pruneBefore(ledger: number): Promise<number> {
-    // No VACUUM: autovacuum reclaims the space, and a manual one would block
-    // other writers for no benefit. event_addresses rows go via ON DELETE CASCADE.
-    const result = await this.#pool.query('DELETE FROM events WHERE ledger < $1', [ledger]);
-    return result.rowCount ?? 0;
+    return this.#tx(async (db) => {
+      const { rows: affected } = await db.query('SELECT DISTINCT contract_id FROM events WHERE ledger < $1', [
+        ledger,
+      ]);
+      const result = await db.query('DELETE FROM events WHERE ledger < $1', [ledger]);
+      await this.#refreshContractSummaries(
+        db,
+        affected.map((row) => String(row['contract_id'])),
+      );
+      return result.rowCount ?? 0;
+    });
   }
 
   /**
@@ -763,12 +829,20 @@ export class PostgresEventStore implements EventStore {
       if (oldest === null || oldest === undefined) break;
       const cutoff = Number(oldest) + chunk;
       // Whole ledgers only: a half-pruned ledger would leave a gap mid-history.
-      const result = await this.#pool.query(
-        'WITH gone AS (DELETE FROM events WHERE ledger < $1 RETURNING ledger) ' +
-          'SELECT COUNT(*) AS n, COUNT(DISTINCT ledger) AS l, MAX(ledger) AS top FROM gone',
-        [cutoff],
-      );
-      const row = result.rows[0] ?? {};
+      const row = await this.#tx(async (db) => {
+        const stats = await db.query(
+          'SELECT COUNT(*)::int AS n, COUNT(DISTINCT ledger)::int AS l, MAX(ledger) AS top FROM events WHERE ledger < $1',
+          [cutoff],
+        );
+        const affected = await db.query('SELECT DISTINCT contract_id FROM events WHERE ledger < $1', [cutoff]);
+        if (Number(stats.rows[0]?.['n'] ?? 0) === 0) return stats.rows[0] ?? {};
+        await db.query('DELETE FROM events WHERE ledger < $1', [cutoff]);
+        await this.#refreshContractSummaries(
+          db,
+          affected.rows.map((item) => String(item['contract_id'])),
+        );
+        return stats.rows[0] ?? {};
+      });
       const deleted = Number(row['n'] ?? 0);
       if (deleted === 0) break;
       rowsRemoved += deleted;
@@ -799,6 +873,23 @@ export class PostgresEventStore implements EventStore {
     const rows = await this.#rawRows('WHERE id = $1', [id]);
     if (rows.length === 0) return;
     await this.#tx((db) => this.#rewrite(db, rows[0]!));
+  }
+
+  async repairContractSummary(contractId: string): Promise<void> {
+    await this.#tx((db) => this.#refreshContractSummaries(db, [contractId]));
+  }
+
+  async #refreshContractSummaries(db: PgQueryable, contractIds: string[]): Promise<void> {
+    if (contractIds.length === 0) return;
+    await db.query('DELETE FROM contract_summaries WHERE contract_id = ANY($1::text[])', [contractIds]);
+    await db.query(
+      `INSERT INTO contract_summaries (contract_id, event_count, first_ledger, last_ledger, last_seen_at)
+       SELECT contract_id, COUNT(*)::int, MIN(ledger), MAX(ledger), MAX(ledger_closed_at)
+         FROM events
+        WHERE contract_id = ANY($1::text[])
+        GROUP BY contract_id`,
+      [contractIds],
+    );
   }
 
   async #rawRows(whereClause: string, params: unknown[] = []): Promise<Record<string, unknown>[]> {
@@ -861,14 +952,14 @@ export class PostgresEventStore implements EventStore {
     await this.#insertAddresses(db, raw.id, event);
   }
 
-  async checkIntegrity(): Promise<{ id: string; problems: string[] }[]> {
+  async checkIntegrity(): Promise<{ kind: 'event' | 'contract_summary'; id: string; problems: string[] }[]> {
     const { rows } = await this.#pool.query(
       `SELECT id, topics_json, topics_xdr_json, value_json, topic_count,
               topic0, topic1, topic2, topic3
        FROM events`,
     );
 
-    const results: { id: string; problems: string[] }[] = [];
+    const results: { kind: 'event' | 'contract_summary'; id: string; problems: string[] }[] = [];
     for (const row of rows) {
       const problems: string[] = [];
       // JSONB guarantees the columns parse; what is left to check is their shape.
@@ -892,9 +983,82 @@ export class PostgresEventStore implements EventStore {
           if (expected !== actual) problems.push(`topic${i} is "${actual}", expected "${expected}" from topics_json`);
         });
       }
-      if (problems.length > 0) results.push({ id: String(row['id']), problems });
+      if (problems.length > 0) results.push({ kind: 'event', id: String(row['id']), problems });
     }
+    results.push(...(await this.#contractSummaryProblems()));
     return results;
+  }
+
+  async #contractSummaryProblems(): Promise<
+    { kind: 'contract_summary'; id: string; problems: string[] }[]
+  > {
+    const [actualResult, summaryResult] = await Promise.all([
+      this.#pool.query(
+        `SELECT contract_id, COUNT(*)::int AS event_count, MIN(ledger) AS first_ledger,
+                MAX(ledger) AS last_ledger, MAX(ledger_closed_at) AS last_seen_at
+         FROM events
+         GROUP BY contract_id`,
+      ),
+      this.#pool.query(
+        'SELECT contract_id, event_count, first_ledger, last_ledger, last_seen_at FROM contract_summaries',
+      ),
+    ]);
+    type SummaryRow = {
+      contract_id: string;
+      event_count: number;
+      first_ledger: number;
+      last_ledger: number;
+      last_seen_at: string;
+    };
+    const actualById = new Map<string, SummaryRow>(
+      actualResult.rows.map((row): [string, SummaryRow] => [
+        String(row['contract_id']),
+        {
+          contract_id: String(row['contract_id']),
+          event_count: Number(row['event_count']),
+          first_ledger: Number(row['first_ledger']),
+          last_ledger: Number(row['last_ledger']),
+          last_seen_at: String(row['last_seen_at']),
+        },
+      ]),
+    );
+    const storedById = new Map<string, SummaryRow>(
+      summaryResult.rows.map((row): [string, SummaryRow] => [
+        String(row['contract_id']),
+        {
+          contract_id: String(row['contract_id']),
+          event_count: Number(row['event_count']),
+          first_ledger: Number(row['first_ledger']),
+          last_ledger: Number(row['last_ledger']),
+          last_seen_at: String(row['last_seen_at']),
+        },
+      ]),
+    );
+    const ids = new Set([...actualById.keys(), ...storedById.keys()]);
+    const problems: { kind: 'contract_summary'; id: string; problems: string[] }[] = [];
+    for (const id of ids) {
+      const expected = actualById.get(id);
+      const stored = storedById.get(id);
+      if (
+        !expected ||
+        !stored ||
+        expected.event_count !== stored.event_count ||
+        expected.first_ledger !== stored.first_ledger ||
+        expected.last_ledger !== stored.last_ledger ||
+        expected.last_seen_at !== stored.last_seen_at
+      ) {
+        problems.push({
+          kind: 'contract_summary',
+          id,
+          problems: [
+            `contract summary is ${stored ? JSON.stringify(stored) : 'missing'}, expected ${
+              expected ? JSON.stringify(expected) : 'no events'
+            }`,
+          ],
+        });
+      }
+    }
+    return problems;
   }
 
   /**
