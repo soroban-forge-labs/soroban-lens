@@ -6,7 +6,7 @@ import { decodeEvent, topicKey, topicType, extractAddresses } from './decode.js'
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION } from './schema.js';
 import { POSTGRES_MIGRATIONS } from './postgres-schema.js';
-import { normaliseLimit, type EventStore, type PruneToSizeResult } from './store.js';
+import { normaliseLimit, MAX_QUERY_CONTRACT_IDS, type EventStore, type PruneToSizeResult } from './store.js';
 import type {
   ContractSpecRecord,
   AddressContractSummary,
@@ -16,6 +16,7 @@ import type {
   EventPage,
   EventQuery,
   LensEvent,
+  ListTopicsOptions,
   RawEventInput,
   StoreStats,
   StreamState,
@@ -528,12 +529,24 @@ export class PostgresEventStore implements EventStore {
     }));
   }
 
-  async listTopics(contractId: string, limit = 50): Promise<{ topic: string; count: number }[]> {
+  async listTopics(
+    contractId: string,
+    options: number | ListTopicsOptions = {},
+  ): Promise<{ topic: string; count: number }[]> {
+    // A bare number is the old signature's `limit`; the object form also
+    // names the topic position (#153).
+    const { position = 0, limit = 50 } = typeof options === 'number' ? { limit: options } : options;
+    const column = TOPIC_COLUMNS[position];
+    if (column === undefined || !Number.isInteger(position)) {
+      throw new RangeError(`listTopics position must be an integer 0-${TOPIC_COLUMNS.length - 1}, got ${position}`);
+    }
+    // `column` comes from TOPIC_COLUMNS, never from the caller, so the
+    // interpolated name cannot be an injection vector.
     const { rows } = await this.#pool.query(
-      `SELECT topic0 AS topic, COUNT(*)::int AS count
+      `SELECT ${column} AS topic, COUNT(*)::int AS count
        FROM events
-       WHERE contract_id = $1 AND topic0 IS NOT NULL
-       GROUP BY topic0
+       WHERE contract_id = $1 AND ${column} IS NOT NULL
+       GROUP BY ${column}
        ORDER BY count DESC, topic COLLATE "C" ASC
        LIMIT $2`,
       [contractId, normaliseLimit(limit)],
@@ -1071,7 +1084,27 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
     return `$${values.length}`;
   };
 
+  // contractId and contractIds are the same restriction written two ways —
+  // honouring both would AND them, which silently means "the overlap only".
+  if (query.contractId !== undefined && query.contractIds !== undefined) {
+    throw new RangeError('query sets both contractId and contractIds; use one or the other');
+  }
+  if (query.contractIds !== undefined && query.contractIds.length > MAX_QUERY_CONTRACT_IDS) {
+    throw new RangeError(
+      `contractIds is capped at ${MAX_QUERY_CONTRACT_IDS} ids, got ${query.contractIds.length}`,
+    );
+  }
   if (query.contractId) conditions.push(`contract_id = ${param(query.contractId)}`);
+  if (query.contractIds !== undefined) {
+    if (query.contractIds.length === 0) {
+      // An explicitly empty list is the empty set: it must match nothing, not
+      // become "no filter" and match everything.
+      conditions.push('FALSE');
+    } else {
+      conditions.push(`contract_id IN (${query.contractIds.map((id) => param(id)).join(', ')})`);
+    }
+  }
+  if (query.type !== undefined) conditions.push(`type = ${param(query.type)}`);
   if (query.txHash) conditions.push(`tx_hash = ${param(query.txHash)}`);
   if (query.search) {
     // A substring match over the stored JSON text, case-insensitive like the
@@ -1101,13 +1134,12 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
   if (query.successfulOnly === true) conditions.push('in_successful_call = TRUE');
 
   // `topicTypes` runs parallel to `topics` (#146); see the SQLite store.
-  const columns = ['topic0', 'topic1', 'topic2', 'topic3'] as const;
   const depth = Math.max(query.topics?.length ?? 0, query.topicTypes?.length ?? 0);
   for (let i = 0; i < depth; i++) {
     const topic = query.topics?.[i] ?? null;
     const type = query.topicTypes?.[i] ?? null;
     if (topic === null && type === null) continue;
-    const column = columns[i];
+    const column = TOPIC_COLUMNS[i];
     if (!column) {
       const parts = [`position = ${param(i)}`];
       if (topic !== null) parts.push(`topic = ${param(topic)}`);
@@ -1121,6 +1153,9 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
 
   return { clause: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '', values };
 }
+
+/** The indexed topic columns, in position order — the only valid `topicN` names. */
+const TOPIC_COLUMNS = ['topic0', 'topic1', 'topic2', 'topic3'] as const;
 
 function likeEscape(text: string): string {
   return text.replace(/[\\%_]/g, (c) => `\\${c}`);
