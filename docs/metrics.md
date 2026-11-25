@@ -88,3 +88,37 @@ gated on the first acknowledged page. A separate alert detects an unavailable
 endpoint. Route firing alerts through your existing Alertmanager configuration.
 
 The endpoint uses the [Prometheus text exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/).
+
+## Grafana dashboard
+
+`docs/grafana-dashboard.json` is a ready-made dashboard built only on the
+metrics above: ingestion rate, ledger lag, RPC latency percentiles, RPC errors
+by kind, and cursor restarts. It has no datasource baked in, so it binds to
+whatever Prometheus datasource you pick at import time.
+
+1. Start Prometheus with `--config.file=docs/prometheus.yml` as described above
+   and confirm the `lens` target is `UP` under **Status → Targets**.
+2. In Grafana, add a Prometheus datasource pointing at that Prometheus (for
+   example `http://localhost:9091` if you moved Prometheus off port 9090). This
+   is the only prerequisite; the dashboard does not create datasources.
+3. Import the dashboard: **Dashboards → New → Import**, upload
+   `docs/grafana-dashboard.json` (or paste its contents), then select the
+   Prometheus datasource when prompted and click **Import**. The dashboard UID
+   is fixed, so re-importing updates the existing copy instead of duplicating
+   it.
+
+Every panel needs a running indexer with `LENS_METRICS_PORT` set and at least
+one acknowledged page, so that Prometheus has scraped the series. Until then
+panels show "No data" rather than errors:
+
+- Ingestion rate and cursor restarts need `lens_events_ingested_total` and
+  `lens_cursor_restarts_total`; the restart panel stays empty until a retention
+  gap forces a cursor clear.
+- Lag panels read `lens_current_ledger` and `lens_latest_ledger`, which appear
+  after the first page.
+- RPC latency percentiles and errors by kind need
+  `lens_rpc_request_duration_seconds` and `lens_rpc_errors_total`; the error
+  panel is empty while no attempt fails.
+
+Metrics reset on indexer restart, so rate panels need a couple of scrape
+intervals (15 seconds each) to show a value after a restart.

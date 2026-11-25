@@ -12,7 +12,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.js"
+    "test": "npm run build && node --test test/*.test.js",
+    "test:coverage": "npm run build && node --test --experimental-test-coverage test/*.test.js"
   },
   "dependencies": { "@soroban-lens/store": "*" },
   "devDependencies": { "typescript": "^7.0.2", "@types/node": "^26.6.6" }

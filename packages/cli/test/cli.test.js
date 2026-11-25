@@ -536,3 +536,64 @@ test('--contracts-file: account id on line 2 reports line 2', async () => {
     await _rm(dir, { recursive: true, force: true });
   }
 });
+
+// ── #215 lens.config.json ─────────────────────────────────────────────────────
+
+test('a lens.config.json file drives the resolved config', async () => {
+  const dir = await _mkdtemp(join(tmpdir(), 'lens-cli-cfg-'));
+  try {
+    const configPath = join(dir, 'lens.config.json');
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        LENS_CONTRACT_IDS: [FAKE_IDS[0], FAKE_IDS[1]],
+        LENS_DB_PATH: join(dir, 'from-file.db'),
+        LENS_PAGE_SIZE: 50,
+      }),
+    );
+    const config = resolveConfig({ configFile: configPath }, {});
+    assert.deepEqual(config.contractIds, [FAKE_IDS[0], FAKE_IDS[1]]);
+    assert.equal(config.dbPath, join(dir, 'from-file.db'));
+    assert.equal(config.pageSize, 50);
+  } finally {
+    await _rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a LENS_* env var overrides the config file value', async () => {
+  const dir = await _mkdtemp(join(tmpdir(), 'lens-cli-cfg-'));
+  try {
+    const configPath = join(dir, 'lens.config.json');
+    await writeFile(
+      configPath,
+      JSON.stringify({ LENS_DB_PATH: join(dir, 'from-file.db'), LENS_PAGE_SIZE: 50 }),
+    );
+    const config = resolveConfig(
+      { configFile: configPath },
+      { LENS_DB_PATH: join(dir, 'from-env.db'), LENS_PAGE_SIZE: '75' },
+    );
+    assert.equal(config.dbPath, join(dir, 'from-env.db'));
+    assert.equal(config.pageSize, 75);
+  } finally {
+    await _rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('flags still override both the config file and the environment', async () => {
+  const dir = await _mkdtemp(join(tmpdir(), 'lens-cli-cfg-'));
+  try {
+    const configPath = join(dir, 'lens.config.json');
+    await writeFile(
+      configPath,
+      JSON.stringify({ LENS_DB_PATH: join(dir, 'from-file.db'), LENS_PAGE_SIZE: 50 }),
+    );
+    const config = resolveConfig(
+      { configFile: configPath, db: join(dir, 'from-flag.db'), pageSize: 10 },
+      { LENS_DB_PATH: join(dir, 'from-env.db'), LENS_PAGE_SIZE: '75' },
+    );
+    assert.equal(config.dbPath, join(dir, 'from-flag.db'));
+    assert.equal(config.pageSize, 10);
+  } finally {
+    await _rm(dir, { recursive: true, force: true });
+  }
+});
