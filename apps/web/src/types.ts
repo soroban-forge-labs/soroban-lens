@@ -98,6 +98,16 @@ export interface Health {
   schemaVersion: number;
 }
 
+/**
+ * The RPC endpoint the indexer is currently using (#110). `label` is a
+ * human-readable name (e.g. "primary", "backup-1"), never the raw URL.
+ */
+export interface ActiveProvider {
+  label: string;
+  /** True when this is the configured primary endpoint, not a failover. */
+  primary: boolean;
+}
+
 /** `GET /status`: store statistics plus the indexer's stored cursors. */
 export interface IndexerStatus {
   eventCount: number;
@@ -107,6 +117,8 @@ export interface IndexerStatus {
   schemaVersion: number;
   /** One per indexer stream. Empty until the indexer has run at least once. */
   streams: { key: string; cursor: string; ledger: number; updatedAt: string }[];
+  /** Absent on older API versions that predate provider reporting (#110). */
+  activeProvider?: ActiveProvider;
 }
 
 export interface TopicCount {

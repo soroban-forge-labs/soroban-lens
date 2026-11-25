@@ -201,13 +201,4 @@ export const api = {
     });
     if (params.successfulOnly) search.set('successfulOnly', 'true');
     for (const topic of params.topics ?? []) search.append('topic', topic);
-    return request<ContractActivity>(
-      baseUrl,
-      `/contracts/${encodeURIComponent(contractId)}/activity?${search}`,
-      signal,
-    );
-  },
-
-  topics: (baseUrl: string, contractId: string, signal?: AbortSignal): Promise<{ topics: TopicCount[] }> =>
-    request<{ topics: TopicCount[] }>(baseUrl, `/contracts/${encodeURIComponent(contractId)}/topics`, signal),
-};
+    ret

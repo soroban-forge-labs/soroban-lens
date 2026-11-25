@@ -27,6 +27,14 @@ export function StatusBar({
   const reported = health?.network ?? '';
   const mismatch = reported !== '' && reported !== 'unknown' && reported !== selected.label;
 
+  // The active RPC provider comes from /status (#110). Older APIs omit it, so
+  // we hide the indicator entirely rather than showing a misleading blank.
+  // We show the human label, never the raw URL, and warn when the indexer has
+  // failed over off the primary endpoint.
+  const provider = health?.rpcProvider;
+  const providerLabel = provider?.label ?? '';
+  const providerIsBackup = provider?.primary === false;
+
   return (
     <div className="status-bar">
       <div className="status-left">
@@ -54,6 +62,15 @@ export function StatusBar({
             <span className={`status-pill status-${health.status}`} role="status">
               {health.status === 'ok' ? t('connected') : t('degraded')}
             </span>
+            {providerLabel !== '' && (
+              <span
+                className={`status-pill small${providerIsBackup ? ' status-warning' : ''}`}
+                role="status"
+                title={providerIsBackup ? t('rpcProviderBackup') : t('rpcProviderPrimary')}
+              >
+                {t('rpcProvider', { provider: providerLabel })}
+              </span>
+            )}
             <span className="muted small">
               {t('healthStats', {
                 count: health.events.toLocaleString(),
