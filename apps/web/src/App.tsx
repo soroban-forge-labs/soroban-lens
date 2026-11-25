@@ -87,6 +87,7 @@ function AppInner(): React.JSX.Element {
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityRange, setActivityRange] = useState<ActivityRange | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // Transaction events panel (#65)
@@ -397,8 +398,9 @@ function AppInner(): React.JSX.Element {
       setNextCursor(page.nextCursor);
       setTotal(page.total);
       setTotalIsEstimate(page.totalIsEstimate ?? false);
+      setLoadMoreError(null);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : String(err));
+      setLoadMoreError(err instanceof ApiRequestError ? err.message : String(err));
     } finally {
       setLoadingMore(false);
     }
@@ -881,14 +883,24 @@ function AppInner(): React.JSX.Element {
       )}
 
       {nextCursor && (
-        <button
-          type="button"
-          className="load-more"
-          onClick={() => void loadMore()}
-          disabled={loadingMore}
-        >
-          {loadingMore ? t('loadingMore') : t('loadMore', { count: PAGE_SIZE })}
-        </button>
+        <div className="load-more-wrap">
+          {loadMoreError && (
+            <p className="warning banner load-more-error" role="alert">
+              {loadMoreError}{' '}
+              <button type="button" className="retry-link" onClick={() => void loadMore()}>
+                Retry
+              </button>
+            </p>
+          )}
+          <button
+            type="button"
+            className="load-more"
+            onClick={() => void loadMore()}
+            disabled={loadingMore}
+          >
+            {loadingMore ? t('loadingMore') : t('loadMore', { count: PAGE_SIZE })}
+          </button>
+        </div>
       )}
 
       <footer className="app-footer">
