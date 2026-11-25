@@ -7,6 +7,9 @@ import type {
   IndexerStatus,
   LensEvent,
   TopicCount,
+  WebhookSubscription,
+  WebhookDelivery,
+  WebhookDeadLetter,
 } from './types.js';
 
 /**
@@ -119,6 +122,40 @@ async function request<T>(baseUrl: string, path: string, signal?: AbortSignal): 
   return (await response.json()) as T;
 }
 
+/**
+ * A request that carries the admin API key. Webhook management is admin-only,
+ * so the key travels in the `X-API-Key` header the API already checks.
+ */
+async function adminRequest<T>(
+  baseUrl: string,
+  path: string,
+  apiKey: string,
+  init: { method?: string; body?: unknown; signal?: AbortSignal } = {},
+): Promise<T> {
+  const headers: Record<string, string> = { Accept: 'application/json', 'X-API-Key': apiKey };
+  if (init.body !== undefined) headers['Content-Type'] = 'application/json';
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, {
+      method: init.method ?? 'GET',
+      signal: init.signal,
+      headers,
+      body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
+    throw new ApiRequestError(0, null, `Cannot reach the API at ${baseUrl}. Is it running?`);
+  }
+
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
+    throw new ApiRequestError(response.status, body, `Request failed with ${response.status}.`);
+  }
+  // 204 No Content (delete, ping, redeliver) has no body to parse.
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
 export interface EventQueryParams {
   contractId?: string;
   topics?: (string | null)[];
@@ -166,6 +203,11 @@ export function buildStreamPath(params: EventQueryParams): string {
   return query ? `/events/stream?${query}` : '/events/stream';
 }
 
+export interface CreateWebhookInput {
+  url: string;
+  filter?: EventQueryParams;
+}
+
 export const api = {
   health: (baseUrl: string, signal?: AbortSignal): Promise<Health> =>
     request<Health>(baseUrl, '/health', signal),
@@ -190,32 +232,27 @@ export const api = {
   resumeContract: (baseUrl: string, contractId: string, signal?: AbortSignal): Promise<ContractSummary> =>
     request<ContractSummary>(baseUrl, `/contracts/${encodeURIComponent(contractId)}/resume`, signal),
 
-  activity: (
-    baseUrl: string,
-    contractId: string,
-    params: {
-      bucket: 'minute' | 'hour' | 'day';
-      from: number;
-      to: number;
-      topics?: string[];
-      successfulOnly?: boolean;
-    },
-    signal?: AbortSignal,
-  ): Promise<ContractActivity> => {
-    const search = new URLSearchParams({
-      bucket: params.bucket,
-      from: String(params.from),
-      to: String(params.to),
-    });
-    if (params.successfulOnly) search.set('successfulOnly', 'true');
-    for (const topic of params.topics ?? []) search.append('topic', topic);
-    return request<ContractActivity>(
-      baseUrl,
-      `/contracts/${encodeURIComponent(contractId)}/activity?${search.toString()}`,
-      signal,
-    );
-  },
+  /** List webhook subscriptions with health, cursor lag and dead-letter counts. */
+  webhooks: (baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<{ subscriptions: WebhookSubscription[] }> =>
+    adminRequest<{ subscriptions: WebhookSubscription[] }>(baseUrl, '/webhooks', apiKey, { signal }),
 
-  topics: (baseUrl: string, signal?: AbortSignal): Promise<{ topics: TopicCount[] }> =>
-    request<{ topics: TopicCount[] }>(baseUrl, '/topics', signal),
+  /** Create a subscription. The filter is the same shape as an event query. */
+  createWebhook: (baseUrl: string, apiKey: string, input: CreateWebhookInput, signal?: AbortSignal): Promise<WebhookSubscription> =>
+    adminRequest<WebhookSubscription>(baseUrl, '/webhooks', apiKey, { method: 'POST', body: input, signal }),
+
+  /** Delete a subscription and its pending deliveries. */
+  deleteWebhook: (baseUrl: string, apiKey: string, id: string, signal?: AbortSignal): Promise<void> =>
+    adminRequest<void>(baseUrl, `/webhooks/${encodeURIComponent(id)}`, apiKey, { method: 'DELETE', signal }),
+
+  /** Send a test delivery to a subscription (#104). */
+  pingWebhook: (baseUrl: string, apiKey: string, id: string, signal?: AbortSignal): Promise<WebhookDelivery> =>
+    adminRequest<WebhookDelivery>(baseUrl, `/webhooks/${encodeURIComponent(id)}/ping`, apiKey, { method: 'POST', signal }),
+
+  /** Replay a subscription's dead letters (#102). */
+  redeliverWebhook: (baseUrl: string, apiKey: string, id: string, signal?: AbortSignal): Promise<{ redelivered: number }> =>
+    adminRequest<{ redelivered: number }>(baseUrl, `/webhooks/${encodeURIComponent(id)}/dead-letters/redeliver`, apiKey, { method: 'POST', signal }),
+
+  /** List a subscription's dead letters. */
+  webhookDeadLetters: (baseUrl: string, apiKey: string, id: string, signal?: AbortSignal): Promise<{ deadLetters: WebhookDeadLetter[] }> =>
+    adminRequest<{ deadLetters: WebhookDeadLetter[] }>(baseUrl, `/webhooks/${encodeURIComponent(id)}/dead-letters`, apiKey, { signal }),
 };
