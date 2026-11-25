@@ -9,6 +9,7 @@ import type {
   EventPage,
   EventQuery,
   LensEvent,
+  ListTopicsOptions,
   RawEventInput,
   StoreStats,
   StreamState,
@@ -110,8 +111,15 @@ export interface EventStore {
   /** Per-contract counts and first/last ledger for events mentioning `address`. */
   summarizeAddress(address: string): Promise<AddressContractSummary[]>;
 
-  /** Distinct first-topic values for a contract, for building filter UIs. */
-  listTopics(contractId: string, limit?: number): Promise<{ topic: string; count: number }[]>;
+  /**
+   * Distinct values at one topic position for a contract, for building
+   * filter UIs. A bare number keeps its old meaning (`limit`); an options
+   * object may also name the `position` (0–3, default 0) to count (#153).
+   */
+  listTopics(
+    contractId: string,
+    options?: number | ListTopicsOptions,
+  ): Promise<{ topic: string; count: number }[]>;
 
   /**
    * Distinct first-topic values across every indexed contract, most frequent
@@ -216,17 +224,19 @@ export interface EventStore {
   redecode(all?: boolean): Promise<number>;
 
   /**
-   * Check stored invariants: `topics_json` parses and its length matches
-   * `topic_count`; `topic0..3` match a fresh projection of the parsed
-   * topics; `value_json` and `topics_xdr_json` parse at all. Nothing writes
-   * these bugs today, but nothing has ever checked for them either — a disk
-   * fault, a hand edit, or a future migration bug could leave one behind.
-   * @returns one entry per row with a problem, empty when the database is clean.
+   * Check stored invariants: event JSON and topic projections are consistent,
+   * and contract_summaries match a fresh aggregate over events. Nothing writes
+   * these bugs today, but a disk fault, hand edit, or future migration bug
+   * could leave one behind.
+   * @returns one entry per affected event or contract summary.
    */
-  checkIntegrity(): Promise<{ id: string; problems: string[] }[]>;
+  checkIntegrity(): Promise<{ kind: 'event' | 'contract_summary'; id: string; problems: string[] }[]>;
 
   /** Recompute one row's derived columns from its stored raw XDR. */
   repairRow(id: string): Promise<void>;
+
+  /** Recompute one contract's summary from the events table. */
+  repairContractSummary(contractId: string): Promise<void>;
 
   close(): Promise<void>;
 }
@@ -268,6 +278,12 @@ export function resolveMaxQueryLimit(raw: string | undefined): number {
   return Math.trunc(value);
 }
 export const DEFAULT_QUERY_LIMIT = 50;
+
+/**
+ * Most contracts a single `EventQuery.contractIds` may OR together. Bound for
+ * the same reason `limit` is: an unbounded `IN` list is an unbounded plan.
+ */
+export const MAX_QUERY_CONTRACT_IDS = 20;
 
 export function normaliseLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_QUERY_LIMIT;

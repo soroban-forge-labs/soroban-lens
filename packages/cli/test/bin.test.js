@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { SqliteEventStore } from '@soroban-lens/store';
 
 const run = promisify(execFile);
 const BIN = fileURLToPath(new URL('../dist/bin.js', import.meta.url));
@@ -75,6 +76,27 @@ test('export then import round-trips through a real subprocess invocation', asyn
   assert.equal(JSON.parse(stats.stdout).eventCount, 60);
 
   await rm(dir, { recursive: true, force: true });
+});
+
+test('lens stats reports a decode error count and points at lens redecode (#160)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cli-stats-'));
+  const dbPath = join(dir, 'lens.db');
+  try {
+    assert.equal((await cli(['seed', '--db', dbPath])).code, 0);
+
+    // A stored row whose decode failed — the case the hint exists for.
+    const store = new SqliteEventStore({ path: dbPath });
+    const any = (await store.queryEvents({ limit: 1 })).events[0];
+    await store.insertDecoded([{ ...any, id: 'decode-error-row', decodeError: 'synthetic' }]);
+    await store.close();
+
+    const { code, stdout, stderr } = await cli(['stats', '--db', dbPath]);
+    assert.equal(code, 0, stderr);
+    assert.equal(JSON.parse(stdout).decodeErrorCount, 1);
+    assert.match(stderr, /redecode/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('export requires a destination path', async () => {
