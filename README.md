@@ -282,3 +282,6 @@ each client IP (see [packages/api](./packages/api/README.md)), and set
 
 <!-- handsoff-issue-315 -->
 - #315: 103. Rotate a webhook's signing secret
+
+<!-- handsoff-issue-317 -->
+- #317: 105. Show recent delivery attempts for a webhook
