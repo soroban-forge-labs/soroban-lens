@@ -67,6 +67,10 @@ Options:
   -d, --db <path>         SQLite file. (env LENS_DB_PATH, default ./data/lens.db)
       --data-dir <path>   Working directory for state. (env LENS_DATA_DIR)
       --start-ledger <n>  First ledger when no cursor is stored. (env LENS_START_LEDGER)
+      --end-ledger <n>    Stop after this ledger; index exits once reached. (env LENS_END_LEDGER)
+      --topic <t>         Topic filter, positional and repeatable; '*' matches any one
+                          position. (env LENS_TOPICS)
+      --type <t>          Event type filter: contract | system | diagnostic. (env LENS_EVENT_TYPE)
       --page-size <n>     Events per RPC page, 1-10000. (env LENS_PAGE_SIZE)
       --page-size-min <n> Let the page size adapt, no lower than this. (env LENS_PAGE_SIZE_MIN)
       --page-size-max <n> Let the page size adapt, no higher than this. (env LENS_PAGE_SIZE_MAX)
@@ -121,6 +125,9 @@ async function main(argv: string[]): Promise<number> {
       db: { type: 'string', short: 'd' },
       'data-dir': { type: 'string' },
       'start-ledger': { type: 'string' },
+      'end-ledger': { type: 'string' },
+      topic: { type: 'string', multiple: true },
+      type: { type: 'string' },
       'page-size': { type: 'string' },
       'page-size-min': { type: 'string' },
       'page-size-max': { type: 'string' },
@@ -141,7 +148,6 @@ async function main(argv: string[]): Promise<number> {
       fixture: { type: 'string' },
       'before-ledger': { type: 'string' },
       fix: { type: 'boolean' },
-      topic: { type: 'string', multiple: true },
       address: { type: 'string' },
       'tx-hash': { type: 'string' },
       search: { type: 'string' },
@@ -196,6 +202,9 @@ async function main(argv: string[]): Promise<number> {
     ...(values.db !== undefined ? { db: values.db } : {}),
     ...(values['data-dir'] !== undefined ? { dataDir: values['data-dir'] } : {}),
     ...(values['start-ledger'] !== undefined ? { startLedger: Number(values['start-ledger']) } : {}),
+    ...(values['end-ledger'] !== undefined ? { endLedger: Number(values['end-ledger']) } : {}),
+    ...(values.topic !== undefined ? { topics: values.topic } : {}),
+    ...(values.type !== undefined ? { eventType: values.type } : {}),
     ...(values['page-size'] !== undefined ? { pageSize: Number(values['page-size']) } : {}),
     ...(values['page-size-min'] !== undefined ? { pageSizeMin: Number(values['page-size-min']) } : {}),
     ...(values['page-size-max'] !== undefined ? { pageSizeMax: Number(values['page-size-max']) } : {}),
@@ -588,7 +597,7 @@ function generateCompletion(shell: string): string {
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
   commands="doctor index seed stats tail prune redecode verify migrate export import backup restore spec completion"
-  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --page-size-min --page-size-max --reorg-depth --poll-interval --once --max-events --fixture --before-ledger --force --fix --topic --address --tx-hash --search --successful-only --from-ledger --from-time --json -h --help"
+  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --end-ledger --topic --type --page-size --page-size-min --page-size-max --reorg-depth --poll-interval --once --max-events --fixture --before-ledger --force --fix --address --tx-hash --search --successful-only --from-ledger --from-time --json -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )

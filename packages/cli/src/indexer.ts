@@ -2,7 +2,10 @@ import {
   EventPoller, FailoverRpcClient, StellarArchiveSource, buildFilters, describeClockSkew, IngestMetrics,
   startMetricsServer, closeMetricsServer, parseMetricsPort,
 } from '@soroban-lens/ingest';
-import { existsSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { CursorStore, CursorState, ReorgDiff, ReorgStore, StoredEventRef } from '@soroban-lens/ingest';
 import { SqliteEventStore, MAX_QUERY_LIMIT } from '@soroban-lens/store';
 import type { EventStore } from '@soroban-lens/store';
@@ -126,6 +129,30 @@ export function databaseSizeBytes(dbPath: string): number {
 }
 
 /**
+ * Path of the heartbeat file for one stream. Keyed by the stream/cursor key so
+ * two indexers on one machine never overwrite each other's heartbeat (#207).
+ */
+export function heartbeatPath(streamKey: string): string {
+  const hash = createHash('sha256').update(streamKey).digest('hex').slice(0, 16);
+  return join(tmpdir(), `lens-heartbeat-${hash}.json`);
+}
+
+/**
+ * Writes the heartbeat file for a stream. Called on every completed poll, not
+ * every yielded batch, so a quiet contract at the tip stays healthy (#207).
+ */
+export function writeHeartbeat(streamKey: string, ledger: number, latestLedger: number): void {
+  try {
+    writeFileSync(
+      heartbeatPath(streamKey),
+      JSON.stringify({ stream: streamKey, ledger, latestLedger, at: new Date().toISOString() }),
+    );
+  } catch {
+    // A heartbeat that cannot be written must never stop indexing.
+  }
+}
+
+/**
  * Prunes oldest ledgers in chunks until the database (+ WAL) fits under
  * `sizeBytes`, then checkpoints to reclaim space. Returns the number of
  * ledgers removed. The store stops on its own once a chunk removes nothing,
@@ -196,6 +223,9 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       reorgDepth: config.reorgDepth,
       ...(config.pageSizeBounds ? { pageSizeBounds: config.pageSizeBounds } : {}),
       ...(config.startLedger !== undefined ? { startLedger: config.startLedger } : {}),
+      ...(config.endLedger !== undefined ? { endLedger: config.endLedger } : {}),
+      ...(config.topics && config.topics.length > 0 ? { topics: config.topics } : {}),
+      ...(config.eventTypes && config.eventTypes.length > 0 ? { eventTypes: config.eventTypes } : {}),
     },
     {
       client,
@@ -204,6 +234,9 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       reorgStore: new StoreBackedReorgs(store, config.contractIds),
       ...(options.signal ? { signal: options.signal } : {}),
       log,
+      // Written on every completed poll, even when the page yielded no events,
+      // so a quiet contract at the tip does not look unhealthy (#207).
+      onProgress: (progress) => writeHeartbeat(poller.cursorKey, progress.ledger, progress.latestLedger),
     },
   );
 
@@ -284,6 +317,10 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       void runSizePrune();
     }
 
+    // Write an initial heartbeat so the healthcheck passes before the first
+    // poll completes.
+    writeHeartbeat(poller.cursorKey, config.startLedger ?? 0, 0);
+
     for await (const batch of poller.stream()) {
       const added = await store.insertEvents(batch.events);
       // Watching every contract, the configured list is empty, so specs are
@@ -311,6 +348,10 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       }
       if (options.stopWhenCaughtUp && batch.progress.caughtUp) {
         log(`caught up at ledger ${batch.progress.latestLedger}`);
+        break;
+      }
+      if (config.endLedger !== undefined && batch.progress.ledger >= config.endLedger) {
+        log(`reached endLedger (${config.endLedger})`);
         break;
       }
     }

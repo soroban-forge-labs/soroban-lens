@@ -1,4 +1,11 @@
-import { resolveClockSkewThreshold, resolveNetwork, type NetworkConfig } from '@soroban-lens/ingest';
+import {
+  parseTopicFilters,
+  resolveClockSkewThreshold,
+  resolveEventType,
+  resolveNetwork,
+  type EventType,
+  type NetworkConfig,
+} from '@soroban-lens/ingest';
 
 /** Everything the CLI needs, resolved from flags then environment then defaults. */
 export interface LensConfig {
@@ -10,6 +17,19 @@ export interface LensConfig {
   dataDir: string;
   apiPort: number;
   startLedger: number | undefined;
+  /**
+   * Upper bound for indexing, from `--end-ledger` / `LENS_END_LEDGER`. When set,
+   * the indexer stops once it reaches this ledger instead of following the tip.
+   */
+  endLedger: number | undefined;
+  /**
+   * Topic filters, from `--topic` / `LENS_TOPIC` / `LENS_TOPICS`. Empty means
+   * every event. Parsed and validated by the ingest package so `lens index`
+   * and `soroban-lens-ingest` accept exactly the same syntax.
+   */
+  topics: string[][];
+  /** Event type filter, from `--type` / `LENS_EVENT_TYPE`. Undefined means all types. */
+  eventType: EventType | undefined;
   pageSize: number;
   /**
    * Bounds for an adaptive page size (#14), from `LENS_PAGE_SIZE_MIN` and
@@ -55,6 +75,9 @@ export interface ConfigOverrides {
   dataDir?: string | undefined;
   port?: number | undefined;
   startLedger?: number | undefined;
+  endLedger?: number | undefined;
+  topic?: string[] | undefined;
+  type?: string | undefined;
   pageSize?: number | undefined;
   pageSizeMin?: number | undefined;
   pageSizeMax?: number | undefined;
@@ -100,6 +123,9 @@ export function resolveConfig(
     dataDir: overrides.dataDir ?? env.LENS_DATA_DIR ?? './data',
     apiPort: overrides.port ?? numberOr(env.LENS_API_PORT, 8080),
     startLedger: overrides.startLedger ?? optionalNumber(env.LENS_START_LEDGER),
+    endLedger: overrides.endLedger ?? optionalNumber(env.LENS_END_LEDGER),
+    topics: parseTopicFilters(overrides.topic ?? splitList(env.LENS_TOPICS || env.LENS_TOPIC)),
+    eventType: resolveEventType(overrides.type ?? env.LENS_EVENT_TYPE),
     pageSize: overrides.pageSize ?? numberOr(env.LENS_PAGE_SIZE, 200),
     pageSizeBounds: pageSizeBounds(
       overrides.pageSizeMin ?? optionalNumber(env.LENS_PAGE_SIZE_MIN),
