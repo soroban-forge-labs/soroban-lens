@@ -749,6 +749,7 @@ function AppInner(): React.JSX.Element {
           selectedIds={selectedIdSet}
           onToggleSelect={toggleSelect}
           onTopicClick={(topic) => changeFilters({ ...filters, topic })}
+          onAddressClick={(addr) => changeFilters({ ...filters, [addr.startsWith('G') ? 'address' : 'contractId']: addr })}
           absolute={absoluteTime}
           emptyMessage={emptyMessage}
         />

@@ -26,12 +26,14 @@ interface Props {
   onNavigate: (eventId: string, delta: 1 | -1) => void;
   /** 1-based position among all loaded rows, for screen readers when only some are rendered. */
   rowIndex?: number | undefined;
+  /** Set the address or contract filter by clicking an address in a decoded field (#79). */
+  onAddressClick?: (address: string) => void;
 }
 
 /** One table row, expanding in place to show the full decoded payload. */
 export function EventRow({
   event, network, expanded, onToggleExpanded, showContract, onTopicClick, selected, onToggleSelect, absolute,
-  onNavigate, rowIndex,
+  onNavigate, rowIndex, onAddressClick,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
   const firstTopic = event.topics[0];
@@ -207,7 +209,11 @@ export function EventRow({
                               <span className="type-tag" title={t('colTopic')}>topic</span>
                             )}
                           </td>
-                          <td><code>{prettyJson(field.value)}</code></td>
+                          <td>
+                            {onAddressClick && field.type === 'Address' && typeof field.value === 'string' && ADDRESS_ID.test(field.value)
+                              ? <button type="button" className="address-filter-btn mono" onClick={() => onAddressClick(field.value as string)}>{field.value as string}</button>
+                              : <code>{prettyJson(field.value)}</code>}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
