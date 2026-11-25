@@ -97,7 +97,23 @@ export function usePersistentState<T>(key: string, initial: T): [T, (value: T) =
   const [state, setState] = useState<T>(() => {
     try {
       const stored = window.localStorage.getItem(key);
-      return stored === null ? initial : (JSON.parse(stored) as T);
+      if (stored === null) return initial;
+      const parsed = JSON.parse(stored) as unknown;
+      // For plain-object state, merge stored over defaults so new fields added
+      // to the defaults are present even when old stored state lacks them.
+      if (
+        typeof initial === 'object' && initial !== null && !Array.isArray(initial) &&
+        typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ) {
+        const init = initial as Record<string, unknown>;
+        const p = parsed as Record<string, unknown>;
+        const merged: Record<string, unknown> = { ...init };
+        for (const k of Object.keys(init)) {
+          if (k in p) merged[k] = p[k];
+        }
+        return merged as T;
+      }
+      return parsed as T;
     } catch {
       return initial;
     }
