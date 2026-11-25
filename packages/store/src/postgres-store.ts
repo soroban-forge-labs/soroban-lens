@@ -203,6 +203,14 @@ export class PostgresEventStore implements EventStore {
       const applied = new Set(
         (await db.query('SELECT version FROM schema_migrations')).rows.map((r) => Number(r['version'])),
       );
+      // Same refusal as the SQLite store (#161): a database migrated by a
+      // newer soroban-lens has versions this build cannot parse.
+      const newestApplied = Math.max(0, ...applied);
+      if (newestApplied > LATEST_SCHEMA_VERSION) {
+        throw new Error(
+          `database schema is v${newestApplied}, but this build only knows migrations up to v${LATEST_SCHEMA_VERSION} — upgrade soroban-lens to open this database`,
+        );
+      }
       const pending = POSTGRES_MIGRATIONS.filter((m) => !applied.has(m.version)).sort(
         (a, b) => a.version - b.version,
       );
@@ -572,7 +580,8 @@ export class PostgresEventStore implements EventStore {
       `SELECT COUNT(*)::int AS event_count,
               COUNT(DISTINCT contract_id)::int AS contract_count,
               MIN(ledger) AS min_ledger,
-              MAX(ledger) AS max_ledger
+              MAX(ledger) AS max_ledger,
+              COUNT(decode_error)::int AS decode_error_count
        FROM events`,
     );
     const version = await this.#pool.query('SELECT COALESCE(MAX(version), 0)::int AS v FROM schema_migrations');
@@ -586,6 +595,7 @@ export class PostgresEventStore implements EventStore {
       minLedger: nullable(row['min_ledger']),
       maxLedger: nullable(row['max_ledger']),
       schemaVersion: Number(version.rows[0]?.['v'] ?? 0),
+      decodeErrorCount: Number(row['decode_error_count'] ?? 0),
       // The whole database, not just this schema: Postgres has no cheaper figure.
       sizeBytes: nullable(size.rows[0]?.['bytes']),
       // Postgres' WAL is cluster-wide and managed by the server, not a file beside the data.

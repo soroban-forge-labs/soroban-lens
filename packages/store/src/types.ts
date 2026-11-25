@@ -305,6 +305,11 @@ export interface StoreStats {
   /** Schema version the database is currently migrated to. */
   schemaVersion: number;
   /**
+   * Events whose stored decode failed (`decode_error` is set). Kept rows stay
+   * queryable by metadata; `redecode` retries them once the decoder improves.
+   */
+  decodeErrorCount: number;
+  /**
    * Size of the database file on disk, in bytes. `null` for a backend with no
    * file (`:memory:`), which is different from a file that is genuinely 0 bytes.
    */
