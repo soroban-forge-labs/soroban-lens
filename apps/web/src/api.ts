@@ -182,6 +182,14 @@ export const api = {
   contracts: (baseUrl: string, signal?: AbortSignal): Promise<{ contracts: ContractSummary[] }> =>
     request<{ contracts: ContractSummary[] }>(baseUrl, '/contracts', signal),
 
+  /** Pause indexing for one contract stream without restarting the indexer. */
+  pauseContract: (baseUrl: string, contractId: string, signal?: AbortSignal): Promise<ContractSummary> =>
+    request<ContractSummary>(baseUrl, `/contracts/${encodeURIComponent(contractId)}/pause`, signal),
+
+  /** Resume a paused contract stream from its saved cursor. */
+  resumeContract: (baseUrl: string, contractId: string, signal?: AbortSignal): Promise<ContractSummary> =>
+    request<ContractSummary>(baseUrl, `/contracts/${encodeURIComponent(contractId)}/resume`, signal),
+
   activity: (
     baseUrl: string,
     contractId: string,
@@ -201,4 +209,13 @@ export const api = {
     });
     if (params.successfulOnly) search.set('successfulOnly', 'true');
     for (const topic of params.topics ?? []) search.append('topic', topic);
-    ret
+    return request<ContractActivity>(
+      baseUrl,
+      `/contracts/${encodeURIComponent(contractId)}/activity?${search.toString()}`,
+      signal,
+    );
+  },
+
+  topics: (baseUrl: string, signal?: AbortSignal): Promise<{ topics: TopicCount[] }> =>
+    request<{ topics: TopicCount[] }>(baseUrl, '/topics', signal),
+};

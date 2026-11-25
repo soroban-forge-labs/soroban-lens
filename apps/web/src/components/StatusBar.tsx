@@ -35,6 +35,10 @@ export function StatusBar({
   const providerLabel = provider?.label ?? '';
   const providerIsBackup = provider?.primary === false;
 
+  // Paused contract streams come from /status (#326). Older APIs omit the
+  // field, so we only render the indicator when at least one stream is paused.
+  const pausedContracts = health?.pausedContracts ?? [];
+
   return (
     <div className="status-bar">
       <div className="status-left">
@@ -69,6 +73,15 @@ export function StatusBar({
                 title={providerIsBackup ? t('rpcProviderBackup') : t('rpcProviderPrimary')}
               >
                 {t('rpcProvider', { provider: providerLabel })}
+              </span>
+            )}
+            {pausedContracts.length > 0 && (
+              <span
+                className="status-pill small status-warning"
+                role="status"
+                title={pausedContracts.join(', ')}
+              >
+                {t('pausedContracts', { count: pausedContracts.length })}
               </span>
             )}
             <span className="muted small">
