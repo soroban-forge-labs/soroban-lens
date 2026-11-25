@@ -2219,6 +2219,15 @@ test('GET /events?addressPosition= is validated and needs address (#147)', async
   });
 });
 
+test('GET /events accepts a valid muxed-account address filter (#148)', async () => {
+  await withServer(async ({ get }) => {
+    const muxedAddress = 'MDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB4AAAAAAAAAAAA46CW';
+    const { res, body } = await get(`/events?address=${muxedAddress}`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events, []);
+  });
+});
+
 // ── #184 request metrics ────────────────────────────────────────────────────
 
 test('request metrics: bounded series by route pattern, and unknown paths add none (#184)', async () => {

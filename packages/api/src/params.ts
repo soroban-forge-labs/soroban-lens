@@ -1,4 +1,4 @@
-import { MAX_QUERY_LIMIT } from '@soroban-lens/store';
+import { MAX_QUERY_LIMIT, parseMuxedAddress } from '@soroban-lens/store';
 import type { EventQuery, TimeBucket } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
 
@@ -6,22 +6,29 @@ import { ApiError } from './errors.js';
 const CONTRACT_ID = /^C[A-Z2-7]{55}$/;
 /** Transaction hashes are 32 bytes, hex encoded. */
 const TX_HASH = /^[0-9a-fA-F]{64}$/;
-// StrKey: 'G' (account) or 'C' (contract) followed by 55 base32 characters.
-// Both are valid ScVal addresses, and #23's index does not distinguish them.
-const ADDRESS = /^[GC][A-Z2-7]{55}$/;
+// StrKey: 'G'/'C' plus 55 characters, or muxed account 'M' plus 68.
+const ADDRESS = /^(?:[GC][A-Z2-7]{55}|M[A-Z2-7]{68})$/;
 /** Where event_addresses records an address: a topic position, or the value. */
 const ADDRESS_POSITION = /^(topic(0|[1-9][0-9]{0,2})|value)$/;
 /** A lower-cased ScVal arm name, as `DecodedValue.type` reports it. */
 const SCVAL_TYPE = /^[a-z][A-Za-z0-9]{0,31}$/;
 
 export function assertAddress(value: string): string {
-  if (!ADDRESS.test(value)) {
+  if (!ADDRESS.test(value) || (value.startsWith('M') && !isValidMuxedAddress(value))) {
     throw ApiError.badRequest(
-      `"${value}" is not an address. Expected a StrKey starting with G or C, 56 characters long.`,
+      `"${value}" is not an address. Expected a G/C StrKey with 56 characters or an M muxed-account StrKey with 69 characters.`,
       'address',
     );
   }
   return value;
+}
+
+function isValidMuxedAddress(value: string): boolean {
+  try {
+    return parseMuxedAddress(value) !== null;
+  } catch {
+    return false;
+  }
 }
 
 export function assertTxHash(value: string): string {
@@ -147,12 +154,7 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
   }
 
   const address = params.get('address') ?? undefined;
-  if (address !== undefined && !ADDRESS.test(address)) {
-    throw ApiError.badRequest(
-      "\"address\" must be a StrKey: 'G' or 'C' followed by 55 characters (A-Z, 2-7).",
-      'address',
-    );
-  }
+  if (address !== undefined) assertAddress(address);
 
   const addressPosition = params.get('addressPosition') ?? undefined;
   if (addressPosition !== undefined) {

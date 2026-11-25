@@ -87,7 +87,7 @@ Options:
 tail filters (the API's, by the same rules):
   -c, --contract <id>     Follow one contract. Omit to follow every indexed contract.
       --topic <t>         Topic prefix, positional and repeatable; '*' matches any one position.
-      --address <G…|C…>   Events mentioning this address anywhere.
+      --address <G…|M…|C…> Events mentioning this address anywhere.
       --tx-hash <hex>     Events from one transaction.
       --search <text>     Substring match on decoded topics and value (3+ characters).
       --successful-only   Skip events from failed contract calls.

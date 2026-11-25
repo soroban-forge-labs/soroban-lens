@@ -229,4 +229,27 @@ export const POSTGRES_MIGRATIONS: PostgresMigration[] = [
     `,
     down: `DROP TABLE IF EXISTS contract_summaries;`,
   },
+  {
+    version: 11,
+    name: 'muxed-account-addresses',
+    up: `
+      ALTER TABLE event_addresses ADD COLUMN muxed_id TEXT;
+      CREATE INDEX idx_event_addresses_address_muxed_id
+        ON event_addresses (address, muxed_id, event_id);
+
+      UPDATE event_addresses a
+         SET muxed_id = e.value_json #>> '{value,to_muxed_id}'
+        FROM events e
+       WHERE e.id = a.event_id
+         AND a.position = 'topic2'
+         AND e.type = 'contract'
+         AND e.topics_json->0->>'value' = 'transfer'
+         AND e.topics_json->2->>'value' = a.address
+         AND e.value_json #>> '{value,to_muxed_id}' ~ '^[0-9]+$';
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_event_addresses_address_muxed_id;
+      ALTER TABLE event_addresses DROP COLUMN muxed_id;
+    `,
+  },
 ];
