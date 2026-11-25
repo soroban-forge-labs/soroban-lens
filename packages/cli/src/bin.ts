@@ -352,6 +352,11 @@ async function main(argv: string[]): Promise<number> {
             2,
           )}\n`,
         );
+        if (stats.decodeErrorCount > 0) {
+          process.stderr.write(
+            `[lens] ${stats.decodeErrorCount} event(s) failed to decode; run \`lens redecode\` to retry them\n`,
+          );
+        }
       } finally {
         await store.close();
       }

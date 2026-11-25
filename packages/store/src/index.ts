@@ -21,11 +21,13 @@ export type {
   ContractSpecRecord,
   TypedEvent,
   TypedField,
+  ListTopicsOptions,
 } from './types.js';
 
 export type { EventStore, PruneToSizeResult } from './store.js';
 export {
   MAX_QUERY_LIMIT,
+  MAX_QUERY_CONTRACT_IDS,
   DEFAULT_MAX_QUERY_LIMIT,
   DEFAULT_QUERY_LIMIT,
   resolveMaxQueryLimit,
