@@ -1,5 +1,5 @@
 import type { LensEvent } from '../types.js';
-import { absoluteTime, prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
+import { absoluteTime, formatSacAmount, prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
 import { useLocale } from '../i18n/index.js';
 import { CopyButton } from './CopyButton.js';
 import { ExplorerLink } from './ExplorerLink.js';
@@ -207,7 +207,11 @@ export function EventRow({
                               <span className="type-tag" title={t('colTopic')}>topic</span>
                             )}
                           </td>
-                          <td><code>{prettyJson(field.value)}</code></td>
+                          <td>
+                            {event.typed?.source === 'stellar-asset' && field.name === 'amount' && field.type === 'i128'
+                              ? <code title={String(field.value)}>{formatSacAmount(String(field.value))}</code>
+                              : <code>{prettyJson(field.value)}</code>}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
