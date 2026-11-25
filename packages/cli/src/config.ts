@@ -45,6 +45,12 @@ export interface LensConfig {
   pruneIntervalMs: number;
 }
 
+/** Where a resolved setting's value came from: a flag, an environment variable, or the built-in default. */
+export type ConfigSource = 'flag' | 'env' | 'default';
+
+/** Per-setting provenance, keyed by the setting name in `LensConfig`. */
+export type ConfigSources = Record<string, ConfigSource>;
+
 export interface ConfigOverrides {
   network?: string | undefined;
   rpcUrl?: string | undefined;
@@ -78,48 +84,127 @@ export function resolveConfig(
   overrides: ConfigOverrides = {},
   env: NodeJS.ProcessEnv = process.env,
 ): LensConfig {
+  return resolveConfigWithSources(overrides, env).config;
+}
+
+/**
+ * Resolve the configuration and record, per setting, whether a flag, an
+ * environment variable or the built-in default won. `lens config` prints this;
+ * `resolveConfig` is the thin wrapper for callers that only need the values.
+ */
+export function resolveConfigWithSources(
+  overrides: ConfigOverrides = {},
+  env: NodeJS.ProcessEnv = process.env,
+): { config: LensConfig; sources: ConfigSources } {
+  const sources: ConfigSources = {};
+  const pick = <T>(key: string, flag: T | undefined, envValue: T | undefined, fallback: T): T => {
+    if (flag !== undefined) {
+      sources[key] = 'flag';
+      return flag;
+    }
+    if (envValue !== undefined) {
+      sources[key] = 'env';
+      return envValue;
+    }
+    sources[key] = 'default';
+    return fallback;
+  };
+
   const contractIds =
     overrides.contracts && overrides.contracts.length > 0
       ? overrides.contracts
       : splitList(env.LENS_CONTRACT_IDS);
-  const pollIntervalMs = overrides.pollInterval ?? numberOr(env.LENS_POLL_INTERVAL_MS, 2000);
-  const maxPollIntervalMs = overrides.maxPollInterval ?? Math.max(
-    pollIntervalMs,
-    numberOr(env.LENS_POLL_MAX_INTERVAL_MS, 30_000),
+  sources.contractIds =
+    overrides.contracts && overrides.contracts.length > 0
+      ? 'flag'
+      : splitList(env.LENS_CONTRACT_IDS).length > 0
+        ? 'env'
+        : 'default';
+
+  const pollIntervalMs = pick(
+    'pollIntervalMs',
+    overrides.pollInterval,
+    optionalNumber(env.LENS_POLL_INTERVAL_MS),
+    2000,
+  );
+  const maxPollIntervalMs = pick(
+    'maxPollIntervalMs',
+    overrides.maxPollInterval,
+    optionalNumber(env.LENS_POLL_MAX_INTERVAL_MS),
+    Math.max(pollIntervalMs, 30_000),
   );
 
-  return {
-    network: resolveNetwork(
-      overrides.network ?? env.LENS_NETWORK ?? 'testnet',
-      (overrides.rpcUrls ?? splitList(overrides.rpcUrl ?? env.LENS_RPC_URL))[0],
-    ),
-    rpcUrls: (overrides.rpcUrls ?? splitList(env.LENS_RPC_URLS || overrides.rpcUrl || env.LENS_RPC_URL)).length > 0 ? (overrides.rpcUrls ?? splitList(env.LENS_RPC_URLS || overrides.rpcUrl || env.LENS_RPC_URL)) : [resolveNetwork(overrides.network ?? env.LENS_NETWORK ?? 'testnet').rpcUrl],
-    archiveUrl: overrides.archiveUrl ?? env.LENS_ARCHIVE_URL,
+  const networkName = pick('network', overrides.network, env.LENS_NETWORK, 'testnet');
+  const rpcUrls = pick(
+    'rpcUrls',
+    overrides.rpcUrls,
+    splitList(env.LENS_RPC_URLS || overrides.rpcUrl || env.LENS_RPC_URL).length > 0
+      ? splitList(env.LENS_RPC_URLS || overrides.rpcUrl || env.LENS_RPC_URL)
+      : undefined,
+    [],
+  );
+  const resolvedRpcUrls =
+    rpcUrls.length > 0 ? rpcUrls : [resolveNetwork(networkName).rpcUrl];
+
+  const pageSize = pick('pageSize', overrides.pageSize, optionalNumber(env.LENS_PAGE_SIZE), 200);
+  const pageSizeMin = overrides.pageSizeMin ?? optionalNumber(env.LENS_PAGE_SIZE_MIN);
+  const pageSizeMax = overrides.pageSizeMax ?? optionalNumber(env.LENS_PAGE_SIZE_MAX);
+  sources.pageSizeBounds =
+    overrides.pageSizeMin !== undefined || overrides.pageSizeMax !== undefined
+      ? 'flag'
+      : pageSizeMin !== undefined || pageSizeMax !== undefined
+        ? 'env'
+        : 'default';
+
+  const rpcHeaders = parseHeaders(overrides.rpcHeaders, env.LENS_RPC_HEADERS);
+  sources.rpcHeaders =
+    overrides.rpcHeaders && overrides.rpcHeaders.length > 0
+      ? 'flag'
+      : splitList(env.LENS_RPC_HEADERS).length > 0
+        ? 'env'
+        : 'default';
+
+  const config: LensConfig = {
+    network: resolveNetwork(networkName, (overrides.rpcUrls ?? splitList(overrides.rpcUrl ?? env.LENS_RPC_URL))[0]),
+    rpcUrls: resolvedRpcUrls,
+    archiveUrl: pick('archiveUrl', overrides.archiveUrl, env.LENS_ARCHIVE_URL, undefined),
     contractIds,
-    dbPath: overrides.db ?? env.LENS_DB_PATH ?? './data/lens.db',
-    dataDir: overrides.dataDir ?? env.LENS_DATA_DIR ?? './data',
-    apiPort: overrides.port ?? numberOr(env.LENS_API_PORT, 8080),
-    startLedger: overrides.startLedger ?? optionalNumber(env.LENS_START_LEDGER),
-    pageSize: overrides.pageSize ?? numberOr(env.LENS_PAGE_SIZE, 200),
-    pageSizeBounds: pageSizeBounds(
-      overrides.pageSizeMin ?? optionalNumber(env.LENS_PAGE_SIZE_MIN),
-      overrides.pageSizeMax ?? optionalNumber(env.LENS_PAGE_SIZE_MAX),
-      overrides.pageSize ?? numberOr(env.LENS_PAGE_SIZE, 200),
-    ),
-    reorgDepth: overrides.reorgDepth ?? numberOr(env.LENS_REORG_DEPTH, 3),
+    dbPath: pick('dbPath', overrides.db, env.LENS_DB_PATH, './data/lens.db'),
+    dataDir: pick('dataDir', overrides.dataDir, env.LENS_DATA_DIR, './data'),
+    apiPort: pick('apiPort', overrides.port, optionalNumber(env.LENS_API_PORT), 8080),
+    startLedger: pick('startLedger', overrides.startLedger, optionalNumber(env.LENS_START_LEDGER), undefined),
+    pageSize,
+    pageSizeBounds: pageSizeBounds(pageSizeMin, pageSizeMax, pageSize),
+    reorgDepth: pick('reorgDepth', overrides.reorgDepth, optionalNumber(env.LENS_REORG_DEPTH), 3),
     pollIntervalMs,
     maxPollIntervalMs,
-    rpcHeaders: parseHeaders(overrides.rpcHeaders, env.LENS_RPC_HEADERS),
+    rpcHeaders,
     retry: {
-      attempts: overrides.retryAttempts ?? numberOr(env.LENS_RETRY_ATTEMPTS, 5),
-      baseDelayMs: overrides.retryBaseDelay ?? numberOr(env.LENS_RETRY_BASE_DELAY_MS, 250),
-      maxDelayMs: overrides.retryMaxDelay ?? numberOr(env.LENS_RETRY_MAX_DELAY_MS, 30_000),
+      attempts: pick('retry.attempts', overrides.retryAttempts, optionalNumber(env.LENS_RETRY_ATTEMPTS), 5),
+      baseDelayMs: pick('retry.baseDelayMs', overrides.retryBaseDelay, optionalNumber(env.LENS_RETRY_BASE_DELAY_MS), 250),
+      maxDelayMs: pick('retry.maxDelayMs', overrides.retryMaxDelay, optionalNumber(env.LENS_RETRY_MAX_DELAY_MS), 30_000),
     },
-    fetchSpecs: !/^(0|false|no|off)$/i.test((env.LENS_FETCH_SPECS ?? '').trim()),
-    clockSkewThresholdSeconds: resolveClockSkewThreshold(env.LENS_CLOCK_SKEW_THRESHOLD_SECONDS),
-    maxDbSizeBytes: overrides.maxDbSize ?? optionalNumber(env.LENS_MAX_DB_SIZE_BYTES),
-    pruneIntervalMs: overrides.pruneInterval ?? numberOr(env.LENS_PRUNE_INTERVAL_MS, 60_000),
+    fetchSpecs: pick(
+      'fetchSpecs',
+      undefined,
+      env.LENS_FETCH_SPECS !== undefined && env.LENS_FETCH_SPECS !== ''
+        ? !/^(0|false|no|off)$/i.test(env.LENS_FETCH_SPECS.trim())
+        : undefined,
+      true,
+    ),
+    clockSkewThresholdSeconds: pick(
+      'clockSkewThresholdSeconds',
+      undefined,
+      env.LENS_CLOCK_SKEW_THRESHOLD_SECONDS !== undefined && env.LENS_CLOCK_SKEW_THRESHOLD_SECONDS !== ''
+        ? resolveClockSkewThreshold(env.LENS_CLOCK_SKEW_THRESHOLD_SECONDS)
+        : undefined,
+      resolveClockSkewThreshold(undefined),
+    ),
+    maxDbSizeBytes: pick('maxDbSizeBytes', overrides.maxDbSize, optionalNumber(env.LENS_MAX_DB_SIZE_BYTES), undefined),
+    pruneIntervalMs: pick('pruneIntervalMs', overrides.pruneInterval, optionalNumber(env.LENS_PRUNE_INTERVAL_MS), 60_000),
   };
+
+  return { config, sources };
 }
 
 /**

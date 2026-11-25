@@ -48,6 +48,8 @@ Usage:
   lens spec [list]                   Show which contracts have a spec for typed decoding.
   lens spec fetch -c <id>            Look a contract's spec up on-chain now (refreshes it).
   lens spec import -c <id> <wasm>    Use a local Wasm build's spec for a contract.
+  lens config [options]              Print each resolved setting, its value and where it came from
+                                     (flag, env or default).
   lens completion [bash|zsh|fish]    Generate shell auto-completion script.
 
 
@@ -568,6 +570,11 @@ async function main(argv: string[]): Promise<number> {
       }
     }
 
+    case 'config': {
+      process.stdout.write(`${formatConfig(config, configSources(values))}\n`);
+      return 0;
+    }
+
     case 'completion': {
       const shell = positionals[0] || 'bash';
       process.stdout.write(`${generateCompletion(shell)}\n`);
@@ -580,6 +587,88 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
+/** Which of the three sources supplied each setting: flag, env or default. */
+type ConfigSource = 'flag' | 'env' | 'default';
+
+/**
+ * Map each config key to the source that supplied it. Flags win over env
+ * variables, which win over defaults — the same precedence resolveConfig uses.
+ */
+function configSources(values: Record<string, unknown>): Record<string, ConfigSource> {
+  const flagKeys: Record<string, string> = {
+    network: 'network',
+    rpcUrl: 'rpc-url',
+    rpcUrls: 'rpc-url-list',
+    archiveUrl: 'archive-url',
+    contracts: 'contract',
+    dbPath: 'db',
+    dataDir: 'data-dir',
+    startLedger: 'start-ledger',
+    pageSize: 'page-size',
+    pageSizeMin: 'page-size-min',
+    pageSizeMax: 'page-size-max',
+    reorgDepth: 'reorg-depth',
+    pollInterval: 'poll-interval',
+    maxPollInterval: 'poll-max-interval',
+    rpcHeaders: 'rpc-header',
+    retryAttempts: 'retry-attempts',
+    retryBaseDelay: 'retry-base-delay',
+    retryMaxDelay: 'retry-max-delay',
+  };
+  const envKeys: Record<string, string> = {
+    network: 'LENS_NETWORK',
+    rpcUrl: 'LENS_RPC_URL',
+    rpcUrls: 'LENS_RPC_URLS',
+    archiveUrl: 'LENS_ARCHIVE_URL',
+    contracts: 'LENS_CONTRACT_IDS',
+    dbPath: 'LENS_DB_PATH',
+    dataDir: 'LENS_DATA_DIR',
+    startLedger: 'LENS_START_LEDGER',
+    pageSize: 'LENS_PAGE_SIZE',
+    pageSizeMin: 'LENS_PAGE_SIZE_MIN',
+    pageSizeMax: 'LENS_PAGE_SIZE_MAX',
+    reorgDepth: 'LENS_REORG_DEPTH',
+    pollInterval: 'LENS_POLL_INTERVAL_MS',
+    maxPollInterval: 'LENS_POLL_MAX_INTERVAL_MS',
+    rpcHeaders: 'LENS_RPC_HEADERS',
+    retryAttempts: 'LENS_RETRY_ATTEMPTS',
+    retryBaseDelay: 'LENS_RETRY_BASE_DELAY_MS',
+    retryMaxDelay: 'LENS_RETRY_MAX_DELAY_MS',
+  };
+  const sources: Record<string, ConfigSource> = {};
+  for (const key of Object.keys(flagKeys)) {
+    const flag = flagKeys[key]!;
+    const env = envKeys[key]!;
+    if (values[flag] !== undefined) sources[key] = 'flag';
+    else if (process.env[env] !== undefined && process.env[env] !== '') sources[key] = 'env';
+    else sources[key] = 'default';
+  }
+  return sources;
+}
+
+/** Render a resolved config as `name = value (source)` lines, headers redacted. */
+function formatConfig(
+  config: ReturnType<typeof resolveConfig>,
+  sources: Record<string, ConfigSource>,
+): string {
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(config)) {
+    const source = sources[key] ?? 'default';
+    let rendered: string;
+    if (key === 'rpcHeaders') {
+      rendered = redactHeaders(value as Record<string, string>);
+    } else if (Array.isArray(value)) {
+      rendered = value.length === 0 ? '[]' : value.join(', ');
+    } else if (value !== null && typeof value === 'object') {
+      rendered = JSON.stringify(value);
+    } else {
+      rendered = String(value);
+    }
+    lines.push(`${key} = ${rendered} (${source})`);
+  }
+  return lines.join('\n');
+}
+
 function generateCompletion(shell: string): string {
   switch (shell.toLowerCase()) {
     case 'bash':
@@ -587,7 +676,7 @@ function generateCompletion(shell: string): string {
   local cur prev commands options
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="doctor index seed stats tail prune redecode verify migrate export import backup restore spec completion"
+  commands="doctor index seed stats tail prune redecode verify migrate export import backup restore spec config completion"
   options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --page-size-min --page-size-max --reorg-depth --poll-interval --once --max-events --fixture --before-ledger --force --fix --topic --address --tx-hash --search --successful-only --from-ledger --from-time --json -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
@@ -629,6 +718,7 @@ _lens() {
     'export:Write an NDJSON snapshot'
     'import:Load an NDJSON snapshot'
     'spec:Contract specs for typed decoding'
+    'config:Print the resolved configuration'
     'completion:Generate shell autocompletions'
   )
   _arguments '1: :->command' '*: :->args'
@@ -652,6 +742,7 @@ complete -c lens -n "__fish_use_subcommand" -a migrate -d "Roll migrations forwa
 complete -c lens -n "__fish_use_subcommand" -a export -d "Write an NDJSON snapshot"
 complete -c lens -n "__fish_use_subcommand" -a import -d "Load an NDJSON snapshot"
 complete -c lens -n "__fish_use_subcommand" -a spec -d "Contract specs for typed decoding"
+complete -c lens -n "__fish_use_subcommand" -a config -d "Print the resolved configuration"
 complete -c lens -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c lens -l network -s n -x -a "testnet mainnet futurenet"
 complete -c lens -l help -s h -d "Show help"`;
