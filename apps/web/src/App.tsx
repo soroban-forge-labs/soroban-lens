@@ -109,6 +109,28 @@ function AppInner(): React.JSX.Element {
   const [comparePair, setComparePair] = useState<[LensEvent, LensEvent] | null>(null);
   const [compareError, setCompareError] = useState<string | null>(null);
   const contractInputRef = useRef<HTMLInputElement>(null);
+  const [unseenCount, setUnseenCount] = useState(0);
+  const prevTotalRef = useRef(0);
+
+  // Track unseen live events while the tab is hidden (#76).
+  useEffect(() => {
+    if (document.hidden && total > prevTotalRef.current) {
+      setUnseenCount((c) => c + (total - prevTotalRef.current));
+    }
+    prevTotalRef.current = total;
+  }, [total]);
+
+  useEffect(() => {
+    const onVisibility = (): void => { if (!document.hidden) setUnseenCount(0); };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
+  useEffect(() => {
+    const label = filters.contractId ? `${filters.contractId.slice(0, 8)}…` : null;
+    const base = label ? `${label} – Soroban Lens` : 'Soroban Lens';
+    document.title = unseenCount > 0 ? `(${unseenCount}) ${base}` : base;
+  }, [filters.contractId, unseenCount]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
