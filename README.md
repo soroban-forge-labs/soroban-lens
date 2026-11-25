@@ -277,3 +277,8 @@ each client IP (see [packages/api](./packages/api/README.md)), and set
 ## License
 
 [Apache-2.0](./LICENSE).
+
+## Handsoff notes
+
+<!-- handsoff-issue-315 -->
+- #315: 103. Rotate a webhook's signing secret
