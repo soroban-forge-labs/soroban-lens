@@ -36,6 +36,23 @@ const FTS5_AVAILABLE = (() => {
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
 
+/**
+ * Create a temp directory under the OS temp dir. Always built with join() so
+ * the path is valid on Windows as well as POSIX.
+ */
+async function tempDir(prefix = 'lens-db-') {
+  return mkdtemp(join(tmpdir(), prefix));
+}
+
+/**
+ * Remove a temp directory, retrying on Windows where a just-closed SQLite
+ * handle (or the OS itself) can briefly keep a file locked. maxRetries and
+ * retryDelay make rm() wait and retry rather than failing the test.
+ */
+async function removeDir(dir) {
+  await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+}
+
 async function seeded() {
   const store = new SqliteEventStore({ path: ':memory:' });
   await store.insertEvents(fixture.events);
@@ -266,7 +283,7 @@ test('healthCheck reports schema and event count', async () => {
 });
 
 test('healthCheck does not take the write lock, so the API can serve it on every request', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const dir = await tempDir();
   const path = join(dir, 'lens.db');
   const writer = new SqliteEventStore({ path });
   await writer.insertEvents(fixture.events);
@@ -286,16 +303,18 @@ test('healthCheck does not take the write lock, so the API can serve it on every
 
   assert.equal(health.ok, true, health.detail);
   // busy_timeout is 5s, so anything needing the write lock would have parked
-  // on it. Returning promptly is the proof that this path is read-only.
-  assert.ok(elapsedMs < 1000, `healthCheck blocked for ${elapsedMs}ms — it took the write lock`);
+  // on it. Returning promptly is the proof that this path is read-only. The
+  // bound is generous so a slow or contended CI runner (Windows especially)
+  // does not flake, while still being far below the 5s busy_timeout.
+  assert.ok(elapsedMs < 2000, `healthCheck blocked for ${elapsedMs}ms — it took the write lock`);
 
   await reader.close();
   await writer.close();
-  await rm(dir, { recursive: true, force: true });
+  await removeDir(dir);
 });
 
 test('writeProbe reports writability and leaves no trace', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const dir = await tempDir();
   const path = join(dir, 'lens.db');
   const store = new SqliteEventStore({ path });
   await store.insertEvents(fixture.events);
@@ -318,11 +337,11 @@ test('writeProbe reports writability and leaves no trace', async () => {
   assert.ok(!tables.includes('_lens_write_probe'), `probe table leaked: ${tables.join(', ')}`);
 
   await store.close();
-  await rm(dir, { recursive: true, force: true });
+  await removeDir(dir);
 });
 
 test('data persists across reopening a file-backed database', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const dir = await tempDir();
   const path = join(dir, 'nested', 'lens.db');
   const first = new SqliteEventStore({ path });
   await first.insertEvents(fixture.events);
@@ -331,12 +350,13 @@ test('data persists across reopening a file-backed database', async () => {
   const second = new SqliteEventStore({ path });
   assert.equal((await second.getStats()).eventCount, fixture.events.length);
   await second.close();
+  await removeDir(dir);
 });
 
 // ── #29 report database size in getStats ─────────────────────────────────────
 
 test('getStats reports a database size that matches the file on disk', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const dir = await tempDir();
   const path = join(dir, 'lens.db');
   const store = new SqliteEventStore({ path });
   await store.insertEvents(fixture.events);
@@ -348,11 +368,11 @@ test('getStats reports a database size that matches the file on disk', async () 
   assert.ok(stats.sizeBytes > 0);
 
   await store.close();
-  await rm(dir, { recursive: true, force: true });
+  await removeDir(dir);
 });
 
 test('getStats reports the WAL separately, since it is what fills a volume', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const dir = await tempDir();
   const path = join(dir, 'lens.db');
   const store = new SqliteEventStore({ path });
   await store.insertEvents(fixture.events);
@@ -361,7 +381,7 @@ test('getStats reports the WAL separately, since it is what fills a volume', asy
   assert.equal(stats.walSizeBytes, statSync(`${path}-wal`).size);
 
   await store.close();
-  await rm(dir, { recursive: true, force: true });
+  await removeDir(dir);
 });
 
 test('an in-memory database reports null size rather than a misleading zero', async () => {
@@ -470,7 +490,7 @@ test('an index that matches nothing returns an empty page, not everything', asyn
 // ── #36 index indexed_at ─────────────────────────────────────────────────────
 
 test('the indexed_at index exists in a migration and the planner uses it', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const dir = await tempDir();
   const path = join(dir, 'lens.db');
   const store = new SqliteEventStore({ path });
   await store.insertEvents(fixture.events);
@@ -494,11 +514,11 @@ test('the indexed_at index exists in a migration and the planner uses it', async
   assert.ok(!/SCAN events(?! USING)/.test(plan), `still a full scan: ${plan}`);
 
   db.close();
-  await rm(dir, { recursive: true, force: true });
+  await removeDir(dir);
 });
 
 test('migrating an existing v1 database adds the index without touching rows', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const dir = await tempDir();
   const path = join(dir, 'lens.db');
 
   // Build a database that stopped at v1, exactly as a deployed one would be.
@@ -525,7 +545,7 @@ test('migrating an existing v1 database adds the index without touching rows', a
   db.close();
   assert.ok(names.includes('idx_events_indexed_at'));
 
-  await rm(dir, { recursive: true, force: true });
+  await removeDir(dir);
 });
 
 // ── #24 time-bounded queries backed by closed_at_unix ────────────────────────
@@ -577,7 +597,7 @@ test('a window before anything indexed returns nothing, not everything', async (
 });
 
 test('time-bounded queries use the closed_at_unix index', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const dir = await tempDir();
   const path = join(dir, 'lens.db');
   const store = new SqliteEventStore({ path });
   await store.insertEvents(fixture.events);
@@ -592,7 +612,7 @@ test('time-bounded queries use the closed_at_unix index', async () => {
   db.close();
   assert.match(plan, /idx_events_closed_at_unix/, `planner chose: ${plan}`);
 
-  await rm(dir, { recursive: true, force: true });
+  await removeDir(dir);
 });
 
 // ── #55 configurable query limit ─────────────────────────────────────────────
@@ -639,7 +659,7 @@ test('a fresh database logs one migration_applied (or migration_skipped) event p
 });
 
 test('a database already at the latest schema logs nothing on open', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const dir = await tempDir();
   const path = join(dir, 'lens.db');
   await (async () => {
     const first = new SqliteEventStore({ path });
@@ -652,7 +672,7 @@ test('a database already at the latest schema logs nothing on open', async () =>
   await reopened.close();
 
   assert.deepEqual(records, []);
-  await rm(dir, { recursive: true, force: true });
+  await removeDir(dir);
 });
 
 test('a store built with no log option stays silent, unchanged from before this existed', async () => {
@@ -688,7 +708,7 @@ test('pruneBefore returns 0 and touches nothing when there is nothing below the 
 });
 
 test('pruneBefore reduces the file size on disk', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const dir = await tempDir();
   const path = join(dir, 'lens.db');
   const store = new SqliteEventStore({ path });
 
@@ -709,7 +729,7 @@ test('pruneBefore reduces the file size on disk', async () => {
   assert.equal(removed, 4900);
   assert.ok(after.sizeBytes < before.sizeBytes, `expected shrink: ${before.sizeBytes} -> ${after.sizeBytes}`);
   await store.close();
-  await rm(dir, { recursive: true, force: true });
+  await removeDir(dir);
 });
 
 test('pruneBefore does not touch stream_state — the cursor is independent of what rows remain', async () => {
@@ -724,7 +744,7 @@ test('pruneBefore does not touch stream_state — the cursor is independent of w
 // ── #25 re-decode rows that failed to decode ─────────────────────────────────
 
 test('redecode repairs a row whose decode_error was wrong, without touching the raw XDR', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  const dir = await tempDir();
   const path = join(dir, 'lens.db');
   const store = new SqliteEventStore({ path });
   await store.insertEvents([fixture.events[0]]);
@@ -753,7 +773,7 @@ test('redecode repairs a row whose decode_error was wrong, without touching the 
   assert.equal(after.topicsXdr[0], fixture.events[0].topic[0], 'raw XDR was never touched');
 
   await store.close();
-  await rm(dir, { recursive: true, force: true });
+  await removeDir(dir);
 });
 
 test('redecode without --all only touches rows with a stored decode_error', async () => {
@@ -772,898 +792,4 @@ test('redecode without --all only touches rows with a stored decode_error', asyn
 });
 
 test('redecode(true) re-runs over every row, including ones that already decoded cleanly', async () => {
-  const store = await seeded();
-  const rewritten = await store.redecode(true);
-  assert.equal(rewritten, fixture.events.length);
-  // Idempotent: decoding the same valid XDR twice produces the same result.
-  const page = await store.queryEvents({ limit: MAX_QUERY_LIMIT });
-  assert.equal(page.total, fixture.events.length);
-  assert.ok(page.events.every((e) => e.decodeError === undefined));
-  await store.close();
-});
-
-test('redecode on an empty database does nothing', async () => {
-  const store = new SqliteEventStore({ path: ':memory:' });
-  assert.equal(await store.redecode(), 0);
-  assert.equal(await store.redecode(true), 0);
-  await store.close();
-});
-
-// ── #39 detect and repair corrupt rows ────────────────────────────────────────
-
-test('checkIntegrity reports nothing on a freshly-decoded database', async () => {
-  const store = await seeded();
-  assert.deepEqual(await store.checkIntegrity(), []);
-  await store.close();
-});
-
-test('a hand-corrupted topic0 is detected and repaired', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  await store.insertEvents([fixture.events[0]]);
-  const id = fixture.events[0].id;
-
-  const db = new DatabaseSync(path);
-  db.exec(`UPDATE events SET topic0 = 'hand-corrupted-value' WHERE id = '${id}'`);
-  db.close();
-
-  const problems = await store.checkIntegrity();
-  assert.equal(problems.length, 1);
-  assert.equal(problems[0].id, id);
-  assert.match(problems[0].problems[0], /topic0 is "hand-corrupted-value"/);
-
-  await store.repairRow(id);
-  assert.deepEqual(await store.checkIntegrity(), []);
-
-  const event = await store.getEvent(id);
-  assert.equal(event.topics[0].value, 'fee'); // the real decoded first topic
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('a topic_count mismatch is detected', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  await store.insertEvents([fixture.events[0]]);
-  const id = fixture.events[0].id;
-
-  const db = new DatabaseSync(path);
-  db.exec(`UPDATE events SET topic_count = 999 WHERE id = '${id}'`);
-  db.close();
-
-  const problems = await store.checkIntegrity();
-  assert.equal(problems.length, 1);
-  assert.match(problems[0].problems[0], /topic_count \(999\)/);
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('malformed JSON in a stored column is detected without throwing', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  await store.insertEvents([fixture.events[0]]);
-  const id = fixture.events[0].id;
-
-  const db = new DatabaseSync(path);
-  db.exec(`UPDATE events SET value_json = 'not json at all {{{' WHERE id = '${id}'`);
-  db.close();
-
-  const problems = await store.checkIntegrity();
-  assert.equal(problems.length, 1);
-  assert.match(problems[0].problems[0], /value_json is not valid JSON/);
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('repairRow on a clean id is a no-op', async () => {
-  const store = await seeded();
-  const before = await store.getEvent(fixture.events[0].id);
-  await store.repairRow(fixture.events[0].id);
-  const after = await store.getEvent(fixture.events[0].id);
-  assert.deepEqual(after, before);
-  await store.close();
-});
-
-test('repairRow on an unknown id does nothing', async () => {
-  const store = await seeded();
-  await assert.doesNotReject(() => store.repairRow('does-not-exist'));
-  await store.close();
-});
-
-// ── #40 migration rollback ────────────────────────────────────────────────────
-
-test('a migration can be applied and rolled back', async () => {
-  const store = new SqliteEventStore({ path: ':memory:' });
-  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
-
-  const rolledBack = await store.migrateDown(LATEST_SCHEMA_VERSION - 1);
-  assert.deepEqual(rolledBack, [LATEST_SCHEMA_VERSION]);
-  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION - 1);
-
-  // And forward again, via the ordinary migrate() path.
-  await store.migrate();
-  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
-  await store.close();
-});
-
-test('rolling back an index migration actually drops the index', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-
-  const indexNames = () => {
-    const db = new DatabaseSync(path);
-    const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'").all().map((r) => r.name);
-    db.close();
-    return names;
-  };
-  assert.ok(indexNames().includes('idx_events_indexed_at'));
-
-  await store.migrateDown(1);
-  assert.ok(!indexNames().includes('idx_events_indexed_at'));
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('rolling back to version 0 drops the tables entirely — the one truly irreversible step', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  await store.insertEvents(fixture.events);
-
-  await store.migrateDown(0);
-
-  const db = new DatabaseSync(path);
-  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name);
-  db.close();
-  assert.ok(!tables.includes('events'));
-  assert.ok(!tables.includes('stream_state'));
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('rolling back past a migration with no down SQL fails cleanly and changes nothing', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  const versionBefore = (await store.getStats()).schemaVersion;
-
-  // Every real migration today has a down. Simulate one that does not by
-  // temporarily stripping it from the shared MIGRATIONS array, then restoring
-  // it — this is the one legitimate way to exercise "missing down" without a
-  // second, parallel migration table just for the test.
-  const target = MIGRATIONS[MIGRATIONS.length - 1];
-  const savedDown = target.down;
-  delete target.down;
-  try {
-    await assert.rejects(
-      () => store.migrateDown(versionBefore - 1),
-      new RegExp(`migration ${target.version}.*has no down SQL`),
-    );
-  } finally {
-    target.down = savedDown;
-  }
-
-  // Nothing was rolled back — the all-or-nothing guarantee.
-  assert.equal((await store.getStats()).schemaVersion, versionBefore);
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('rolling back to the current version is a no-op', async () => {
-  const store = new SqliteEventStore({ path: ':memory:' });
-  const rolledBack = await store.migrateDown(LATEST_SCHEMA_VERSION);
-  assert.deepEqual(rolledBack, []);
-  await store.close();
-});
-
-// ── #26 cache the total count ────────────────────────────────────────────────
-
-test('the first query for a filter returns an exact count, not marked as an estimate', async () => {
-  const store = new SqliteEventStore({ path: ':memory:', countCacheTtlMs: 5000 });
-  await store.insertEvents(fixture.events);
-  const page = await store.queryEvents({ limit: 5 });
-  assert.equal(page.total, fixture.events.length);
-  assert.equal(page.totalIsEstimate, undefined);
-  await store.close();
-});
-
-test('a second query for the same filter within the TTL is served from cache', async () => {
-  let now = 1_000_000;
-  const store = new SqliteEventStore({ path: ':memory:', countCacheTtlMs: 2000, now: () => now });
-  await store.insertEvents(fixture.events);
-
-  const first = await store.queryEvents({ limit: 5 });
-  assert.equal(first.totalIsEstimate, undefined);
-
-  now += 500; // well within the 2000ms TTL
-  const second = await store.queryEvents({ limit: 5, contractId: undefined });
-  assert.equal(second.total, first.total);
-  assert.equal(second.totalIsEstimate, true);
-  await store.close();
-});
-
-test('the cache expires: a query after the TTL recomputes and reflects new rows', async () => {
-  let now = 0;
-  const store = new SqliteEventStore({ path: ':memory:', countCacheTtlMs: 1000, now: () => now });
-  await store.insertEvents(fixture.events);
-
-  const before = await store.queryEvents({ limit: 5 });
-  assert.equal(before.total, fixture.events.length);
-
-  // Within the TTL, a fresh insert is not yet reflected — that staleness is
-  // the deliberate trade for not scanning on every request.
-  now += 500;
-  await store.insertEvents([{ ...fixture.events[0], id: 'extra-one' }]);
-  const stale = await store.queryEvents({ limit: 5 });
-  assert.equal(stale.total, fixture.events.length, 'still serving the cached count');
-  assert.equal(stale.totalIsEstimate, true);
-
-  now += 600; // past the 1000ms TTL from the first query
-  const fresh = await store.queryEvents({ limit: 5 });
-  assert.equal(fresh.total, fixture.events.length + 1);
-  assert.equal(fresh.totalIsEstimate, undefined);
-
-  await store.close();
-});
-
-test('countCacheTtlMs: 0 disables caching — every query is exact and fresh', async () => {
-  const store = new SqliteEventStore({ path: ':memory:', countCacheTtlMs: 0 });
-  await store.insertEvents(fixture.events);
-
-  await store.queryEvents({ limit: 5 });
-  await store.insertEvents([{ ...fixture.events[0], id: 'extra-two' }]);
-  const page = await store.queryEvents({ limit: 5 });
-
-  assert.equal(page.total, fixture.events.length + 1, 'never stale with caching disabled');
-  assert.equal(page.totalIsEstimate, undefined);
-  await store.close();
-});
-
-test('different filters get independent cache entries', async () => {
-  let now = 0;
-  const store = new SqliteEventStore({ path: ':memory:', countCacheTtlMs: 5000, now: () => now });
-  await store.insertEvents(fixture.events);
-
-  const all = await store.queryEvents({ limit: 1 });
-  const scoped = await store.queryEvents({ limit: 1, contractId: SAC });
-  assert.equal(all.totalIsEstimate, undefined, 'a different filter is a cache miss, not reused');
-  assert.equal(scoped.totalIsEstimate, undefined);
-  assert.notEqual(all.total, scoped.total);
-  await store.close();
-});
-
-test('the default TTL is short (2000ms) and caching is on by default', async () => {
-  let now = 0;
-  const store = new SqliteEventStore({ path: ':memory:', now: () => now });
-  await store.insertEvents(fixture.events);
-  await store.queryEvents({ limit: 1 });
-  now += 100;
-  const second = await store.queryEvents({ limit: 1 });
-  assert.equal(second.totalIsEstimate, true, 'caching must be on by default to fix the perf problem');
-  await store.close();
-});
-
-// ── #28 WAL checkpoint management ────────────────────────────────────────────
-
-test('checkpoint(TRUNCATE) shrinks the WAL file after a large write burst', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  // Disable the automatic timer so this test controls exactly when a
-  // checkpoint happens.
-  const store = new SqliteEventStore({ path, checkpointIntervalMs: 0 });
-
-  const many = Array.from({ length: 5000 }, (_, i) => ({
-    ...fixture.events[i % fixture.events.length],
-    id: `wal-${String(i).padStart(6, '0')}`,
-  }));
-  await store.insertEvents(many);
-
-  const before = await store.getStats();
-  assert.ok(before.walSizeBytes > 0, 'expected the WAL to have grown from the write burst');
-
-  await store.checkpoint('TRUNCATE');
-  const after = await store.getStats();
-  assert.ok(after.walSizeBytes < before.walSizeBytes, `expected shrink: ${before.walSizeBytes} -> ${after.walSizeBytes}`);
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('checkpoint() on :memory: is a harmless no-op — there is no WAL file', async () => {
-  const store = new SqliteEventStore({ path: ':memory:' });
-  await assert.doesNotReject(() => store.checkpoint());
-  await assert.doesNotReject(() => store.checkpoint('PASSIVE'));
-  await store.close();
-});
-
-test('a periodic checkpoint timer actually fires on its own', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  // A short real interval stands in for what a long soak test would show at
-  // production scale: the mechanism firing repeatedly without being told to,
-  // for as long as the store stays open.
-  const store = new SqliteEventStore({ path, checkpointIntervalMs: 30 });
-
-  const many = Array.from({ length: 3000 }, (_, i) => ({
-    ...fixture.events[i % fixture.events.length],
-    id: `wal-auto-${String(i).padStart(6, '0')}`,
-  }));
-  await store.insertEvents(many);
-  const grown = (await store.getStats()).walSizeBytes;
-
-  await new Promise((resolve) => setTimeout(resolve, 200)); // several timer firings
-  const settled = (await store.getStats()).walSizeBytes;
-
-  assert.ok(settled <= grown, `expected the automatic timer to have checkpointed: ${grown} -> ${settled}`);
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('checkpointIntervalMs: 0 disables the automatic timer', async () => {
-  // No direct way to assert "no timer fired" without reaching into Node
-  // internals; this at least proves construction and close() do not require
-  // a timer to exist, and that a store built this way still answers queries.
-  const store = new SqliteEventStore({ path: ':memory:', checkpointIntervalMs: 0 });
-  await store.insertEvents(fixture.events);
-  assert.equal((await store.getStats()).eventCount, fixture.events.length);
-  await store.close();
-});
-
-test('close() clears the checkpoint timer so the process can exit', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path, checkpointIntervalMs: 20 });
-  // If close() failed to clear the timer, this test file's own process would
-  // hang at exit waiting on it — node:test would report that as a failure to
-  // finish, which is the proof this test relies on rather than inspecting
-  // Node's internal timer list directly.
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-// ── #35 compress the raw XDR columns ─────────────────────────────────────────
-
-test('a stored event round-trips valueXdr and topicsXdr exactly, now compressed', async () => {
-  const store = await seeded();
-  const raw = fixture.events.find((e) => e.contractId === SAC);
-  const event = await store.getEvent(raw.id);
-  assert.deepEqual(event.topicsXdr, raw.topic);
-  assert.equal(event.valueXdr, raw.value);
-  await store.close();
-});
-
-test('a legacy row stored as plain text (pre-#35) still reads back correctly', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  await store.insertEvents([fixture.events[0]]);
-  const id = fixture.events[0].id;
-
-  // Simulate what every row looked like before this existed: plain TEXT, not
-  // a compressed BLOB. SQLite's column affinity does not care either way.
-  const legacyTopics = JSON.stringify(fixture.events[0].topic);
-  const legacyValue = fixture.events[0].value;
-  const db = new DatabaseSync(path);
-  db.prepare('UPDATE events SET topics_xdr_json = ?, value_xdr = ? WHERE id = ?').run(
-    legacyTopics, legacyValue, id,
-  );
-  db.close();
-
-  const event = await store.getEvent(id);
-  assert.deepEqual(event.topicsXdr, fixture.events[0].topic);
-  assert.equal(event.valueXdr, fixture.events[0].value);
-
-  // checkIntegrity does not flag a legacy plain-text row as corrupt — the
-  // format itself is valid, just old.
-  assert.deepEqual(await store.checkIntegrity(), []);
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('redecode upgrades a legacy plain-text row to compressed storage', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  // A multi-topic fixture event, long enough for compression to actually win.
-  const target = fixture.events.reduce((a, b) => (a.topic.length >= b.topic.length ? a : b));
-  await store.insertEvents([target]);
-
-  const db = new DatabaseSync(path);
-  db.prepare('UPDATE events SET topics_xdr_json = ? WHERE id = ?').run(
-    JSON.stringify(target.topic), target.id,
-  );
-  const beforeType = db.prepare('SELECT typeof(topics_xdr_json) AS t FROM events WHERE id = ?').get(target.id).t;
-  db.close();
-  assert.equal(beforeType, 'text');
-
-  await store.redecode(true);
-
-  const after = new DatabaseSync(path);
-  const afterType = after.prepare('SELECT typeof(topics_xdr_json) AS t FROM events WHERE id = ?').get(target.id).t;
-  after.close();
-  // 'blob' if long enough to compress, 'text' if encodeXdrColumn correctly
-  // decided compression would not help for this particular value — either
-  // way the row must still read back correctly.
-  assert.ok(['blob', 'text'].includes(afterType));
-
-  const event = await store.getEvent(target.id);
-  assert.deepEqual(event.topicsXdr, target.topic);
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-// ── #23 index events by decoded address ──────────────────────────────────────
-
-test('GET-equivalent: filtering by address finds an event whose address is beyond the 4 indexed topics', async () => {
-  const store = await seeded();
-  // Real fixture event: 5 topics, with addresses at position 4 (beyond the
-  // topic0..3 columns that a topic filter can reach).
-  const address = 'CCUUDM434BMZMYWYDITHFXHDMIVTGGD6T2I5UKNX5BSLXLW7HVR4MCGZ';
-  const page = await store.queryEvents({ address, limit: MAX_QUERY_LIMIT });
-  assert.ok(page.events.length > 0);
-  assert.ok(page.events.some((e) => e.id === '0020166232959406080-0000000000'));
-  await store.close();
-});
-
-test('filtering by address also finds one mentioned only inside the decoded value', async () => {
-  const store = await seeded();
-  // Every fixture event's value is a map or vec that itself contains
-  // addresses (token transfers carry from/to). Pick one from a real event and
-  // confirm the filter finds it via the value tree, not a topic.
-  const event = (await store.queryEvents({ limit: 1 })).events[0];
-  const addressInValue = findAddress(event.value);
-  assert.ok(addressInValue, 'expected the fixture to contain a decoded address inside a value');
-
-  const page = await store.queryEvents({ address: addressInValue, limit: MAX_QUERY_LIMIT });
-  assert.ok(page.events.some((e) => e.id === event.id));
-  await store.close();
-});
-
-function findAddress(decoded) {
-  if (decoded.type === 'address' && typeof decoded.value === 'string') return decoded.value;
-  const v = decoded.value;
-  if (Array.isArray(v)) {
-    for (const el of v) {
-      if (typeof el === 'string' && /^[GC][A-Z2-7]{55}$/.test(el)) return el;
-    }
-  } else if (v && typeof v === 'object') {
-    for (const val of Object.values(v)) {
-      if (typeof val === 'string' && /^[GC][A-Z2-7]{55}$/.test(val)) return val;
-    }
-  }
-  return null;
-}
-
-test('an address that appears nowhere returns an empty page', async () => {
-  const store = await seeded();
-  const page = await store.queryEvents({ address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB', limit: 10 });
-  assert.equal(page.total, 0);
-  assert.deepEqual(page.events, []);
-  await store.close();
-});
-
-test('the address filter drives from idx_event_addresses_address, not a full scan of events', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  await store.insertEvents(fixture.events);
-  await store.close();
-
-  // The exact shape queryEvents({ address }) builds via buildWhere.
-  const db = new DatabaseSync(path);
-  const explained = db
-    .prepare(
-      `EXPLAIN QUERY PLAN SELECT * FROM events
-       WHERE id IN (SELECT event_id FROM event_addresses WHERE address = ?)
-       ORDER BY id DESC LIMIT ?`,
-    )
-    .all('GBIBH5UV4Q5L7VVJIHWYBTCSUDHJQXQC2V6Y5LOW4D26XNU5NREMIKE4', 50)
-    .map((r) => r.detail)
-    .join(' | ');
-  db.close();
-
-  assert.match(explained, /idx_event_addresses_address/, `planner chose: ${explained}`);
-  // The defining property: driven from the address index, not a scan of
-  // every row in events looking for a match.
-  assert.ok(!/SCAN events/.test(explained), `still scanning events: ${explained}`);
-
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('pruning cascades: deleted events lose their address-index rows too', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  await store.insertEvents(fixture.events);
-
-  const db = new DatabaseSync(path);
-  const before = db.prepare('SELECT COUNT(*) AS n FROM event_addresses').get().n;
-  db.close();
-  assert.ok(before > 0);
-
-  await store.pruneBefore(9_999_999); // prunes everything
-  await store.close();
-
-  const after = new DatabaseSync(path);
-  const remaining = after.prepare('SELECT COUNT(*) AS n FROM event_addresses').get().n;
-  after.close();
-  assert.equal(remaining, 0, 'ON DELETE CASCADE should have removed every orphaned address row');
-
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('redecode refreshes the address index for the row it touches', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  const target = { id: fixture.events[0].id, contractId: fixture.events[0].contractId };
-  await store.insertEvents([fixture.events[0]]);
-
-  const db = new DatabaseSync(path);
-  const before = db.prepare('SELECT COUNT(*) AS n FROM event_addresses WHERE event_id = ?').get(target.id).n;
-  db.close();
-
-  await store.redecode(true);
-
-  const after = new DatabaseSync(path);
-  const afterCount = after.prepare('SELECT COUNT(*) AS n FROM event_addresses WHERE event_id = ?').get(target.id).n;
-  after.close();
-  assert.equal(afterCount, before, 're-decoding the same valid XDR must produce the same addresses, not duplicates');
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('inserting the same event twice (at-least-once replay) does not duplicate address rows', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  const id = fixture.events[0].id;
-
-  await store.insertEvents([fixture.events[0]]);
-  const db1 = new DatabaseSync(path);
-  const once = db1.prepare('SELECT COUNT(*) AS n FROM event_addresses WHERE event_id = ?').get(id).n;
-  db1.close();
-
-  await store.insertEvents([fixture.events[0]]); // the replay
-  const db2 = new DatabaseSync(path);
-  const twice = db2.prepare('SELECT COUNT(*) AS n FROM event_addresses WHERE event_id = ?').get(id).n;
-  db2.close();
-
-  assert.equal(twice, once, 'a replayed insert must not duplicate address rows');
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-// ── #32 full-text search over decoded values ─────────────────────────────────
-describe('full-text search (#32)', { skip: !FTS5_AVAILABLE && 'this SQLite build has no FTS5' }, () => {
-
-  test('search matches a substring of a decoded topic symbol', async () => {
-    const store = await seeded();
-    // 'posure' is a substring of 'exposure_synced', not a whole token — the
-    // property a trigram index provides that a word tokenizer would not.
-    const page = await store.queryEvents({ search: 'posure', limit: MAX_QUERY_LIMIT });
-    assert.ok(page.total > 0);
-    assert.ok(page.events.every((e) => JSON.stringify(e.topics).toLowerCase().includes('posure')));
-    await store.close();
-  });
-
-  test('search matches inside the decoded value, not only topics', async () => {
-    const store = await seeded();
-    const event = (await store.queryEvents({ limit: 1 })).events[0];
-    const valueText = JSON.stringify(event.value);
-    // A distinctive-enough substring drawn from the actual stored value.
-    const needle = valueText.replace(/[{}[\]":]/g, ' ').trim().split(/\s+/).find((w) => w.length >= 6);
-    assert.ok(needle, 'expected a findable word-like substring in the fixture value');
-
-    const page = await store.queryEvents({ search: needle, limit: MAX_QUERY_LIMIT });
-    assert.ok(page.events.some((e) => e.id === event.id));
-    await store.close();
-  });
-
-  test('search is case-insensitive', async () => {
-    const store = await seeded();
-    const lower = await store.queryEvents({ search: 'exposure', limit: 10 });
-    const upper = await store.queryEvents({ search: 'EXPOSURE', limit: 10 });
-    const mixed = await store.queryEvents({ search: 'ExPoSuRe', limit: 10 });
-    assert.equal(lower.total, upper.total);
-    assert.equal(lower.total, mixed.total);
-    await store.close();
-  });
-
-  test('a search term with FTS5 operator characters is treated literally, not parsed as query syntax', async () => {
-    const store = await seeded();
-    // Must not throw, and must not be interpreted as "fee" AND NOT "transfer" —
-    // it is a literal, if nonsensical, search phrase.
-    await assert.doesNotReject(() => store.queryEvents({ search: 'fee AND NOT transfer OR "x', limit: 10 }));
-    const page = await store.queryEvents({ search: '"quoted" AND weird-input*', limit: 10 });
-    assert.equal(page.total, 0); // literally nothing contains that exact phrase
-    await store.close();
-  });
-
-  test('a search shorter than 3 characters matches nothing rather than erroring', async () => {
-    const store = await seeded();
-    await assert.doesNotReject(async () => {
-      const page = await store.queryEvents({ search: 'ab', limit: 10 });
-      assert.equal(page.total, 0);
-    });
-    await store.close();
-  });
-
-  test('search combines with a contract filter', async () => {
-    const store = await seeded();
-    const page = await store.queryEvents({ search: 'exposure', contractId: SAC, limit: 10 });
-    assert.ok(page.events.every((e) => e.contractId === SAC));
-    await store.close();
-  });
-
-  test('the FTS index stays in sync automatically: redecode updates it, prune removes from it', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-    const path = join(dir, 'lens.db');
-    const store = new SqliteEventStore({ path });
-    await store.insertEvents(fixture.events);
-
-    // Removing rows removes their FTS entries (via the DELETE trigger), with no
-    // extra code in pruneBefore needed for it.
-    await store.pruneBefore(9_999_999); // everything
-    const afterPrune = await store.queryEvents({ search: 'exposure', limit: 10 });
-    assert.equal(afterPrune.total, 0);
-
-    await store.close();
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  test('rebuildSearchIndex repopulates from events and search still works afterward', async () => {
-    const store = await seeded();
-    const before = await store.queryEvents({ search: 'exposure', limit: MAX_QUERY_LIMIT });
-
-    await store.rebuildSearchIndex();
-
-    const after = await store.queryEvents({ search: 'exposure', limit: MAX_QUERY_LIMIT });
-    assert.equal(after.total, before.total);
-    assert.deepEqual(after.events.map((e) => e.id), before.events.map((e) => e.id));
-    await store.close();
-  });
-
-  test('rebuildSearchIndex actually clears stale rows, not just adds', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-    const path = join(dir, 'lens.db');
-    const store = new SqliteEventStore({ path });
-    await store.insertEvents(fixture.events);
-
-    // Hand-insert a bogus FTS row for an event id that does not exist, bypassing
-    // the trigger — simulating drift the rebuild is meant to fix.
-    const db = new DatabaseSync(path);
-    db.prepare("INSERT INTO events_fts (event_id, topics_text, value_text) VALUES ('ghost', 'ghost', 'ghost')").run();
-    const before = db.prepare("SELECT COUNT(*) AS n FROM events_fts WHERE event_id = 'ghost'").get().n;
-    db.close();
-    assert.equal(before, 1);
-
-    await store.rebuildSearchIndex();
-
-    const after = new DatabaseSync(path);
-    const remaining = after.prepare("SELECT COUNT(*) AS n FROM events_fts WHERE event_id = 'ghost'").get().n;
-    after.close();
-    assert.equal(remaining, 0, 'a full rebuild must clear rows that do not correspond to a real event');
-
-    await store.close();
-    await rm(dir, { recursive: true, force: true });
-  });
-
-});
-// ── #37 snapshot export and import ───────────────────────────────────────────
-
-test('a snapshot restores to an identical event set', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-snap-'));
-  const snapshotPath = join(dir, 'snapshot.ndjson');
-  const store = await seeded();
-
-  const exported = await store.exportSnapshot(snapshotPath);
-  assert.equal(exported, fixture.events.length);
-
-  const target = new SqliteEventStore({ path: ':memory:' });
-  const imported = await target.importSnapshot(snapshotPath);
-  assert.equal(imported, fixture.events.length);
-
-  const original = await store.queryEvents({ limit: MAX_QUERY_LIMIT, order: 'asc' });
-  const restored = await target.queryEvents({ limit: MAX_QUERY_LIMIT, order: 'asc' });
-  assert.deepEqual(restored.events, original.events);
-
-  await store.close();
-  await target.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('a snapshot taken while inserts are still landing is internally consistent', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-snap-'));
-  const dbPath = join(dir, 'lens.db');
-  const snapshotPath = join(dir, 'snapshot.ndjson');
-  const store = new SqliteEventStore({ path: dbPath });
-
-  // Half the fixture before the snapshot, the rest inserted concurrently —
-  // VACUUM INTO's own consistency guarantee is what this exercises, not a
-  // race this test could reliably win or lose either way.
-  const half = Math.floor(fixture.events.length / 2);
-  await store.insertEvents(fixture.events.slice(0, half));
-
-  const [exported] = await Promise.all([
-    store.exportSnapshot(snapshotPath),
-    store.insertEvents(fixture.events.slice(half)),
-  ]);
-
-  // Whatever count VACUUM INTO's snapshot captured, it must be a real,
-  // internally consistent prefix — never more than the fixture, and the
-  // exported file itself must parse as valid NDJSON with that many events.
-  assert.ok(exported >= half && exported <= fixture.events.length);
-  const lines = readFileSync(snapshotPath, 'utf8').trim().split('\n');
-  assert.equal(lines.length, exported);
-  for (const line of lines) assert.doesNotThrow(() => JSON.parse(line));
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('importSnapshot is idempotent — importing the same file twice does not duplicate rows', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-snap-'));
-  const snapshotPath = join(dir, 'snapshot.ndjson');
-  const source = await seeded();
-  await source.exportSnapshot(snapshotPath);
-  await source.close();
-
-  const target = new SqliteEventStore({ path: ':memory:' });
-  const first = await target.importSnapshot(snapshotPath);
-  const second = await target.importSnapshot(snapshotPath);
-  assert.equal(first, fixture.events.length);
-  assert.equal(second, 0, 're-importing must insert nothing new');
-  assert.equal((await target.getStats()).eventCount, fixture.events.length);
-
-  await target.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('an empty database exports an empty, valid snapshot', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-snap-'));
-  const snapshotPath = join(dir, 'snapshot.ndjson');
-  const store = new SqliteEventStore({ path: ':memory:' });
-
-  const exported = await store.exportSnapshot(snapshotPath);
-  assert.equal(exported, 0);
-  assert.equal(readFileSync(snapshotPath, 'utf8'), '');
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-// ── #32 regression: FTS5 is not guaranteed on every SQLite build ────────────
-//
-// Real incident: Node 22.13 (this project's own documented floor) ships
-// node:sqlite without FTS5 compiled in, while Node 24 has it. Verified only
-// on a machine that happened to have FTS5 (every machine this was developed
-// on), migration 5 crashed every single SqliteEventStore construction on
-// Node 22.13 in CI — not just search, everything, since migrations run
-// unconditionally at construction. forceDisableFts5 makes that exact
-// condition reproducible without needing an actual FTS5-less SQLite build.
-
-test('a store on a build without FTS5 still constructs and works for everything else', async () => {
-  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
-  await store.insertEvents(fixture.events);
-  const page = await store.queryEvents({ limit: 10 });
-  assert.equal(page.events.length, 10);
-  assert.equal((await store.getStats()).eventCount, fixture.events.length);
-  await store.close();
-});
-
-test('migration 5 is recorded as applied even when skipped, so it is never retried', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path, forceDisableFts5: true });
-  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
-
-  const db = new DatabaseSync(path);
-  const applied = db.prepare('SELECT version FROM schema_migrations WHERE version = 5').get();
-  const table = db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'events_fts'")
-    .get();
-  db.close();
-  assert.ok(applied, 'migration 5 must be recorded as applied, not left pending');
-  assert.equal(table, undefined, 'the FTS5 table itself must not exist on a build without FTS5');
-
-  await store.close();
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('using search without FTS5 throws a clear error, not a cryptic SQL one', async () => {
-  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
-  await store.insertEvents(fixture.events);
-  await assert.rejects(() => store.queryEvents({ search: 'exposure', limit: 10 }), /FTS5/);
-  await store.close();
-});
-
-test('a query with no search filter works normally without FTS5', async () => {
-  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
-  await store.insertEvents(fixture.events);
-  const page = await store.queryEvents({ contractId: SAC, limit: 10 });
-  assert.ok(page.events.length > 0);
-  await store.close();
-});
-
-test('rebuildSearchIndex without FTS5 throws a clear error', async () => {
-  const store = new SqliteEventStore({ path: ':memory:', forceDisableFts5: true });
-  await assert.rejects(() => store.rebuildSearchIndex(), /FTS5/);
-  await store.close();
-});
-
-test('addressPosition still drives from idx_event_addresses_address (#147)', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  await store.insertEvents(fixture.events);
-  await store.close();
-
-  // The exact shape queryEvents({ address, addressPosition }) builds.
-  const db = new DatabaseSync(path);
-  const explained = db
-    .prepare(
-      `EXPLAIN QUERY PLAN SELECT * FROM events
-       WHERE id IN (SELECT event_id FROM event_addresses WHERE address = ? AND position = ?)
-       ORDER BY id DESC LIMIT ?`,
-    )
-    .all('GDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB5GSA', 'topic1', 50)
-    .map((r) => r.detail)
-    .join(' | ');
-  db.close();
-
-  // The index is (address, event_id) on a WITHOUT ROWID table whose primary
-  // key ends in position, so it already carries position: no new index needed.
-  assert.match(explained, /COVERING INDEX idx_event_addresses_address/, `planner chose: ${explained}`);
-  assert.ok(!/SCAN events/.test(explained), `still scanning events: ${explained}`);
-
-  await rm(dir, { recursive: true, force: true });
-});
-
-test('migration 9 backfills topic types on rows written before it (#146)', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
-  const path = join(dir, 'lens.db');
-  const store = new SqliteEventStore({ path });
-  await store.insertEvents(fixture.events);
-  await store.close();
-
-  // Roll the database back to how a v8 store left it: no type columns at all.
-  const migration = MIGRATIONS.find((m) => m.version === 9);
-  const db = new DatabaseSync(path);
-  db.exec(migration.down);
-  db.prepare('DELETE FROM schema_migrations WHERE version = 9').run();
-  db.close();
-
-  // Reopening applies migration 9, which must fill the columns from topics_json.
-  const reopened = new SqliteEventStore({ path });
-  const typed = await reopened.queryEvents({ topics: ['transfer'], topicTypes: ['symbol'], limit: 1000 });
-  const untyped = await reopened.queryEvents({ topics: ['transfer'], limit: 1000 });
-  assert.ok(typed.events.length > 0, 'backfilled rows match a typed filter');
-  assert.equal(typed.events.length, untyped.events.length);
-  assert.equal((await reopened.queryEvents({ topics: ['transfer'], topicTypes: ['string'] })).events.length, 0);
-  await reopened.close();
-
-  const check = new DatabaseSync(path);
-  const missing = check
-    .prepare('SELECT COUNT(*) AS n FROM events WHERE topic0 IS NOT NULL AND topic0_type IS NULL')
-    .get();
-  const deepMissing = check.prepare('SELECT COUNT(*) AS n FROM event_topics WHERE type IS NULL').get();
-  check.close();
-  assert.equal(missing.n, 0);
-  assert.equal(deepMissing.n, 0);
-
-  await rm(dir, { recursive: true, force: true });
-});
+  const

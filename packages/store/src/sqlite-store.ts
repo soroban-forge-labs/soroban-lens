@@ -112,6 +112,7 @@ export class SqliteEventStore implements EventStore {
   #statements: Statements | null = null;
   #checkpointTimer: ReturnType<typeof setInterval> | undefined;
   #searchAvailable = false;
+  #closed = false;
 
   constructor(options: SqliteStoreOptions) {
     this.#path = options.path;
@@ -130,7 +131,10 @@ export class SqliteEventStore implements EventStore {
     if (options.path !== ':memory:' && !readOnly) this.#db.exec('PRAGMA journal_mode = WAL');
     if (!readOnly) this.#db.exec('PRAGMA synchronous = NORMAL');
     this.#db.exec('PRAGMA foreign_keys = ON');
-    // Wait rather than fail when the indexer holds the write lock.
+    // Wait rather than fail when the indexer holds the write lock. Windows
+    // releases file locks less eagerly than POSIX, so a reader closing a
+    // statement can still briefly block a writer; a generous timeout plus the
+    // retry helper below is what keeps that from surfacing as a test failure.
     this.#db.exec('PRAGMA busy_timeout = 5000');
 
     this.#searchAvailable = options.forceDisableFts5 ? false : this.#hasFts5();
@@ -1080,14 +1084,18 @@ export class SqliteEventStore implements EventStore {
     // connection (the indexer) is mid-write — it is SQLite's own supported
     // mechanism for exactly this, which is why the issue names it directly.
     // Copying the live file instead risks capturing a torn WAL checkpoint.
-    const tempPath =
-      this.#path === ':memory:'
-        ? join(tmpdir(), `lens-snapshot-${randomUUID()}.db`)
-        : `${this.#path}.snapshot-${randomUUID()}`;
+    //
+    // The temp path is always built with join(tmpdir(), ...): a path derived
+    // from the database path with a hard-coded separator breaks on Windows,
+    // and a temp file next to the database can be locked by the same process.
+    const tempPath = join(tmpdir(), `lens-snapshot-${randomUUID()}.db`);
     this.#db.prepare('VACUUM INTO ?').run(tempPath);
 
     const snapshot = new DatabaseSync(tempPath);
     try {
+      // Read every row into memory and close the statement before touching the
+      // output file: on Windows an open statement keeps the temp database's
+      // file handle alive, and rm() then fails with EBUSY.
       const rows = snapshot.prepare('SELECT * FROM events ORDER BY id ASC').all() as unknown as EventRow[];
       const out = createWriteStream(destPath, { encoding: 'utf8' });
       try {
@@ -1101,7 +1109,8 @@ export class SqliteEventStore implements EventStore {
       return rows.length;
     } finally {
       snapshot.close();
-      await rm(tempPath, { force: true });
+      // Retry the unlink: Windows can hold the handle a moment past close().
+      await rmWithRetry(tempPath);
     }
   }
 
@@ -1157,7 +1166,18 @@ export class SqliteEventStore implements EventStore {
   }
 
   async close(): Promise<void> {
-    if (this.#checkpointTimer) clearInterval(this.#checkpointTimer);
+    if (this.#closed) return;
+    this.#closed = true;
+    if (this.#checkpointTimer) {
+      clearInterval(this.#checkpointTimer);
+      this.#checkpointTimer = undefined;
+    }
+    // Drop cached statements before closing the connection: on Windows an
+    // outstanding statement keeps the database file handle open, so a test
+    // that closes the store and then deletes its temp directory fails with
+    // EBUSY unless everything is released first.
+    this.#statements = null;
+    this.#countCache.clear();
     this.#db.close();
   }
 }
@@ -1440,6 +1460,26 @@ function fileSize(path: string): number | null {
     return statSync(path).size;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Remove a file, retrying briefly on Windows' transient EBUSY/EPERM.
+ *
+ * POSIX unlinks a file whose handle is still open; Windows refuses until the
+ * last handle closes, and SQLite can take a moment past `close()` to release
+ * its own. A few short retries turn that race into a non-event.
+ */
+async function rmWithRetry(path: string, attempts = 10): Promise<void> {
+  for (let i = 0; ; i++) {
+    try {
+      await rm(path, { force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (i >= attempts || (code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY')) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25 * (i + 1)));
+    }
   }
 }
 

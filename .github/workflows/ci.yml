@@ -30,15 +30,25 @@ jobs:
         run: npm run test:a11y --workspace @soroban-lens/web
 
   test:
-    name: Build and test (Node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    name: Build and test (${{ matrix.os }}, Node ${{ matrix.node }})
+    # The code touches platform-specific behaviour: `rename` over an existing
+    # file in the cursor store, `tmpdir()` paths, and SQLite file locking. Run
+    # the full suite on all three so contributors on any OS find out here.
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # 22.13 is the floor: `node:sqlite` loses its --experimental-sqlite
         # flag there. Pinning the exact floor is the point — it is what caught
         # this being documented as 22.12. 24 is the current LTS.
-        node: ['22.13', '24']
+        #
+        # The floor is only exercised on Linux; macOS and Windows run the
+        # current LTS to keep the matrix at four jobs.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['24']
+        include:
+          - os: ubuntu-latest
+            node: '22.13'
 
     steps:
       - uses: actions/checkout@v7
@@ -65,6 +75,7 @@ jobs:
         # Proves the preflight actually fails rather than passing vacuously.
         # Uses an unresolvable host so the result is identical with or without
         # network egress.
+        shell: bash
         run: |
           set +e
           node packages/cli/dist/bin.js doctor \
@@ -79,6 +90,9 @@ jobs:
           fi
 
       - name: End to end against the fixture
+        # Backgrounding a server and trapping its PID is bash-only; `shell:
+        # bash` gives the same script on every runner (Git Bash on Windows).
+        shell: bash
         run: |
           set -euo pipefail
           DB="$RUNNER_TEMP/e2e.db"
