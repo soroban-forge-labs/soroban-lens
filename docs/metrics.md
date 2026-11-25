@@ -26,6 +26,15 @@ An invalid port or occupied bind address fails startup.
 | `lens_rpc_request_duration_seconds` | Histogram per `method`, covering every successful or failed attempt, excluding retry waits |
 | `lens_rpc_errors_total` | Failed attempts by `method` and `kind`: `rate_limit` (429), `http_4xx` (other client errors: a 401/403 is usually a wrong provider key), `http_5xx` (provider outage), `timeout`, `json_rpc`, or `transport` |
 | `lens_cursor_restarts_total` | Successful cursor clears following a retention gap |
+| `lens_pg_pool_connections{process,state}` | Postgres pool connections by `state` (`total`, `idle`, `waiting`); only present when the Postgres backend is active |
+| `lens_pg_pool_acquire_timeouts_total{process}` | Connection acquire timeouts; only present when the Postgres backend is active |
+
+The Postgres pool metrics are labelled by `process` (`api` or `indexer`) so a
+shared database can be attributed to the workload that exhausted the pool.
+`lens_pg_pool_connections{state="waiting"}` rising while `state="idle"` stays at
+zero indicates pool exhaustion; `lens_pg_pool_acquire_timeouts_total` counts the
+requests that gave up waiting. These series are absent when the store runs on a
+non-Postgres backend.
 
 The same server exposes `/healthz` and `/readyz` as JSON endpoints. Liveness
 returns `200 {"status":"ok"}` while the process can serve requests. Readiness
