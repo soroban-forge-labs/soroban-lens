@@ -17,6 +17,17 @@ function isValidLedger(v: string): boolean {
   return v === '' || (/^\d+$/.test(v) && Number.isInteger(Number(v)) && Number(v) >= 0);
 }
 
+/** Returns true if the string is empty OR a valid G.../C... Stellar StrKey. */
+function isValidAddress(v: string): boolean {
+  return v === '' || /^[GC][A-Z2-7]{55}$/.test(v);
+}
+
+const TIME_PRESETS = [
+  { label: 'Last 15 min', seconds: 15 * 60 },
+  { label: 'Last hour', seconds: 60 * 60 },
+  { label: 'Last day', seconds: 24 * 60 * 60 },
+];
+
 export function Filters({
   value,
   onChange,
@@ -41,6 +52,14 @@ export function Filters({
     value.fromLedger !== '' &&
     value.toLedger !== '' &&
     Number(value.fromLedger) > Number(value.toLedger);
+  const addressInvalid = !isValidAddress(value.address);
+  const hasTimeRange = value.fromTime !== '' || value.toTime !== '';
+
+  const applyTimePreset = (seconds: number): void => {
+    const now = Math.floor(Date.now() / 1000);
+    onChange({ ...value, fromTime: String(now - seconds), toTime: String(now) });
+  };
+  const clearTimeRange = (): void => onChange({ ...value, fromTime: '', toTime: '' });
 
   return (
     <form className="filters" onSubmit={(e) => e.preventDefault()}>
@@ -80,6 +99,26 @@ export function Filters({
         <button type="button" className="link-button" onClick={onUseExample}>
           {t('useTestnetExample')}
         </button>
+      </div>
+
+      <div className="field">
+        <label htmlFor="address">Address</label>
+        <input
+          id="address"
+          name="address"
+          className="mono"
+          placeholder="G… or C…"
+          spellCheck={false}
+          autoComplete="off"
+          value={value.address}
+          aria-invalid={addressInvalid}
+          onChange={(e) => set('address', e.target.value.trim())}
+        />
+        {addressInvalid && (
+          <span className="warning" role="alert" style={{ padding: '2px 6px', fontSize: '11px' }}>
+            Must start with G… or C… (56 characters)
+          </span>
+        )}
       </div>
 
       <div className="field">
@@ -139,6 +178,29 @@ export function Filters({
         {rangeInvalid && !toInvalid && (
           <span className="warning" role="alert" style={{ padding: '2px 6px', fontSize: '11px' }}>
             Must be ≥ from ledger
+          </span>
+        )}
+      </div>
+
+      <div className="field">
+        <label>Time range</label>
+        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+          {TIME_PRESETS.map((p) => (
+            <button key={p.label} type="button" className="link-button" onClick={() => applyTimePreset(p.seconds)}>
+              {p.label}
+            </button>
+          ))}
+          {hasTimeRange && (
+            <button type="button" className="link-button" onClick={clearTimeRange}>
+              Clear
+            </button>
+          )}
+        </div>
+        {hasTimeRange && (
+          <span className="muted small" role="status">
+            {value.fromTime && value.toTime
+              ? `${new Date(Number(value.fromTime) * 1000).toLocaleTimeString()} – ${new Date(Number(value.toTime) * 1000).toLocaleTimeString()}`
+              : 'Custom range active'}
           </span>
         )}
       </div>

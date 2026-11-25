@@ -20,11 +20,16 @@
 export interface FilterState {
   contractId: string;
   topic: string;
+  /** Stellar account (G…) or contract (C…) address; '' when unset. */
+  address: string;
   successfulOnly: boolean;
   live: boolean;
   /** Inclusive ledger bounds as typed in the filter bar; '' when unset. */
   fromLedger: string;
   toLedger: string;
+  /** Epoch-seconds time bounds; '' when unset. */
+  fromTime: string;
+  toTime: string;
 }
 
 /** The complete view state that can be encoded in the URL. */
@@ -57,11 +62,14 @@ export function parseUrl(pathname: string, search: string): UrlState | null {
     filters: {
       contractId: params.get('contract') ?? '',
       topic: params.get('topic') ?? '',
+      address: params.get('address') ?? '',
       successfulOnly: params.get('successfulOnly') === 'true',
       // live defaults to true; only `live=false` turns it off.
       live: params.get('live') !== 'false',
       fromLedger: params.get('fromLedger') ?? '',
       toLedger: params.get('toLedger') ?? '',
+      fromTime: params.get('fromTime') ?? '',
+      toTime: params.get('toTime') ?? '',
     },
     network: params.get('network') ?? '',
     expandedEventId,
@@ -80,11 +88,14 @@ export function stringifyUrl(state: UrlState): string {
 
   if (f.contractId) params.set('contract', f.contractId);
   if (f.topic) params.set('topic', f.topic);
+  if (f.address) params.set('address', f.address);
   if (f.successfulOnly) params.set('successfulOnly', 'true');
   // live defaults to true, so only write it when it is off.
   if (!f.live) params.set('live', 'false');
   if (f.fromLedger) params.set('fromLedger', f.fromLedger);
   if (f.toLedger) params.set('toLedger', f.toLedger);
+  if (f.fromTime) params.set('fromTime', f.fromTime);
+  if (f.toTime) params.set('toTime', f.toTime);
   if (state.network) params.set('network', state.network);
 
   const query = params.toString();
@@ -105,10 +116,13 @@ export function sameFilterView(a: UrlState, b: UrlState): boolean {
   return (
     a.filters.contractId === b.filters.contractId &&
     a.filters.topic === b.filters.topic &&
+    a.filters.address === b.filters.address &&
     a.filters.successfulOnly === b.filters.successfulOnly &&
     a.filters.live === b.filters.live &&
     a.filters.fromLedger === b.filters.fromLedger &&
     a.filters.toLedger === b.filters.toLedger &&
+    a.filters.fromTime === b.filters.fromTime &&
+    a.filters.toTime === b.filters.toTime &&
     a.network === b.network
   );
 }

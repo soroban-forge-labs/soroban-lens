@@ -26,12 +26,14 @@ interface Props {
   onNavigate: (eventId: string, delta: 1 | -1) => void;
   /** 1-based position among all loaded rows, for screen readers when only some are rendered. */
   rowIndex?: number | undefined;
+  /** Open the transaction events panel for this hash (#65). */
+  onTxHashClick?: (txHash: string) => void;
 }
 
 /** One table row, expanding in place to show the full decoded payload. */
 export function EventRow({
   event, network, expanded, onToggleExpanded, showContract, onTopicClick, selected, onToggleSelect, absolute,
-  onNavigate, rowIndex,
+  onNavigate, rowIndex, onTxHashClick,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
   const firstTopic = event.topics[0];
@@ -135,9 +137,20 @@ export function EventRow({
           )}
         </td>
         <td className="col-tx" title={event.txHash}>
-          <ExplorerLink network={network} entity="tx" value={event.txHash} title="Open this transaction in a block explorer">
-            <span className="mono">{truncate(event.txHash, 6, 6)}</span>
-          </ExplorerLink>
+          {onTxHashClick ? (
+            <button
+              type="button"
+              className="link-button mono"
+              onClick={() => onTxHashClick(event.txHash)}
+              title="Show all events for this transaction"
+            >
+              {truncate(event.txHash, 6, 6)}
+            </button>
+          ) : (
+            <ExplorerLink network={network} entity="tx" value={event.txHash} title="Open this transaction in a block explorer">
+              <span className="mono">{truncate(event.txHash, 6, 6)}</span>
+            </ExplorerLink>
+          )}
           <CopyButton value={event.txHash} label="transaction hash" />
         </td>
       </tr>
