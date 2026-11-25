@@ -6,6 +6,7 @@ import { SqliteEventStore } from '@soroban-lens/store';
 import { createApiServer } from '../dist/index.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
+const fixtureSpecs = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-specs.json', import.meta.url), 'utf8')).specs;
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
 
 /** A store wrapper that counts reads, to prove rejected queries never reach it. */
@@ -27,8 +28,8 @@ function spyOn(store) {
   return { proxy, calls };
 }
 
-async function withGraphQL(run, graphql = { enabled: true }) {
-  const real = new SqliteEventStore({ path: ':memory:' });
+async function withGraphQL(run, graphql = { enabled: true }, { typedFieldIndex = false } = {}) {
+  const real = new SqliteEventStore({ path: ':memory:', typedFieldIndex });
   await real.insertEvents(fixture.events);
   const { proxy, calls } = spyOn(real);
   const server = createApiServer({ store: proxy, graphql });
@@ -89,6 +90,29 @@ test('events can be joined to their contract summary', async () => {
     assert.ok(nested.body.data.contract.events.events.every((e) => e.contractId === SAC));
     assert.ok(nested.body.data.contract.topics.length <= 3);
   });
+});
+
+test('typed field filters are available through GraphQL event queries', async () => {
+  await withGraphQL(async ({ post, store }) => {
+    const spec = fixtureSpecs.find((record) => record.contractId === SAC);
+    await store.saveContractSpec(spec);
+    const expected = await store.queryEvents({
+      contractId: SAC,
+      typedField: 'amount',
+      typedGte: '1000000',
+      limit: 2,
+    });
+    const { body } = await post(
+      `query($field: String!, $minimum: String!) {
+        events(contractId: "${SAC}", typedField: $field, typedGte: $minimum, limit: 2) {
+          events { id }
+        }
+      }`,
+      { field: 'amount', minimum: '1000000' },
+    );
+    assert.equal(body.errors, undefined);
+    assert.deepEqual(body.data.events.events.map((event) => event.id), expected.events.map((event) => event.id));
+  }, { enabled: true }, { typedFieldIndex: true });
 });
 
 test('aliases, fragments, variables, @skip/@include and __typename work', async () => {

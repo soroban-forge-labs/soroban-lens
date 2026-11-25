@@ -44,9 +44,31 @@ After an upgrade you know about, `lens spec fetch -c <id>` refreshes it now.
 - **Force a shape.** A contract may emit events its spec does not declare —
   the committed fixture has one. Those get no `typed` field rather than a
   wrong one.
-- **Rewrite stored rows.** The typed view is computed when the API reads the
-  event, from the raw XDR that is always kept. A spec fetched today applies to
-  events indexed last week.
+- **Rewrite generic event rows.** The typed view is still computed when the API
+  reads an event, from the raw XDR that is always kept. A spec fetched today
+  also backfills the optional `typed_event_fields` side index for older events.
+
+## Filtering typed fields
+
+The store indexes named typed fields by event and field name. Equality compares
+the exact rendered value; integer bounds use an integer column, never text
+ordering. Integer values outside signed 64-bit range remain available for exact
+equality but are not range-indexed.
+
+```text
+/events?typedField=amount&typedGte=1000000&typedLt=5000000
+/events?typedField=sep0011_asset&typedValue=native
+```
+
+The index is opt-in for SQLite and Postgres stores (`typedFieldIndex: true`).
+Set `LENS_TYPED_FIELD_INDEX=true` on the indexer to enable it. When enabled,
+events inserted after their spec are indexed immediately; saving a spec later
+rebuilds the side index for that contract's existing events. The store
+benchmark compares both insert paths:
+
+```bash
+npm run bench:typed-fields -w @soroban-lens/store
+```
 
 ## Checking it
 

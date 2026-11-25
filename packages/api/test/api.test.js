@@ -23,11 +23,12 @@ const FTS5_AVAILABLE = (() => {
 })();
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
+const fixtureSpecs = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-specs.json', import.meta.url), 'utf8')).specs;
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
 
 /** Boot a real HTTP server on an ephemeral port, seeded from the fixture. */
-async function withServer(run, { seed = true } = {}) {
-  const store = new SqliteEventStore({ path: ':memory:' });
+async function withServer(run, { seed = true, typedFieldIndex = false } = {}) {
+  const store = new SqliteEventStore({ path: ':memory:', typedFieldIndex });
   if (seed) await store.insertEvents(fixture.events);
   const server = createApiServer({ store });
   server.listen(0, '127.0.0.1');
@@ -136,6 +137,35 @@ test('ledger range filters are applied', async () => {
     assert.ok(body.events.length > 0);
     assert.ok(body.events.every((e) => e.ledger >= 4695318 && e.ledger <= 4695320));
   });
+});
+
+test('typed field filters support exact equality and numeric ranges', async () => {
+  await withServer(async ({ get, store }) => {
+    const spec = fixtureSpecs.find((record) => record.contractId === SAC);
+    await store.saveContractSpec(spec);
+
+    const { res, body } = await get(
+      `/contracts/${SAC}/events?typedField=amount&typedGte=1000000&limit=1000`,
+    );
+    assert.equal(res.status, 200);
+    assert.ok(body.events.length > 0);
+    assert.ok(body.events.every((event) => {
+      const amount = event.typed?.fields.find((field) => field.name === 'amount')?.value;
+      return typeof amount === 'string' && BigInt(amount) >= 1_000_000n;
+    }));
+
+    const equality = await get(
+      `/contracts/${SAC}/events?typedField=sep0011_asset&typedValue=native&limit=1000`,
+    );
+    assert.equal(equality.res.status, 200);
+    assert.ok(equality.body.events.length > 0);
+    assert.ok(equality.body.events.every((event) =>
+      event.typed?.fields.some((field) => field.name === 'sep0011_asset' && field.value === 'native'),
+    ));
+
+    const invalid = await get(`/events?typedField=amount&typedGte=1.5`);
+    assert.equal(invalid.res.status, 400);
+  }, { typedFieldIndex: true });
 });
 
 test('successfulOnly=true drops failed contract calls', async () => {

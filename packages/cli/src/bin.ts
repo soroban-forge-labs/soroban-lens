@@ -315,7 +315,7 @@ async function main(argv: string[]): Promise<number> {
       const path = values.fixture ?? 'fixtures/testnet-events.json';
       const parsed = JSON.parse(await readFile(path, 'utf8')) as { events?: RawEventInput[] };
       const events = parsed.events ?? [];
-      const store = new SqliteEventStore({ path: config.dbPath });
+      const store = new SqliteEventStore({ path: config.dbPath, typedFieldIndex: config.typedFieldIndex });
       try {
         const inserted = await store.insertEvents(events);
         process.stderr.write(
@@ -506,7 +506,7 @@ async function main(argv: string[]): Promise<number> {
         process.stderr.write('error: lens import requires a source path\n');
         return 2;
       }
-      const store = new SqliteEventStore({ path: config.dbPath });
+      const store = new SqliteEventStore({ path: config.dbPath, typedFieldIndex: config.typedFieldIndex });
       try {
         const count = await store.importSnapshot(path);
         process.stderr.write(`[lens] imported ${count} new event(s) from ${path}\n`);
@@ -518,7 +518,7 @@ async function main(argv: string[]): Promise<number> {
 
     case 'spec': {
       const sub = positionals[0] ?? 'list';
-      const store = new SqliteEventStore({ path: config.dbPath });
+      const store = new SqliteEventStore({ path: config.dbPath, typedFieldIndex: config.typedFieldIndex });
       try {
         if (sub === 'list') {
           const records = await store.listContractSpecs();

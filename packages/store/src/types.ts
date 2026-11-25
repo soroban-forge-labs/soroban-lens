@@ -170,6 +170,15 @@ export interface EventQuery {
   transactionIndex?: number | undefined;
   /** Position of the operation within its transaction. */
   operationIndex?: number | undefined;
+  /** Match a declared typed field. All supplied equality/range constraints are ANDed. */
+  typedField?: string | undefined;
+  /** Exact rendered value for equality (including larger-than-64-bit integers). */
+  typedValue?: string | undefined;
+  /** Inclusive/exclusive integer bounds. Only values fitting a signed 64-bit integer are range-indexed. */
+  typedGt?: string | undefined;
+  typedGte?: string | undefined;
+  typedLt?: string | undefined;
+  typedLte?: string | undefined;
   /** Restrict to successful contract calls. Omitted means "both". */
   successfulOnly?: boolean | undefined;
   /** 1..1000. Defaults to 50. */

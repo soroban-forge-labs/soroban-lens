@@ -29,6 +29,8 @@ export interface LensConfig {
    * default; off for an air-gapped RPC proxy that only forwards getEvents.
    */
   fetchSpecs: boolean;
+  /** Persist typed event fields for equality/range filters. `LENS_TYPED_FIELD_INDEX=true` opts in. */
+  typedFieldIndex: boolean;
   /**
    * Local-versus-ledger clock difference, in seconds, beyond which `lens doctor`
    * and the indexer's startup warn (#18). `LENS_CLOCK_SKEW_THRESHOLD_SECONDS`.
@@ -116,6 +118,7 @@ export function resolveConfig(
       maxDelayMs: overrides.retryMaxDelay ?? numberOr(env.LENS_RETRY_MAX_DELAY_MS, 30_000),
     },
     fetchSpecs: !/^(0|false|no|off)$/i.test((env.LENS_FETCH_SPECS ?? '').trim()),
+    typedFieldIndex: /^(1|true|yes|on)$/i.test((env.LENS_TYPED_FIELD_INDEX ?? '').trim()),
     clockSkewThresholdSeconds: resolveClockSkewThreshold(env.LENS_CLOCK_SKEW_THRESHOLD_SECONDS),
     maxDbSizeBytes: overrides.maxDbSize ?? optionalNumber(env.LENS_MAX_DB_SIZE_BYTES),
     pruneIntervalMs: overrides.pruneInterval ?? numberOr(env.LENS_PRUNE_INTERVAL_MS, 60_000),

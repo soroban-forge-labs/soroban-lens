@@ -210,4 +210,26 @@ export const POSTGRES_MIGRATIONS: PostgresMigration[] = [
       ALTER TABLE events DROP COLUMN topic0_type;
     `,
   },
+  {
+    version: 10,
+    name: 'typed-event-fields',
+    up: `
+      CREATE TABLE typed_event_fields (
+        event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        field_name TEXT NOT NULL,
+        field_type TEXT NOT NULL,
+        text_value TEXT NOT NULL,
+        numeric_value BIGINT,
+        PRIMARY KEY (event_id, field_name)
+      );
+      CREATE INDEX idx_typed_event_fields_text
+        ON typed_event_fields (field_name, text_value, event_id);
+      CREATE INDEX idx_typed_event_fields_numeric
+        ON typed_event_fields (field_name, numeric_value, event_id)
+        WHERE numeric_value IS NOT NULL;
+    `,
+    down: `
+      DROP TABLE IF EXISTS typed_event_fields;
+    `,
+  },
 ];

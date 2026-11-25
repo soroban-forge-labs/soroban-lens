@@ -13,6 +13,8 @@ import {
   DEFAULT_MAX_QUERY_LIMIT,
   resolveMaxQueryLimit,
   normaliseLimit,
+  ContractTypedDecoder,
+  decodeEvent,
 } from '../dist/index.js';
 
 /**
@@ -34,6 +36,7 @@ const FTS5_AVAILABLE = (() => {
 })();
 
 const fixture = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'));
+const fixtureSpecs = JSON.parse(readFileSync(new URL('../../../fixtures/testnet-specs.json', import.meta.url), 'utf8')).specs;
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
 
 async function seeded() {
@@ -76,6 +79,68 @@ test('inserts are idempotent, so at-least-once delivery is safe', async () => {
   assert.equal(second, 0, 'replaying a batch must insert nothing');
   assert.equal((await store.getStats()).eventCount, fixture.events.length);
   await store.close();
+});
+
+test('typed field ranges compare fixture i128 amounts numerically, on insert and spec backfill', async () => {
+  const record = fixtureSpecs.find((spec) => spec.contractId === SAC);
+  const decoder = ContractTypedDecoder.fromRecord(record);
+  const threshold = 1_000_000n;
+  const expected = fixture.events
+    .filter((raw) => raw.contractId === SAC)
+    .filter((raw) => {
+      const amount = decoder.decode(decodeEvent(raw))?.fields.find((field) => field.name === 'amount')?.value;
+      return typeof amount === 'string' && BigInt(amount) >= threshold;
+    })
+    .map((raw) => raw.id)
+    .sort();
+  assert.ok(expected.length > 0, 'fixture should include matching amount fields');
+
+  for (const specFirst of [true, false]) {
+    const store = new SqliteEventStore({ path: ':memory:', typedFieldIndex: true });
+    if (specFirst) await store.saveContractSpec(record);
+    await store.insertEvents(fixture.events);
+    if (!specFirst) {
+      assert.equal((await store.queryEvents({
+        contractId: SAC,
+        typedField: 'amount',
+        typedGte: threshold.toString(),
+        limit: MAX_QUERY_LIMIT,
+      })).events.length, 0);
+      await store.saveContractSpec(record);
+    }
+
+    const range = await store.queryEvents({
+      contractId: SAC,
+      typedField: 'amount',
+      typedGte: threshold.toString(),
+      limit: MAX_QUERY_LIMIT,
+      order: 'asc',
+    });
+    assert.deepEqual(range.events.map((event) => event.id), expected);
+
+    const equality = await store.queryEvents({
+      contractId: SAC,
+      typedField: 'sep0011_asset',
+      typedValue: 'native',
+      limit: MAX_QUERY_LIMIT,
+    });
+    assert.ok(equality.events.length > 0);
+    assert.ok(equality.events.every((event) =>
+      decoder.decode(event)?.fields.some((field) => field.name === 'sep0011_asset' && field.value === 'native'),
+    ));
+    await store.close();
+  }
+
+  const disabled = new SqliteEventStore({ path: ':memory:', typedFieldIndex: false });
+  await disabled.saveContractSpec(record);
+  await disabled.insertEvents(fixture.events);
+  assert.equal((await disabled.queryEvents({
+    contractId: SAC,
+    typedField: 'amount',
+    typedGte: threshold.toString(),
+    limit: MAX_QUERY_LIMIT,
+  })).events.length, 0);
+  await disabled.close();
 });
 
 test('a stored event round-trips with its decoded payload and raw XDR intact', async () => {

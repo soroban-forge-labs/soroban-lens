@@ -73,6 +73,23 @@ test('queryEvents escapes LIKE metacharacters in a search term', async () => {
   assert.equal(select.values[0], '%50\\%\\_off\\\\%');
 });
 
+test('queryEvents filters typed values with parameterized text and numeric predicates', async () => {
+  const pool = recordingPool((text) => (text.includes('COUNT(*)') ? [{ n: 0 }] : []));
+  const store = new PostgresEventStore(pool, { countCacheTtlMs: 0 });
+
+  await store.queryEvents({
+    typedField: 'amount',
+    typedValue: '1000',
+    typedGte: '1000',
+    typedLt: '9000',
+  });
+
+  const select = pool.calls.find((call) => call.text.includes('SELECT * FROM events'));
+  assert.ok(select);
+  assert.match(select.text, /id IN \(SELECT event_id FROM typed_event_fields WHERE field_name = \$1 AND text_value = \$2 AND numeric_value >= \$3::BIGINT AND numeric_value < \$4::BIGINT\)/);
+  assert.deepEqual(select.values, ['amount', '1000', '1000', '9000', 51]);
+});
+
 test('insertEvents is idempotent SQL in one transaction, indexing addresses only for new rows', async () => {
   const fixture = JSON.parse(
     readFileSync(new URL('../../../fixtures/testnet-events.json', import.meta.url), 'utf8'),

@@ -95,8 +95,17 @@ this adds is each field's declared type, which parseEvent does not return.
 
 Specs are stored per contract (`contract_specs`, migration 6) as raw base64
 `ScSpecEntry` XDR, and the typed view is computed at read time, never written
-into the event row. Same reasoning as keeping raw event XDR: a better decoder
-applies to old rows with no migration and no re-fetch.
+into the event row. A separate `typed_event_fields` table (migration 10) can
+index typed values for equality and numeric range filters without changing the
+event's generic representation. Saving a spec backfills prior events for that
+contract.
+
+Typed-field indexing is opt-in per store with `typedFieldIndex: true`; the
+indexer enables it with `LENS_TYPED_FIELD_INDEX=true`. Equality uses the exact
+rendered value. Range filters use signed 64-bit integer values only: larger
+i128 values remain available for equality rather than being rounded or
+compared as text. The insert overhead benchmark is
+`npm run bench:typed-fields -w @soroban-lens/store`.
 
 Stellar Asset Contracts have no Wasm, so `STELLAR_ASSET_SPEC_ENTRIES` writes
 their spec out by hand. Declaration order matters there: the pre-protocol-23
