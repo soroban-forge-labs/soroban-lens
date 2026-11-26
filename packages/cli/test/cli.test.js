@@ -546,12 +546,12 @@ test('a lens.config.json file drives the resolved config', async () => {
     await writeFile(
       configPath,
       JSON.stringify({
-        LENS_CONTRACT_IDS: [FAKE_IDS[0], FAKE_IDS[1]],
-        LENS_DB_PATH: join(dir, 'from-file.db'),
-        LENS_PAGE_SIZE: 50,
+        contractIds: [FAKE_IDS[0], FAKE_IDS[1]],
+        dbPath: join(dir, 'from-file.db'),
+        pageSize: 50,
       }),
     );
-    const config = resolveConfig({ configFile: configPath }, {});
+    const config = resolveConfig({}, { LENS_CONFIG_FILE: configPath });
     assert.deepEqual(config.contractIds, [FAKE_IDS[0], FAKE_IDS[1]]);
     assert.equal(config.dbPath, join(dir, 'from-file.db'));
     assert.equal(config.pageSize, 50);

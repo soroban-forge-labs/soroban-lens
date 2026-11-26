@@ -357,13 +357,19 @@ export function resolveConfig(
   const rpcHeadersFlag = overrides.rpcHeaders;
   const rpcHeadersEnv = env.LENS_RPC_HEADERS;
   const rpcHeadersFile = file.rpcHeaders;
-  const rpcHeaders = pick<Record<string, string>>(
-    'rpcHeaders',
-    rpcHeadersFlag && rpcHeadersFlag.length > 0 ? parseHeaders(rpcHeadersFlag, undefined) : undefined,
-    rpcHeadersEnv !== undefined && rpcHeadersEnv !== '' ? parseHeaders(undefined, rpcHeadersEnv) : undefined,
-    rpcHeadersFile && rpcHeadersFile.length > 0 ? parseHeaders(rpcHeadersFile, undefined) : undefined,
-    {},
-  );
+  // Headers merge rather than replace: file, then env, then flags, so a flag
+  // overrides a single header without dropping the others.
+  const headerLayers: [string, Record<string, string> | undefined][] = [
+    ['file', rpcHeadersFile && rpcHeadersFile.length > 0 ? parseHeaders(rpcHeadersFile, undefined) : undefined],
+    ['env', rpcHeadersEnv !== undefined && rpcHeadersEnv !== '' ? parseHeaders(undefined, rpcHeadersEnv) : undefined],
+    ['flag', rpcHeadersFlag && rpcHeadersFlag.length > 0 ? parseHeaders(rpcHeadersFlag, undefined) : undefined],
+  ];
+  const rpcHeaders: Record<string, string> = {};
+  for (const [source, layer] of headerLayers) {
+    if (layer === undefined) continue;
+    Object.assign(rpcHeaders, layer);
+    sources.rpcHeaders = source as ConfigSources[string];
+  }
 
   return {
     network: resolveNetwork(networkName, rpcUrls[0]),
