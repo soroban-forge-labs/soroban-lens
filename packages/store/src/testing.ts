@@ -506,6 +506,48 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     }
   });
 
+  test(`[${name}] exportSnapshot writes only events matching the filter (#155)`, async () => {
+    const { mkdtemp, rm, readFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+
+    const dir = await mkdtemp(join(tmpdir(), 'event-store-suite-'));
+    const path = join(dir, 'subset.ndjson');
+    try {
+      const source = await seeded();
+      const expected = fixtureEvents.filter((e) => e.contractId === someContract);
+      const exported = await source.exportSnapshot(path, { contractId: someContract });
+      assert.equal(exported, expected.length);
+      // The file itself must contain only that contract's events — this is
+      // what `lens export -c` hands back to the user.
+      const lines = (await readFile(path, 'utf8'))
+        .trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { contractId: string });
+      assert.equal(lines.length, expected.length);
+      assert.ok(lines.every((e) => e.contractId === someContract));
+
+      // Ledger range applies the same query semantics as queryEvents.
+      const ledgers = fixtureEvents.map((e) => e.ledger).sort((a, b) => a - b);
+      const lo = ledgers[Math.floor(ledgers.length / 3)]!;
+      const hi = ledgers[Math.floor((ledgers.length * 2) / 3)]!;
+      const rangedPath = join(dir, 'ranged.ndjson');
+      const rangedCount = await source.exportSnapshot(rangedPath, { fromLedger: lo, toLedger: hi });
+      const rlines = (await readFile(rangedPath, 'utf8'))
+        .trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { ledger: number });
+      assert.equal(rangedCount, fixtureEvents.filter((e) => e.ledger >= lo && e.ledger <= hi).length);
+      assert.equal(rlines.length, rangedCount);
+      assert.ok(rlines.every((e) => e.ledger >= lo && e.ledger <= hi));
+      await source.close();
+
+      // The subset snapshot re-imports into an empty store intact.
+      const target = await createStore();
+      const imported = await target.importSnapshot(path);
+      assert.equal(imported, expected.length);
+      await target.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test(`[${name}] a filter on a topic past the fourth position finds the event (#164)`, async () => {
     const store = await seeded();
     const deep = fixtureEvents.find((e) => e.topic.length >= 5);

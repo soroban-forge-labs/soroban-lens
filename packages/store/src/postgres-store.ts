@@ -1095,7 +1095,7 @@ export class PostgresEventStore implements EventStore {
   // snapshots
   // ---------------------------------------------------------------------------
 
-  async exportSnapshot(destPath: string): Promise<number> {
+  async exportSnapshot(destPath: string, filter?: EventQuery): Promise<number> {
     const BATCH = 1000;
     const client = await this.#pool.connect();
     const out = createWriteStream(destPath, { encoding: 'utf8' });
@@ -1104,12 +1104,18 @@ export class PostgresEventStore implements EventStore {
       // REPEATABLE READ gives one point-in-time view across every batch, even
       // while the indexer keeps writing — the Postgres counterpart of VACUUM INTO.
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      // #155: a subset export reuses the queryEvents WHERE builder; the
+      // keyset `id >` bound and the batch LIMIT take the trailing params, so
+      // filter placeholders keep $1..$k.
+      const where = filter ? buildWhere(filter) : { clause: '', values: [] as unknown[] };
+      const conditions = where.clause ? `${where.clause.slice('WHERE '.length)} AND ` : '';
+      const afterParam = where.values.length + 1;
+      const sql =
+        `SELECT * FROM events WHERE ${conditions}id > $${afterParam} ` +
+        `ORDER BY id ASC LIMIT $${afterParam + 1}`;
       let after = '';
       for (;;) {
-        const { rows } = await client.query(
-          'SELECT * FROM events WHERE id > $1 ORDER BY id ASC LIMIT $2',
-          [after, BATCH],
-        );
+        const { rows } = await client.query(sql, [...where.values, after, BATCH]);
         if (rows.length === 0) break;
         for (const row of rows) {
           if (!out.write(`${JSON.stringify(rowToEvent(row))}\n`)) await once(out, 'drain');
