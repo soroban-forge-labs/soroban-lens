@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm, readFile, writeFile, access } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteEventStore } from '@soroban-lens/store';
@@ -64,6 +65,29 @@ test('done when: a backup taken while the indexer writes restores a working inst
 
   const verify = await cli(['verify', '--db', restored]);
   assert.equal(verify.code, 0, verify.stderr);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('verify detects and repairs a drifted contract summary', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-verify-summary-'));
+  const dbPath = join(dir, 'lens.db');
+  const events = JSON.parse(await readFile(FIXTURE, 'utf8')).events;
+  const store = new SqliteEventStore({ path: dbPath });
+  await store.insertEvents([events[0]]);
+  await store.close();
+
+  const db = new DatabaseSync(dbPath);
+  db.exec('UPDATE contract_summaries SET event_count = event_count + 1');
+  db.close();
+
+  const detected = await cli(['verify', '--db', dbPath]);
+  assert.equal(detected.code, 1, detected.stderr);
+  assert.match(detected.stderr, /contract summary .*event_count/);
+
+  const repaired = await cli(['verify', '--db', dbPath, '--repair']);
+  assert.equal(repaired.code, 0, repaired.stderr);
+  assert.match(repaired.stderr, /verification passed/);
+
   await rm(dir, { recursive: true, force: true });
 });
 

@@ -126,6 +126,10 @@ export const en = {
   componentError: 'Component Error',
   defaultErrorMessage: 'An unexpected rendering error occurred.',
   reloadComponent: 'Reload Component',
+  rpcProvider: 'RPC: {provider}',
+  rpcProviderPrimary: 'Indexer is using its primary RPC endpoint',
+  rpcProviderBackup: 'Indexer has failed over to a backup RPC endpoint',
+  pausedContracts: '{count} paused',
 } as const;
 
 /** The shape every locale must satisfy. */

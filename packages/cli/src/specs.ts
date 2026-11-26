@@ -142,6 +142,85 @@ export async function recordFromWasmFile(contractId: string, path: string): Prom
   return recordFromWasm(contractId, new Uint8Array(await readFile(path)));
 }
 
+/** Run `worker` over `items` with at most `limit` in flight at once. */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const run = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await worker(items[index]!, index);
+    }
+  };
+  const lanes = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: lanes }, run));
+  return results;
+}
+
+/** What happened to one contract during a refresh. */
+export interface SpecRefreshOutcome {
+  contractId: string;
+  status: 'refreshed' | 'skipped' | 'failed';
+  /** The new record, when the refresh succeeded. */
+  record?: ContractSpecRecord;
+  /** Why it was skipped or failed. */
+  reason?: string;
+}
+
+export interface SpecRefreshSummary {
+  outcomes: SpecRefreshOutcome[];
+  /** Contracts looked up this run (refreshed + failed); skipped ones are not counted. */
+  total: number;
+  refreshed: number;
+  skipped: number;
+  failed: number;
+}
+
+/**
+ * Re-fetch every stored contract spec — `lens spec refresh`.
+ *
+ * With `onlyMissing`, contracts that already have a definite spec are skipped
+ * and only the `none` records (including errored ones) are retried. Each
+ * lookup goes through the same path as a single fetch, and a transient
+ * failure is reported rather than overwriting a good record.
+ */
+export async function refreshContractSpecs(
+  store: EventStore,
+  source: SpecSource,
+  options: { onlyMissing?: boolean; concurrency?: number; now?: () => Date } = {},
+): Promise<SpecRefreshSummary> {
+  const onlyMissing = options.onlyMissing ?? false;
+  const concurrency = options.concurrency ?? 4;
+  const now = options.now ?? (() => new Date());
+
+  const records = await store.listContractSpecs();
+  const outcomes = await mapWithConcurrency(records, concurrency, async (existing): Promise<SpecRefreshOutcome> => {
+    const contractId = existing.contractId;
+    if (onlyMissing && existing.source !== 'none') {
+      return { contractId, status: 'skipped', reason: 'already has a spec' };
+    }
+    try {
+      const record = await lookupContractSpec(source, contractId, now);
+      await store.saveContractSpec(record);
+      return { contractId, status: 'refreshed', record };
+    } catch (error) {
+      return { contractId, status: 'failed', reason: errorMessage(error) };
+    }
+  });
+
+  return {
+    outcomes,
+    total: outcomes.filter((o) => o.status !== 'skipped').length,
+    refreshed: outcomes.filter((o) => o.status === 'refreshed').length,
+    skipped: outcomes.filter((o) => o.status === 'skipped').length,
+    failed: outcomes.filter((o) => o.status === 'failed').length,
+  };
+}
+
 /** One line a human can read: what was found, and what it means for decoding. */
 export function describeSpecRecord(record: Omit<ContractSpecRecord, 'entriesXdr'>): string {
   switch (record.source) {

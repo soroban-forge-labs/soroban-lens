@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { SqliteEventStore } from '@soroban-lens/store';
 import {
   lookupContractSpec,
   recordFromWasm,
   describeSpecRecord,
   SpecFetcher,
+  refreshContractSpecs,
   resolveConfig,
 } from '../dist/index.js';
 
@@ -120,4 +122,89 @@ test('typed field indexing is opt-in with LENS_TYPED_FIELD_INDEX=true', () => {
   assert.equal(resolveConfig({}, { LENS_TYPED_FIELD_INDEX: 'true' }).typedFieldIndex, true);
   assert.equal(resolveConfig({}, { LENS_TYPED_FIELD_INDEX: 'false' }).typedFieldIndex, false);
   assert.equal(resolveConfig({}, { LENS_TYPED_FIELD_INDEX: '0' }).typedFieldIndex, false);
+});
+
+/** Fixture contracts from fixtures/testnet-specs.json. */
+const FIXTURES = JSON.parse(
+  readFileSync(new URL('../../../fixtures/testnet-specs.json', import.meta.url), 'utf8'),
+).specs;
+const FIXTURE_IDS = FIXTURES.map((f) => f.contractId ?? f.id);
+
+/** Seed the store with one record per fixture contract. */
+async function seedFixtures(store) {
+  for (const f of FIXTURES) {
+    const id = f.contractId ?? f.id;
+    await store.saveContractSpec({
+      contractId: id,
+      source: f.source ?? 'none',
+      entriesXdr: [],
+      eventCount: f.eventCount ?? 0,
+      error: f.error,
+      fetchedAt: new Date().toISOString(),
+    });
+  }
+}
+
+test('lens spec refresh re-fetches every stored contract and saves the results', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await seedFixtures(store);
+  const calls = [];
+  const source = fakeSource(
+    Object.fromEntries(FIXTURE_IDS.map((id) => [id, { executable: 'contractExecutableStellarAsset' }])),
+    calls,
+  );
+  const summary = await refreshContractSpecs(store, source);
+  assert.deepEqual(new Set(calls.map((c) => c[1])), new Set(FIXTURE_IDS));
+  assert.equal(summary.total, FIXTURE_IDS.length);
+  assert.equal(summary.refreshed, FIXTURE_IDS.length);
+  assert.equal(summary.failed, 0);
+  for (const id of FIXTURE_IDS) {
+    assert.equal((await store.getContractSpec(id)).source, 'stellar-asset');
+  }
+  await store.close();
+});
+
+test('lens spec refresh --only-missing skips contracts that already have a spec', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await seedFixtures(store);
+  const missing = FIXTURES.filter((f) => !f.source || f.source === 'none' || f.error).map(
+    (f) => f.contractId ?? f.id,
+  );
+  const present = FIXTURE_IDS.filter((id) => !missing.includes(id));
+  const calls = [];
+  const source = fakeSource(
+    Object.fromEntries(FIXTURE_IDS.map((id) => [id, { executable: 'contractExecutableStellarAsset' }])),
+    calls,
+  );
+  const summary = await refreshContractSpecs(store, source, { onlyMissing: true });
+  const fetched = new Set(calls.map((c) => c[1]));
+  for (const id of present) assert.equal(fetched.has(id), false);
+  for (const id of missing) assert.equal(fetched.has(id), true);
+  assert.equal(summary.total, missing.length);
+  assert.equal(summary.refreshed, missing.length);
+  assert.equal(summary.skipped, present.length);
+  for (const id of missing) {
+    assert.equal((await store.getContractSpec(id)).source, 'stellar-asset');
+  }
+  await store.close();
+});
+
+test('lens spec refresh summary counts failures without aborting the run', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await seedFixtures(store);
+  const [first, ...rest] = FIXTURE_IDS;
+  const behaviour = Object.fromEntries(
+    FIXTURE_IDS.map((id) => [id, { executable: 'contractExecutableStellarAsset' }]),
+  );
+  behaviour[first] = new Error('fetch failed');
+  const summary = await refreshContractSpecs(store, fakeSource(behaviour));
+  assert.equal(summary.total, FIXTURE_IDS.length);
+  assert.equal(summary.failed, 1);
+  assert.equal(summary.refreshed, rest.length);
+  // A failed lookup leaves the stored record as it was rather than overwriting it.
+  assert.notEqual((await store.getContractSpec(first))?.source, 'stellar-asset');
+  for (const id of rest) {
+    assert.equal((await store.getContractSpec(id)).source, 'stellar-asset');
+  }
+  await store.close();
 });

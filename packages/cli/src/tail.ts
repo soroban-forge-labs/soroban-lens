@@ -1,4 +1,5 @@
 import { isContractId, CONTRACT_ID_HINT } from '@soroban-lens/ingest';
+import { parseMuxedAddress } from '@soroban-lens/store';
 import type { DecodedValue, EventQuery, EventStore, LensEvent } from '@soroban-lens/store';
 
 /**
@@ -28,7 +29,7 @@ export class TailUsageError extends Error {
 }
 
 const TX_HASH = /^[0-9a-fA-F]{64}$/;
-const ADDRESS = /^[GC][A-Z2-7]{55}$/;
+const ADDRESS = /^(?:[GC][A-Z2-7]{55}|M[A-Z2-7]{68})$/;
 
 /**
  * Translate flags into the store query, with the API's rules for each filter
@@ -57,8 +58,20 @@ export function buildTailQuery(flags: TailFlags): { query: EventQuery; fromStart
     );
   }
 
-  if (flags.address !== undefined && !ADDRESS.test(flags.address)) {
-    throw new TailUsageError("--address must be a StrKey: 'G' or 'C' followed by 55 characters (A-Z, 2-7).");
+  if (flags.address !== undefined) {
+    let valid = ADDRESS.test(flags.address);
+    if (valid && flags.address.startsWith('M')) {
+      try {
+        valid = parseMuxedAddress(flags.address) !== null;
+      } catch {
+        valid = false;
+      }
+    }
+    if (!valid) {
+      throw new TailUsageError(
+        '--address must be a valid G/C StrKey with 56 characters or M muxed-account StrKey with 69 characters.',
+      );
+    }
   }
   if (flags.txHash !== undefined && !TX_HASH.test(flags.txHash)) {
     throw new TailUsageError('--tx-hash must be a 64-character hex string.');

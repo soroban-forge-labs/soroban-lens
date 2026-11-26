@@ -11,8 +11,10 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.js",
+    "test:coverage": "npm run build && node --test --experimental-test-coverage test/*.test.js",
     "bench:count-cache": "npm run build && node bench/count-cache.bench.js",
     "bench:insert": "npm run build && node bench/insert-strategies.bench.js",
     "bench:typed-fields": "npm run build && node bench/typed-fields-insert.bench.js",

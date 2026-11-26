@@ -115,6 +115,17 @@ export interface ContractSpecRecord {
 export interface EventQuery {
   contractId?: string | undefined;
   /**
+   * Match events from any of these contracts — an OR, where `contractId` is
+   * an equality. Mutually exclusive with `contractId` (a query that sets both
+   * is rejected) and capped at MAX_QUERY_CONTRACT_IDS.
+   */
+  contractIds?: string[] | undefined;
+  /**
+   * Restrict to one event type (`contract` or `system`). Omitted means
+   * "both", which is the only behaviour earlier versions had.
+   */
+  type?: 'contract' | 'system' | undefined;
+  /**
    * Match a topic prefix: `['transfer']` matches any event whose first topic is
    * `transfer`. A `null` entry is a wildcard for that position.
    * Prefix rather than exact match, because events may carry more topics than
@@ -275,6 +286,17 @@ export interface TopicCount {
 /** Bucket widths supported by `EventStore.countByTimeBucket`. */
 export type TimeBucket = 'minute' | 'hour' | 'day';
 
+/** Options for `EventStore.listTopics` (#153). */
+export interface ListTopicsOptions {
+  /**
+   * Which indexed topic position to count, 0–3. Defaults to 0, which is what
+   * earlier versions counted unconditionally.
+   */
+  position?: number | undefined;
+  /** 1..1000. Defaults to 50. */
+  limit?: number | undefined;
+}
+
 /** Events whose ledger closed in `[start, start + bucket width)`. */
 export interface TimeBucketCount {
   /** Bucket start, seconds since the epoch, aligned to the bucket width. */
@@ -291,6 +313,11 @@ export interface StoreStats {
   maxLedger: number | null;
   /** Schema version the database is currently migrated to. */
   schemaVersion: number;
+  /**
+   * Events whose stored decode failed (`decode_error` is set). Kept rows stay
+   * queryable by metadata; `redecode` retries them once the decoder improves.
+   */
+  decodeErrorCount: number;
   /**
    * Size of the database file on disk, in bytes. `null` for a backend with no
    * file (`:memory:`), which is different from a file that is genuinely 0 bytes.

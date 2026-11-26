@@ -298,6 +298,62 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 10,
+    name: 'contract-summaries',
+    up: `
+      CREATE TABLE contract_summaries (
+        contract_id  TEXT    PRIMARY KEY,
+        event_count  INTEGER NOT NULL,
+        first_ledger INTEGER NOT NULL,
+        last_ledger  INTEGER NOT NULL,
+        last_seen_at TEXT    NOT NULL
+      ) WITHOUT ROWID;
+
+      INSERT INTO contract_summaries (contract_id, event_count, first_ledger, last_ledger, last_seen_at)
+      SELECT contract_id, COUNT(*), MIN(ledger), MAX(ledger), MAX(ledger_closed_at)
+        FROM events
+       GROUP BY contract_id;
+    `,
+    down: `DROP TABLE IF EXISTS contract_summaries;`,
+  },
+  {
+    version: 11,
+    name: 'muxed-account-addresses',
+    up: `
+      ALTER TABLE event_addresses ADD COLUMN muxed_id TEXT;
+      CREATE INDEX idx_event_addresses_address_muxed_id
+        ON event_addresses (address, muxed_id, event_id);
+
+      UPDATE event_addresses
+         SET muxed_id = (
+           SELECT json_extract(e.value_json, '$.value.to_muxed_id')
+             FROM events e
+            WHERE e.id = event_addresses.event_id
+              AND e.type = 'contract'
+              AND json_extract(e.topics_json, '$[0].value') = 'transfer'
+              AND json_extract(e.topics_json, '$[2].value') = event_addresses.address
+              AND json_type(e.value_json, '$.value.to_muxed_id') = 'text'
+              AND json_extract(e.value_json, '$.value.to_muxed_id') <> ''
+              AND json_extract(e.value_json, '$.value.to_muxed_id') NOT GLOB '*[^0-9]*'
+         )
+       WHERE position = 'topic2'
+         AND EXISTS (
+           SELECT 1 FROM events e
+            WHERE e.id = event_addresses.event_id
+              AND e.type = 'contract'
+              AND json_extract(e.topics_json, '$[0].value') = 'transfer'
+              AND json_extract(e.topics_json, '$[2].value') = event_addresses.address
+              AND json_type(e.value_json, '$.value.to_muxed_id') = 'text'
+              AND json_extract(e.value_json, '$.value.to_muxed_id') <> ''
+              AND json_extract(e.value_json, '$.value.to_muxed_id') NOT GLOB '*[^0-9]*'
+         );
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_event_addresses_address_muxed_id;
+      ALTER TABLE event_addresses DROP COLUMN muxed_id;
+    `,
+  },
+  {
+    version: 12,
     name: 'typed-event-fields',
     up: `
       CREATE TABLE typed_event_fields (

@@ -26,7 +26,20 @@ two are independent and share no code.
 
 ## Quickstart (5 minutes)
 
+### Dev container / Codespaces
+
+The fastest path with no local setup: open the repo in a
+[GitHub Codespace](https://codespaces.new/soroban-forge-labs/soroban-lens) or,
+in VS Code, run **Dev Containers: Reopen in Container**. The
+[`.devcontainer/devcontainer.json`](./.devcontainer/devcontainer.json) config
+installs the same Node version CI uses, then runs
+`npm ci && npm run build && npm run seed` after creation, so every workspace is
+built and the committed testnet fixture is loaded automatically. The API
+(`8080`) and web (`5173`) ports are forwarded, so the explorer UI is reachable
+with no manual steps.
+
 ### With Docker
+=======
 
 ```bash
 git clone https://github.com/soroban-forge-labs/soroban-lens
@@ -189,12 +202,34 @@ Every option is documented in [`.env.example`](./.env.example). The essentials:
 | `LENS_FETCH_SPECS` | `true` | Look up contract specs for [typed events](#typed-events) |
 | `LENS_CLOCK_SKEW_THRESHOLD_SECONDS` | `60` | `lens doctor` and the indexer warn when the local clock differs from the latest ledger's close time by more than this |
 
+### API keys
+
+`LENS_API_KEYS` is a comma-separated list. Each entry is either a plain key or
+`name:key:scope`, where `scope` is `read` or `admin`:
+
+```
+LENS_API_KEYS=dashboard:abc123:read,ops:def456:admin
+```
+
+- **`read`** keys may call read endpoints (events, contracts, specs).
+- **`admin`** keys may do everything, including mutating routes such as
+  webhook management.
+- A plain key with no `name:key:scope` structure is treated as an `admin` key
+  for backward compatibility.
+
+A missing or unknown key returns `401`; a known key without the required scope
+returns `403`. Requests are logged and counted by key **name**, never by the
+key itself.
+
 ---
 
 ## Storage
 
 SQLite by default, so anyone can run it locally with zero setup — Node's
 built-in `node:sqlite`, so `npm install` compiles nothing.
+
+Running on Postgres in production — setup, sizing, vacuum, backups and moving
+from SQLite — is covered in [docs/operations/postgres.md](./docs/operations/postgres.md).
 
 The API depends only on the [`EventStore`](./packages/store/src/store.ts)
 interface, never on SQLite, so nothing above Module 2 knows which backend it
@@ -261,6 +296,7 @@ npm run build -w @soroban-lens/api
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — module ownership, interface rules, PR process
 - [CONTRIBUTORS.md](./CONTRIBUTORS.md) — everyone who has contributed code
 - [docs/index-your-first-contract.md](./docs/index-your-first-contract.md) — the 5-minute walkthrough
+- [docs/mainnet.md](./docs/mainnet.md) — indexing mainnet through an RPC provider: keys, retention, cost
 - [docs/architecture.md](./docs/architecture.md) — how data flows, and why
 - [docs/troubleshooting.md](./docs/troubleshooting.md) — when it does not work
 - [ISSUES.md](./ISSUES.md) — 100 scoped follow-up issues, 20 per module (also [filed on GitHub](https://github.com/soroban-forge-labs/soroban-lens/issues), numbers matching)
@@ -277,3 +313,11 @@ each client IP (see [packages/api](./packages/api/README.md)), and set
 ## License
 
 [Apache-2.0](./LICENSE).
+
+## Handsoff notes
+
+<!-- handsoff-issue-315 -->
+- #315: 103. Rotate a webhook's signing secret
+
+<!-- handsoff-issue-317 -->
+- #317: 105. Show recent delivery attempts for a webhook

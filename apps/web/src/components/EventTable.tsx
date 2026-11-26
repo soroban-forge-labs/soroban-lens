@@ -24,6 +24,12 @@ interface Props {
   onToggleSelect: (id: string) => void;
   /** Whether the Ledger column shows absolute time instead of relative. */
   absolute: boolean;
+  /** Set the address/contract filter when an address in a decoded field is clicked (#79). */
+  onAddressClick?: (address: string) => void;
+  /** Open the transaction events panel for a given hash (#65). */
+  onTxHashClick?: (txHash: string) => void;
+  /** Lookup from contractId to its human-readable label (Module 3). */
+  contractLabels?: Record<string, string>;
 }
 
 interface Viewport {
@@ -42,7 +48,8 @@ interface Viewport {
  * the layout changes when windowing switches on.
  */
 export function EventTable({
-  events, network, expandedEventIds, onToggleExpanded, showContract, onTopicClick, loading, emptyMessage, selectedIds, onToggleSelect, absolute,
+  events, network, expandedEventIds, onToggleExpanded, showContract, onTopicClick, loading, emptyMessage, selectedIds, onToggleSelect, absolute, onAddressClick, onTxHashClick,
+  contractLabels,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
   const virtualized = events.length > VIRTUALIZE_ABOVE;
@@ -210,6 +217,9 @@ export function EventTable({
             onToggleSelect={onToggleSelect}
             absolute={absolute}
             onNavigate={navigate}
+            onAddressClick={onAddressClick}
+            onTxHashClick={onTxHashClick}
+            contractLabel={contractLabels?.[event.contractId]}
             // +2: aria-rowindex is 1-based and the header row is row 1.
             rowIndex={virtualized ? range.start + i + 2 : undefined}
           />

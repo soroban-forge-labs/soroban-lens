@@ -115,4 +115,8 @@ export const es: Partial<Catalogue> = {
   componentError: 'Error de componente',
   defaultErrorMessage: 'Ocurri\u00f3 un error de renderizado inesperado.',
   reloadComponent: 'Recargar componente',
+  rpcProvider: 'RPC: {provider}',
+  rpcProviderPrimary: 'El indexador usa su endpoint RPC principal',
+  rpcProviderBackup: 'El indexador cambi\u00f3 a un endpoint RPC de respaldo',
+  pausedContracts: '{count} en pausa',
 };
