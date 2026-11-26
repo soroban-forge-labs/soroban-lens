@@ -1,6 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
-import { resolveClockSkewThreshold, resolveNetwork, type NetworkConfig } from '@soroban-lens/ingest';
+import {
+  parseTopicFilters,
+  resolveClockSkewThreshold,
+  resolveEventType,
+  resolveNetwork,
+  type EventType,
+  type NetworkConfig,
+} from '@soroban-lens/ingest';
 
 /** Everything the CLI needs, resolved from flags then environment then file then defaults. */
 export interface LensConfig {
@@ -12,6 +19,19 @@ export interface LensConfig {
   dataDir: string;
   apiPort: number;
   startLedger: number | undefined;
+  /**
+   * Upper bound for indexing, from `--end-ledger` / `LENS_END_LEDGER`. When set,
+   * the indexer stops once it reaches this ledger instead of following the tip.
+   */
+  endLedger: number | undefined;
+  /**
+   * Topic filters, from `--topic` / `LENS_TOPIC` / `LENS_TOPICS`. Empty means
+   * every event. Parsed and validated by the ingest package so `lens index`
+   * and `soroban-lens-ingest` accept exactly the same syntax.
+   */
+  topics: string[][];
+  /** Event type filter, from `--type` / `LENS_EVENT_TYPE`. Undefined means all types. */
+  eventType: EventType | undefined;
   pageSize: number;
   /**
    * Bounds for an adaptive page size (#14), from `LENS_PAGE_SIZE_MIN` and
@@ -71,6 +91,9 @@ export interface ConfigOverrides {
   dataDir?: string | undefined;
   port?: number | undefined;
   startLedger?: number | undefined;
+  endLedger?: number | undefined;
+  topic?: string[] | undefined;
+  type?: string | undefined;
   pageSize?: number | undefined;
   pageSizeMin?: number | undefined;
   pageSizeMax?: number | undefined;
@@ -392,6 +415,9 @@ export function resolveConfig(
       file.startLedger,
       undefined as number | undefined,
     ),
+    endLedger: overrides.endLedger ?? optionalNumber(env.LENS_END_LEDGER),
+    topics: parseTopicFilters(overrides.topic ?? splitList(env.LENS_TOPIC), splitList(env.LENS_TOPICS)) ?? [],
+    eventType: resolveEventType(overrides.type ?? env.LENS_EVENT_TYPE),
     pageSize,
     pageSizeBounds: pageSizeBounds(pageSizeMin, pageSizeMax, pageSize),
     reorgDepth: pick('reorgDepth', overrides.reorgDepth, optionalNumber(env.LENS_REORG_DEPTH), file.reorgDepth, 3),
