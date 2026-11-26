@@ -189,6 +189,14 @@ Webhooks and dead letters are held in memory: they are lost when the API
 restarts, and clients re-register. The dispatcher polls the store, because the
 indexer is a separate process.
 
+## Cookbook
+
+The [API cookbook](../../docs/api-cookbook.md) answers the questions clients
+actually ask — latest transfers for a token, everything an address did, one
+transaction's events, paging through a ledger range, and an incremental sync —
+with copy-paste `curl | jq` recipes that run as written against `lens seed`
+data. Start there before reading the spec.
+
 ## OpenAPI
 
 [`openapi.json`](./openapi.json) is the committed spec and the source of truth;

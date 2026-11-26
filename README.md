@@ -293,6 +293,7 @@ npm run build -w @soroban-lens/api
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — module ownership, interface rules, PR process
 - [CONTRIBUTORS.md](./CONTRIBUTORS.md) — everyone who has contributed code
 - [docs/index-your-first-contract.md](./docs/index-your-first-contract.md) — the 5-minute walkthrough
+- [docs/mainnet.md](./docs/mainnet.md) — indexing mainnet through an RPC provider: keys, retention, cost
 - [docs/architecture.md](./docs/architecture.md) — how data flows, and why
 - [docs/troubleshooting.md](./docs/troubleshooting.md) — when it does not work
 - [ISSUES.md](./ISSUES.md) — 100 scoped follow-up issues, 20 per module (also [filed on GitHub](https://github.com/soroban-forge-labs/soroban-lens/issues), numbers matching)

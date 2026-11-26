@@ -76,16 +76,74 @@ that must fall back to the generic view.
 
 RPC nodes retain roughly 7 days of history (120 960 ledgers), so these ledgers
 are long gone from the live node. That is the point: the fixture keeps Modules
-2, 3 and 4 testable with no network at all. To capture a newer one:
+2, 3 and 4 testable with no network at all.
+
+Both `testnet-events.json` and `testnet-specs.json` are re-captured by a single
+script, `scripts/refresh-fixtures.mjs`:
 
 ```bash
-npm run build -w @soroban-lens/ingest
-node packages/ingest/dist/bin.js -c <CONTRACT_ID> --max-events 200 --no-resume \
-  > /tmp/events.ndjson
+npm run fixtures:refresh
 ```
 
-If you replace this file, update the `_source` block and the coverage table
-above, and re-run `npm test` — several suites assert against these exact ids.
+It talks to testnet, so it needs network access; everything else in the repo
+stays offline. The script:
+
+1. **Reads its configuration** from `scripts/fixtures.config.json`:
+   - `rpcUrl` — the endpoint to capture from (defaults to
+     `https://soroban-testnet.stellar.org`).
+   - `contracts` — the contract ids to capture. This is the same set of 20
+     contracts the current fixtures cover; add or remove ids here to change
+     coverage.
+   - `ledgerRange` — `{ "startLedger": …, "endLedger": … }` bounding the
+     capture. The script pages `getEvents` from `startLedger` until it passes
+     `endLedger` or the node runs out of events.
+   - `pageSize` — events requested per `getEvents` page (the RPC caps this at
+     10 000; the current fixture uses 200).
+2. **Captures `getEvents`** for each configured contract, following the cursor
+   page by page, and merges the results into one `result` object with the same
+   top-level shape as the RPC response (`latestLedger`, `oldestLedger`,
+   `cursor`, `events`).
+3. **Trims the result the same way the current fixture is trimmed**: events are
+   sorted by `(ledger, id)`, de-duplicated by `id`, and capped at the same
+   per-contract event count the existing file uses, so the shape and coverage
+   stay comparable.
+4. **Fetches specs** for every contract in the capture via the same code path
+   as `lens spec fetch` (the indexer's spec lookup), then trims them like the
+   current `testnet-specs.json`: function and error-enum entries are dropped,
+   and contracts that declare no events keep their record but not their
+   entries.
+5. **Writes deterministically**: object keys are emitted in a fixed order,
+   arrays are sorted by stable keys, and the output is pretty-printed with a
+   fixed indent and a trailing newline. Re-running the script against the same
+   ledgers produces a byte-identical file, so a refresh shows up as a
+   reviewable diff rather than a whole-file rewrite.
+
+### Reviewing the diff
+
+After running the script, inspect the diff before committing:
+
+```bash
+git diff --stat fixtures/
+git diff fixtures/testnet-events.json
+git diff fixtures/testnet-specs.json
+```
+
+Because the output is deterministic, unchanged contracts produce no diff at
+all. Look for: new or removed contract ids (coverage change), events whose
+`id` or `ledger` moved (the ledger range shifted), and spec entries that
+appeared or disappeared (a contract was upgraded). If the diff is larger than
+expected, check `scripts/fixtures.config.json` first — a wrong `ledgerRange`
+is the usual cause.
+
+### After refreshing
+
+- Update the `_source` block in each file (capture date, protocol version,
+  request parameters) to match the new run.
+- Update the coverage table above if the set of contracts or the decoding
+  cases they exercise changed.
+- Re-run `npm test` — several suites assert against these exact ids, and the
+  seeded-instance tests read `testnet-specs.json` directly.
+=======
 
 ## `testnet-getevents-recording.json`
 
