@@ -109,6 +109,8 @@ function AppInner(): React.JSX.Element {
   const [comparePair, setComparePair] = useState<[LensEvent, LensEvent] | null>(null);
   const [compareError, setCompareError] = useState<string | null>(null);
   const contractInputRef = useRef<HTMLInputElement>(null);
+  // true while a live-poll/stream refresh is in flight (not a query change)
+  const isLiveRefresh = useRef(false);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -314,7 +316,12 @@ function AppInner(): React.JSX.Element {
     try {
       const page = await api.events(selected.baseUrl, query);
       if (!isCurrent()) return;
-      setEvents(page.events);
+      setEvents((current) => {
+        if (!isLiveRefresh.current || current.length === 0) return page.events;
+        // On a live-poll refresh, keep any "load more" rows not in the new page.
+        const seen = new Set(current.map((e) => e.id));
+        return [...page.events.filter((e) => !seen.has(e.id)), ...current];
+      });
       setTotal(page.total);
       setTotalIsEstimate(page.totalIsEstimate ?? false);
       setNextCursor(page.nextCursor);
@@ -384,6 +391,7 @@ function AppInner(): React.JSX.Element {
       setLoading(false);
       return;
     }
+    isLiveRefresh.current = false;
     setLoading(true);
     setNextCursor(null);
     void loadFirstPage();
@@ -412,12 +420,14 @@ function AppInner(): React.JSX.Element {
     },
     // A stream only carries events from now on, so catch up on connect.
     () => {
+      isLiveRefresh.current = true;
       void loadFirstPage();
     },
   );
 
   usePolling(
     () => {
+      isLiveRefresh.current = true;
       void loadFirstPage();
     },
     LIVE_INTERVAL_MS,
