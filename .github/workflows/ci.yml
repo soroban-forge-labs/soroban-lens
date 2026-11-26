@@ -12,6 +12,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changeset-check:
+    name: Changeset reminder
+    # Only meaningful on PRs: there is no base branch to diff against on a push.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so the merge base with the target branch is available.
+          fetch-depth: 0
+
+      - name: Remind to add a changeset
+        # A user-facing change under packages/ should ship with a changeset so
+        # the release workflow can turn it into a CHANGELOG entry and a version
+        # bump. This warns rather than fails: docs-only or internal PRs are
+        # legitimate, and a hard failure would block them.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_REF"
+          changed=$(git diff --name-only "origin/$BASE_REF...HEAD")
+
+          touches_packages=0
+          has_changeset=0
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            case "$file" in
+              packages/*) touches_packages=1 ;;
+            esac
+            case "$file" in
+              .changeset/*.md)
+                # README.md documents the flow; it is not a changeset.
+                [ "$file" = ".changeset/README.md" ] || has_changeset=1
+                ;;
+            esac
+          done <<<"$changed"
+
+          if [ "$touches_packages" -eq 1 ] && [ "$has_changeset" -eq 0 ]; then
+            echo "::warning::This PR touches packages/ but adds no changeset. Run \`npx changeset\` and commit the generated .changeset/*.md so the change appears in the release notes."
+          else
+            echo "Changeset check passed."
+          fi
+
   accessibility:
     name: Web accessibility (axe)
     runs-on: ubuntu-latest

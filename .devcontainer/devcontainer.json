@@ -1,0 +1,29 @@
+{
+  "name": "Soroban Lens Dev Container",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-24-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "postCreateCommand": "npm ci && npm run build && npm run seed",
+  "forwardPorts": [8080, 5173],
+  "portsAttributes": {
+    "8080": {
+      "label": "API",
+      "onAutoForward": "notify"
+    },
+    "5173": {
+      "label": "Web",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "postAttachCommand": "echo 'Dev container ready. Start the API with `npm run api` and the web UI with `npm run web` (in separate terminals).'",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode"
+      ]
+    }
+  },
+  "remoteUser": "node"
+}

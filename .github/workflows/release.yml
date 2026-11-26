@@ -129,7 +129,20 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
-      - run: node scripts/changelog.mjs "$GITHUB_REF_NAME" > release-notes.md
+          cache: npm
+      - run: npm ci
+      - name: Build release notes from the changeset changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The committed CHANGELOG.md is produced by `changeset version`; take
+          # the section for this tag. Fall back to commit subjects when the
+          # changelog has no entry for it (e.g. a hotfix tag).
+          node scripts/release-notes.mjs "$version" > release-notes.md || true
+          if [ ! -s release-notes.md ]; then
+            echo "::warning::No CHANGELOG.md entry for $version; falling back to commit subjects."
+            node scripts/changelog.mjs "$GITHUB_REF_NAME" > release-notes.md
+          fi
+=======
       - name: Pin the attached compose file to this release
         run: |
           version="${GITHUB_REF_NAME#v}"
