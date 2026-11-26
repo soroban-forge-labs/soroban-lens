@@ -119,7 +119,7 @@ test('LENS_FETCH_SPECS=false turns spec fetching off; it is on by default', () =
 /** Fixture contracts from fixtures/testnet-specs.json. */
 const FIXTURES = JSON.parse(
   readFileSync(new URL('../../../fixtures/testnet-specs.json', import.meta.url), 'utf8'),
-);
+).specs;
 const FIXTURE_IDS = FIXTURES.map((f) => f.contractId ?? f.id);
 
 /** Seed the store with one record per fixture contract. */
