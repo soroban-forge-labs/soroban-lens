@@ -228,6 +228,9 @@ key itself.
 SQLite by default, so anyone can run it locally with zero setup — Node's
 built-in `node:sqlite`, so `npm install` compiles nothing.
 
+Running on Postgres in production — setup, sizing, vacuum, backups and moving
+from SQLite — is covered in [docs/operations/postgres.md](./docs/operations/postgres.md).
+
 The API depends only on the [`EventStore`](./packages/store/src/store.ts)
 interface, never on SQLite, so nothing above Module 2 knows which backend it
 is talking to.
