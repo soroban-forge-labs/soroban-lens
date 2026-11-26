@@ -7,6 +7,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "watch": "tsc -b --watch",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --force",
     "check:bundle-size": "node scripts/check-bundle-size.mjs",
