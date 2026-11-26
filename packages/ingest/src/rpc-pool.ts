@@ -72,7 +72,7 @@ export class FailoverRpcClient {
       return result;
     } catch (firstError) {
       this.#errors++;
-      this.#metrics?.incProviderError(this.#labels[this.#active]!);
+      this.#metrics?.incProviderError(String(this.#active));
       if (this.#errors < this.#threshold || this.#clients.length === 1) throw firstError;
       const old = this.providerUrl;
       this.#active = (this.#active + 1) % this.#clients.length;
@@ -97,7 +97,7 @@ export class FailoverRpcClient {
     try { const value = await call(this.#clients[this.#active]!); this.#errors = 0; return value; }
     catch (error) {
       this.#errors++;
-      this.#metrics?.incProviderError(this.#labels[this.#active]!);
+      this.#metrics?.incProviderError(String(this.#active));
       if (this.#errors >= this.#threshold && this.#clients.length > 1) {
         const from = this.#active;
         this.#active = (this.#active + 1) % this.#clients.length;

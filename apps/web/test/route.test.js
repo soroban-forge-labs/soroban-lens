@@ -6,7 +6,7 @@ const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
 const EVENT_ID = '0020166232959352832-0000000000';
 
 const DEFAULTS = {
-  filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+  filters: { contractId: '', topic: '', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
   network: '',
   expandedEventId: null,
 };
@@ -106,7 +106,7 @@ test('default state produces a bare root path', () => {
 
 test('only non-default values are written, keeping URLs short', () => {
   const url = stringifyUrl({
-    filters: { contractId: SAC, topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+    filters: { contractId: SAC, topic: '', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
     network: '',
     expandedEventId: null,
   });
@@ -115,7 +115,7 @@ test('only non-default values are written, keeping URLs short', () => {
 
 test('all filters together produce a full query string', () => {
   const url = stringifyUrl({
-    filters: { contractId: SAC, topic: 'transfer', successfulOnly: true, live: false, fromLedger: '', toLedger: '' },
+    filters: { contractId: SAC, topic: 'transfer', topicPosition: 0, successfulOnly: true, live: false, fromLedger: '', toLedger: '' },
     network: 'testnet',
     expandedEventId: null,
   });
@@ -130,7 +130,7 @@ test('all filters together produce a full query string', () => {
 
 test('live=true (the default) is not written to the URL', () => {
   const url = stringifyUrl({
-    filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+    filters: { contractId: '', topic: '', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
     network: '',
     expandedEventId: null,
   });
@@ -139,7 +139,7 @@ test('live=true (the default) is not written to the URL', () => {
 
 test('live=false is written, since it differs from the default', () => {
   const url = stringifyUrl({
-    filters: { contractId: '', topic: '', successfulOnly: false, live: false, fromLedger: '', toLedger: '' },
+    filters: { contractId: '', topic: '', topicPosition: 0, successfulOnly: false, live: false, fromLedger: '', toLedger: '' },
     network: '',
     expandedEventId: null,
   });
@@ -148,7 +148,7 @@ test('live=false is written, since it differs from the default', () => {
 
 test('successfulOnly=false (the default) is not written', () => {
   const url = stringifyUrl({
-    filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+    filters: { contractId: '', topic: '', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
     network: '',
     expandedEventId: null,
   });
@@ -157,7 +157,7 @@ test('successfulOnly=false (the default) is not written', () => {
 
 test('expandedEventId uses the /events/{id} path', () => {
   const url = stringifyUrl({
-    filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+    filters: { contractId: '', topic: '', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
     network: '',
     expandedEventId: EVENT_ID,
   });
@@ -166,7 +166,7 @@ test('expandedEventId uses the /events/{id} path', () => {
 
 test('expandedEventId combines with filter query params', () => {
   const url = stringifyUrl({
-    filters: { contractId: SAC, topic: 'transfer', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+    filters: { contractId: SAC, topic: 'transfer', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
     network: 'testnet',
     expandedEventId: EVENT_ID,
   });
@@ -182,7 +182,7 @@ test('expandedEventId combines with filter query params', () => {
 
 test('an expandedEventId with special characters is encoded in the path', () => {
   const url = stringifyUrl({
-    filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+    filters: { contractId: '', topic: '', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
     network: '',
     expandedEventId: 'foo/bar',
   });
@@ -195,7 +195,7 @@ test('an expandedEventId with special characters is encoded in the path', () => 
 
 test('round-tripping a full filter set preserves every field', () => {
   const original = {
-    filters: { contractId: SAC, topic: 'transfer', successfulOnly: true, live: false, fromLedger: '', toLedger: '' },
+    filters: { contractId: SAC, topic: 'transfer', topicPosition: 0, successfulOnly: true, live: false, fromLedger: '', toLedger: '' },
     network: 'mainnet',
     expandedEventId: null,
   };
@@ -208,7 +208,7 @@ test('round-tripping a full filter set preserves every field', () => {
 
 test('round-tripping a deep link with filters preserves the event id and filters', () => {
   const original = {
-    filters: { contractId: SAC, topic: 'mint', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+    filters: { contractId: SAC, topic: 'mint', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
     network: 'testnet',
     expandedEventId: EVENT_ID,
   };
@@ -232,7 +232,7 @@ test('round-tripping default state gives back a bare visit (null)', () => {
 
 test('round-tripping with only network set', () => {
   const original = {
-    filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+    filters: { contractId: '', topic: '', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
     network: 'futurenet',
     expandedEventId: null,
   };
@@ -248,13 +248,13 @@ test('round-tripping with only network set', () => {
 // ---------------------------------------------------------------------------
 
 test('sameFilterView is true when only expandedEventId differs', () => {
-  const a = { filters: { contractId: 'X', topic: 't', successfulOnly: true, live: false, fromLedger: '', toLedger: '' }, network: 'n', expandedEventId: 'a' };
-  const b = { filters: { contractId: 'X', topic: 't', successfulOnly: true, live: false, fromLedger: '', toLedger: '' }, network: 'n', expandedEventId: 'b' };
+  const a = { filters: { contractId: 'X', topic: 't', topicPosition: 0, successfulOnly: true, live: false, fromLedger: '', toLedger: '' }, network: 'n', expandedEventId: 'a' };
+  const b = { filters: { contractId: 'X', topic: 't', topicPosition: 0, successfulOnly: true, live: false, fromLedger: '', toLedger: '' }, network: 'n', expandedEventId: 'b' };
   assert.ok(sameFilterView(a, b));
 });
 
 test('sameFilterView is false when any filter differs', () => {
-  const base = { filters: { contractId: 'X', topic: 't', successfulOnly: true, live: false, fromLedger: '', toLedger: '' }, network: 'n', expandedEventId: null };
+  const base = { filters: { contractId: 'X', topic: 't', topicPosition: 0, successfulOnly: true, live: false, fromLedger: '', toLedger: '' }, network: 'n', expandedEventId: null };
   assert.ok(!sameFilterView(base, { ...base, filters: { ...base.filters, contractId: 'Y' } }));
   assert.ok(!sameFilterView(base, { ...base, filters: { ...base.filters, topic: 'u' } }));
   assert.ok(!sameFilterView(base, { ...base, filters: { ...base.filters, successfulOnly: false } }));
@@ -263,7 +263,7 @@ test('sameFilterView is false when any filter differs', () => {
 });
 
 test('sameFilterView is true for identical states', () => {
-  const a = { filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' }, network: '', expandedEventId: null };
+  const a = { filters: { contractId: '', topic: '', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' }, network: '', expandedEventId: null };
   assert.ok(sameFilterView(a, { ...a }));
 });
 

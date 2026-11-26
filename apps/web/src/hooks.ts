@@ -158,6 +158,7 @@ export function useUrlState(
         filters: {
           contractId: parsed.filters.contractId,
           topic: parsed.filters.topic,
+          topicPosition: parsed.filters.topicPosition,
           successfulOnly: parsed.filters.successfulOnly,
           live: parsed.filters.live,
           fromLedger: parsed.filters.fromLedger,
@@ -218,7 +219,7 @@ export function useUrlState(
     const onPopState = (): void => {
       const parsed = parseUrl(window.location.pathname, window.location.search);
       const next: UrlState = parsed ?? {
-        filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+        filters: { contractId: '', topic: '', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
         network: '',
         expandedEventId: null,
       };
