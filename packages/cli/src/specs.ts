@@ -173,6 +173,8 @@ export interface SpecRefreshOutcome {
 
 export interface SpecRefreshSummary {
   outcomes: SpecRefreshOutcome[];
+  /** Contracts looked up this run (refreshed + failed); skipped ones are not counted. */
+  total: number;
   refreshed: number;
   skipped: number;
   failed: number;
@@ -212,6 +214,7 @@ export async function refreshContractSpecs(
 
   return {
     outcomes,
+    total: outcomes.filter((o) => o.status !== 'skipped').length,
     refreshed: outcomes.filter((o) => o.status === 'refreshed').length,
     skipped: outcomes.filter((o) => o.status === 'skipped').length,
     failed: outcomes.filter((o) => o.status === 'failed').length,

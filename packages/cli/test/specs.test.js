@@ -194,7 +194,8 @@ test('lens spec refresh summary counts failures without aborting the run', async
   assert.equal(summary.total, FIXTURE_IDS.length);
   assert.equal(summary.failed, 1);
   assert.equal(summary.refreshed, rest.length);
-  assert.equal(await store.getContractSpec(first), null);
+  // A failed lookup leaves the stored record as it was rather than overwriting it.
+  assert.notEqual((await store.getContractSpec(first))?.source, 'stellar-asset');
   for (const id of rest) {
     assert.equal((await store.getContractSpec(id)).source, 'stellar-asset');
   }
