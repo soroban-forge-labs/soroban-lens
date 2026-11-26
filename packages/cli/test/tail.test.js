@@ -55,12 +55,18 @@ test('a lower bound means replay from history', () => {
   assert.equal(fromStart, true);
 });
 
+test('a valid muxed account is accepted as an address filter (#148)', () => {
+  const address = 'MDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB4AAAAAAAAAAAA46CW';
+  assert.equal(buildTailQuery({ address }).query.address, address);
+});
+
 test('filters the API would reject are rejected, not followed silently', () => {
   for (const flags of [
     { contract: ['not-a-contract'] },
     { contract: [SAC, SAC] },
     { topic: ['a', 'b', 'c', 'd', 'e'] },
     { address: 'GSHORT' },
+    { address: 'MDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB4AAAAAAAAAAAA46C7' },
     { txHash: 'abc' },
     { fromLedger: '-1' },
     { fromTime: 'yesterday-ish' },

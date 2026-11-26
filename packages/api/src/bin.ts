@@ -2,6 +2,7 @@
 /** `soroban-lens-api` — serve the query API over an indexed database. */
 import { parseArgs } from 'node:util';
 import { SqliteEventStore, createLogger } from '@soroban-lens/store';
+import { loadContractLabels } from './labels.js';
 import { createApiServer, shutdownApiServer } from './server.js';
 import { ApiMetrics, parseMetricsPort, startApiMetricsServer } from './metrics.js';
 
@@ -26,6 +27,15 @@ Options:
                       Bind address for the metrics port (default: 127.0.0.1,
                       env LENS_API_METRICS_HOST)
   -h, --help          Show this help.
+
+Server timeouts (milliseconds; behind a proxy keep LENS_KEEP_ALIVE_TIMEOUT_MS above its idle timeout):
+  LENS_HEADERS_TIMEOUT_MS      Time allowed to receive request headers (default 15000).
+  LENS_REQUEST_TIMEOUT_MS      Time allowed to receive a whole request (default 60000).
+  LENS_KEEP_ALIVE_TIMEOUT_MS   Idle keep-alive connection lifetime (default 65000).
+
+Labels:
+  LENS_CONTRACT_LABELS=<file>  JSON object of contract id to label; shown on /contracts
+                               and /contracts/{id}/stats. A missing file means no labels.
 
 Access control (all off unless set):
   LENS_NDJSON_MAX_ROWS   Most events one application/x-ndjson response carries (default 1000000).
@@ -114,6 +124,24 @@ function parseRateLimit(): { requestsPerSecond: number; burst?: number } | undef
   return { requestsPerSecond, burst };
 }
 
+const timeouts = {
+  headersTimeoutMs: envInt('LENS_HEADERS_TIMEOUT_MS') ?? 15_000,
+  requestTimeoutMs: envInt('LENS_REQUEST_TIMEOUT_MS') ?? 60_000,
+  keepAliveTimeoutMs: envInt('LENS_KEEP_ALIVE_TIMEOUT_MS') ?? 65_000,
+};
+if (timeouts.headersTimeoutMs > timeouts.requestTimeoutMs) {
+  log.error('config', 'LENS_HEADERS_TIMEOUT_MS must not exceed LENS_REQUEST_TIMEOUT_MS.');
+  process.exit(1);
+}
+
+let contractLabels: Record<string, string>;
+try {
+  contractLabels = loadContractLabels(process.env.LENS_CONTRACT_LABELS);
+} catch (err) {
+  log.error('config', (err as Error).message);
+  process.exit(1);
+}
+
 const store = new SqliteEventStore({ path: dbPath, log, readOnly: true });
 
 /** A positive integer from the environment, or undefined when unset or unusable. */
@@ -126,6 +154,8 @@ const graphqlMaxComplexity = envInt('LENS_GRAPHQL_MAX_COMPLEXITY');
 const webhookToken = process.env.LENS_WEBHOOKS_TOKEN;
 const server = createApiServer({
   store,
+  timeouts,
+  contractLabels,
   ...(rateLimit ? { rateLimit } : {}),
   ...(apiKeys.length > 0 ? { apiKeys } : {}),
   ...(envInt('LENS_NDJSON_MAX_ROWS') ? { ndjsonMaxRows: envInt('LENS_NDJSON_MAX_ROWS') as number } : {}),

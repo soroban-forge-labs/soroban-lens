@@ -1,5 +1,5 @@
 import type { LensEvent } from '../types.js';
-import { absoluteTime, prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
+import { absoluteTime, formatSacAmount, prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
 import { useLocale } from '../i18n/index.js';
 import { CopyButton } from './CopyButton.js';
 import { ExplorerLink } from './ExplorerLink.js';
@@ -28,12 +28,16 @@ interface Props {
   rowIndex?: number | undefined;
   /** Set the address or contract filter by clicking an address in a decoded field (#79). */
   onAddressClick?: (address: string) => void;
+  /** Open the transaction events panel for this hash (#65). */
+  onTxHashClick?: (txHash: string) => void;
+  /** Human-readable label for this event's contract, when available (Module 3). Full id shown on hover. */
+  contractLabel?: string | undefined;
 }
 
 /** One table row, expanding in place to show the full decoded payload. */
 export function EventRow({
   event, network, expanded, onToggleExpanded, showContract, onTopicClick, selected, onToggleSelect, absolute,
-  onNavigate, rowIndex, onAddressClick,
+  onNavigate, rowIndex, onAddressClick, onTxHashClick, contractLabel,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
   const firstTopic = event.topics[0];
@@ -99,7 +103,7 @@ export function EventRow({
         </td>
         {showContract && (
           <td className="col-contract" title={event.contractId}>
-            <span className="mono">{truncate(event.contractId)}</span>
+            <span className="mono">{contractLabel ?? truncate(event.contractId)}</span>
             <CopyButton value={event.contractId} label="contract ID" />
           </td>
         )}
@@ -137,9 +141,20 @@ export function EventRow({
           )}
         </td>
         <td className="col-tx" title={event.txHash}>
-          <ExplorerLink network={network} entity="tx" value={event.txHash} title="Open this transaction in a block explorer">
-            <span className="mono">{truncate(event.txHash, 6, 6)}</span>
-          </ExplorerLink>
+          {onTxHashClick ? (
+            <button
+              type="button"
+              className="link-button mono"
+              onClick={() => onTxHashClick(event.txHash)}
+              title="Show all events for this transaction"
+            >
+              {truncate(event.txHash, 6, 6)}
+            </button>
+          ) : (
+            <ExplorerLink network={network} entity="tx" value={event.txHash} title="Open this transaction in a block explorer">
+              <span className="mono">{truncate(event.txHash, 6, 6)}</span>
+            </ExplorerLink>
+          )}
           <CopyButton value={event.txHash} label="transaction hash" />
         </td>
       </tr>
@@ -212,6 +227,8 @@ export function EventRow({
                           <td>
                             {onAddressClick && field.type === 'Address' && typeof field.value === 'string' && ADDRESS_ID.test(field.value)
                               ? <button type="button" className="address-filter-btn mono" onClick={() => onAddressClick(field.value as string)}>{field.value as string}</button>
+                              : event.typed?.source === 'stellar-asset' && field.name === 'amount' && field.type === 'i128'
+                              ? <code title={String(field.value)}>{formatSacAmount(String(field.value))}</code>
                               : <code>{prettyJson(field.value)}</code>}
                           </td>
                         </tr>
