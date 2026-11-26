@@ -18,6 +18,20 @@ export class IngestMetrics {
   #rpcAvailable = true;
   #durations = new Map<RpcMethod, Histogram>();
   #errors = new Map<string, number>();
+  #activeProvider = 0;
+  #providers = new Set<number>([0]);
+  #failovers = 0;
+  #providerErrors = new Map<string, number>();
+
+  /** RPC pool (#322): which provider index is serving. Labels carry the index, never the URL. */
+  setActiveProvider(index: number, _label: string): void {
+    this.#activeProvider = index;
+    this.#providers.add(index);
+  }
+  incFailover(_from: string, _to: string): void { this.#failovers++; }
+  incProviderError(label: string): void {
+    this.#providerErrors.set(label, (this.#providerErrors.get(label) ?? 0) + 1);
+  }
 
   rpcError(method: RpcMethod, error: unknown): void {
     // Same classifier the retry decision uses, so the two never disagree.
@@ -99,6 +113,17 @@ export class IngestMetrics {
         `lens_rpc_request_duration_seconds_sum{method="${method}"} ${h.sum}`,
         `lens_rpc_request_duration_seconds_count{method="${method}"} ${h.count}`,
       ]),
+      '# HELP lens_rpc_active_provider 1 for the RPC provider index currently serving requests.',
+      '# TYPE lens_rpc_active_provider gauge',
+      ...[...this.#providers].sort((a, b) => a - b)
+        .map((i) => `lens_rpc_active_provider{index="${i}"} ${Number(i === this.#activeProvider)}`),
+      '# HELP lens_rpc_failovers_total Times the pool switched away from the active provider.',
+      '# TYPE lens_rpc_failovers_total counter',
+      `lens_rpc_failovers_total ${this.#failovers}`,
+      '# HELP lens_rpc_provider_errors_total Failed attempts per provider index.',
+      '# TYPE lens_rpc_provider_errors_total counter',
+      ...[...this.#providerErrors].sort(([a], [b]) => a.localeCompare(b))
+        .map(([index, count]) => `lens_rpc_provider_errors_total{index="${index}"} ${count}`),
       '',
     ].join('\n');
   }
