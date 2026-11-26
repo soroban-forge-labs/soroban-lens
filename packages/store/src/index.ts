@@ -29,6 +29,7 @@ export {
   MAX_QUERY_LIMIT,
   MAX_QUERY_CONTRACT_IDS,
   DEFAULT_MAX_QUERY_LIMIT,
+  MAX_CONTRACT_IDS,
   DEFAULT_QUERY_LIMIT,
   resolveMaxQueryLimit,
   normaliseLimit,
