@@ -7,6 +7,7 @@ import {
   recordFromWasm,
   describeSpecRecord,
   SpecFetcher,
+  refreshContractSpecs,
   resolveConfig,
 } from '../dist/index.js';
 
