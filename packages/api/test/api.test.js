@@ -57,6 +57,17 @@ test('GET /health reports a writable store', async () => {
   });
 });
 
+test('GET /stats reports the stored decode error count (#160)', async () => {
+  await withServer(async ({ get, store }) => {
+    const bad = { ...fixture.events[0], id: 'decode-error-row', value: 'not valid xdr' };
+    await store.insertEvents([bad]);
+    const { res, body } = await get('/stats');
+    assert.equal(res.status, 200);
+    assert.equal(body.eventCount, fixture.events.length + 1);
+    assert.equal(body.decodeErrorCount, 1);
+  });
+});
+
 test('the documented deliverable works: GET /contracts/{id}/events?limit=50', async () => {
   await withServer(async ({ get }) => {
     const { res, body } = await get(`/contracts/${SAC}/events?limit=50`);
@@ -2205,6 +2216,15 @@ test('GET /events?addressPosition= is validated and needs address (#147)', async
     const alone = await get('/events?addressPosition=topic1');
     assert.equal(alone.res.status, 400);
     assert.equal(alone.body.error.parameter, 'addressPosition');
+  });
+});
+
+test('GET /events accepts a valid muxed-account address filter (#148)', async () => {
+  await withServer(async ({ get }) => {
+    const muxedAddress = 'MDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB4AAAAAAAAAAAA46CW';
+    const { res, body } = await get(`/events?address=${muxedAddress}`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.events, []);
   });
 });
 

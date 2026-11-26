@@ -1295,10 +1295,10 @@
             "name": "address",
             "in": "path",
             "required": true,
-            "description": "Account (G...) or contract (C...) StrKey.",
+            "description": "Account (G...), muxed account (M...), or contract (C...) StrKey.",
             "schema": {
               "type": "string",
-              "pattern": "^[GC][A-Z2-7]{55}$"
+              "pattern": "^(?:[GC][A-Z2-7]{55}|M[A-Z2-7]{68})$"
             }
           }
         ],
@@ -1565,10 +1565,11 @@
       "Address": {
         "name": "address",
         "in": "query",
-        "description": "Match any event mentioning this address anywhere \u2014 a topic segment (indexed or beyond the 4-segment ceiling) or nested inside the decoded value. A StrKey: 'G' (account) or 'C' (contract) followed by 55 characters.",
+        "description": "Match any event mentioning this address anywhere \u2014 a topic segment (indexed or beyond the 4-segment ceiling) or nested inside the decoded value. Accepts G/C StrKeys with 55 characters or an M muxed-account StrKey with 68 characters.",
         "required": false,
         "schema": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^(?:[GC][A-Z2-7]{55}|M[A-Z2-7]{68})$"
         },
         "example": "GBIBH5UV4Q5L7VVJIHWYBTCSUDHJQXQC2V6Y5LOW4D26XNU5NREMIKE4"
       },
@@ -2467,7 +2468,7 @@
           },
           "address": {
             "type": "string",
-            "pattern": "^[GC][A-Z2-7]{55}$"
+            "pattern": "^(?:[GC][A-Z2-7]{55}|M[A-Z2-7]{68})$"
           }
         }
       },
