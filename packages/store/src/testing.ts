@@ -193,6 +193,81 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] filtering by event type returns only that type (#150)`, async () => {
+    const store = await createStore();
+    const systemEvent: RawEventInput = { ...fixtureEvents[0]!, id: 'system-event-under-test', type: 'system' };
+    await store.insertEvents([...fixtureEvents, systemEvent]);
+    const contract = await store.queryEvents({ type: 'contract', limit: 1000 });
+    assert.equal(contract.total, fixtureEvents.length);
+    assert.ok(contract.events.every((e) => e.type === 'contract'));
+    const system = await store.queryEvents({ type: 'system', limit: 1000 });
+    assert.deepEqual(system.events.map((e) => e.id), ['system-event-under-test']);
+    await store.close();
+  });
+
+  test(`[${name}] contractIds ORs several contracts into one page (#151)`, async () => {
+    const store = await seeded();
+    const two = contractIds.slice(0, 2);
+    const expected = fixtureEvents.filter((e) => two.includes(e.contractId));
+    const page = await store.queryEvents({ contractIds: two, limit: 1000 });
+    assert.equal(page.total, expected.length);
+    assert.ok(page.events.length > 0);
+    assert.ok(page.events.every((e) => two.includes(e.contractId)));
+    const ids = page.events.map((e) => e.id);
+    assert.deepEqual(ids, [...ids].sort().reverse(), 'the page is ordered by id descending, not grouped by contract');
+
+    // Keyset pagination across the OR walks both contracts' events exactly once.
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let guard = 0; guard < 50; guard++) {
+      const p = await store.queryEvents({ contractIds: two, limit: 2, ...(cursor ? { cursor } : {}) });
+      seen.push(...p.events.map((e) => e.id));
+      if (!p.nextCursor) break;
+      cursor = p.nextCursor;
+    }
+    assert.equal(seen.length, expected.length);
+    assert.equal(new Set(seen).size, expected.length, 'no event appeared on two pages');
+
+    // An explicitly empty list is the empty set, not "no filter".
+    assert.equal((await store.queryEvents({ contractIds: [], limit: 10 })).total, 0);
+    // And the two spellings of "one contract" cannot be combined.
+    await assert.rejects(
+      () => store.queryEvents({ contractId: someContract, contractIds: two }),
+      /contractId and contractIds/,
+    );
+    await store.close();
+  });
+
+  test(`[${name}] listTopics can count a topic position other than the first (#153)`, async () => {
+    const store = await seeded();
+
+    // The default — position 0 — is exactly what earlier versions returned.
+    const first = await store.listTopics(someContract);
+    const explicit = await store.listTopics(someContract, { position: 0 });
+    assert.deepEqual(explicit, first);
+    assert.ok(first.length > 0);
+
+    // Position 1 counts the second topic's scalar values instead. Read them
+    // back decoded — the stored column is the scalar rendering, so a
+    // non-scalar second topic simply does not appear.
+    const mine = (await store.queryEvents({ contractId: someContract, limit: 1000 })).events;
+    const expected = new Map<string, number>();
+    for (const e of mine) {
+      const v = e.topics[1]?.value;
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+        const key = String(v);
+        expected.set(key, (expected.get(key) ?? 0) + 1);
+      }
+    }
+    assert.ok(expected.size > 0, 'fixture needs a contract whose events carry a scalar second topic');
+    const second = await store.listTopics(someContract, { position: 1 });
+    assert.deepEqual(new Map(second.map((r) => [r.topic, r.count])), expected);
+
+    // Positions beyond the indexed columns are rejected, not silently misread.
+    await assert.rejects(() => store.listTopics(someContract, { position: 4 }), /position/);
+    await store.close();
+  });
+
   test(`[${name}] filtering by txHash returns only that transaction's events`, async () => {
     const store = await seeded();
     const txHash = fixtureEvents[0]!.txHash;
@@ -251,6 +326,39 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] listContractsPage keeps its ledger snapshot while new events arrive`, async () => {
+    const store = await seeded();
+    const expected = await store.listContracts(1000);
+    expected.sort(
+      (a, b) => b.lastLedger - a.lastLedger || (a.contractId < b.contractId ? -1 : a.contractId > b.contractId ? 1 : 0),
+    );
+    const first = await store.listContractsPage(1);
+    assert.deepEqual(first.contracts, expected.slice(0, 1));
+    const firstCursor = first.nextCursor;
+    if (firstCursor === null) throw new Error('the contract fixture must span multiple pages');
+
+    const lastLedger = Math.max(...fixtureEvents.map((event) => event.ledger));
+    const laterLedger = lastLedger + 1;
+    const laterEvent = {
+      ...fixtureEvents[0]!,
+      id: `${(BigInt(laterLedger) * 4294967296n).toString().padStart(19, '0')}-0000000000`,
+      contractId: first.contracts[0]!.contractId,
+      ledger: laterLedger,
+      ledgerClosedAt: new Date(new Date(fixtureEvents.at(-1)!.ledgerClosedAt).getTime() + 5000).toISOString(),
+    };
+    await store.insertEvents([laterEvent]);
+
+    const seen = [...first.contracts];
+    let cursor: string | null = firstCursor;
+    while (cursor) {
+      const page = await store.listContractsPage(1, cursor);
+      seen.push(...page.contracts);
+      cursor = page.nextCursor;
+    }
+    assert.deepEqual(seen, expected);
+    await store.close();
+  });
+
   test(`[${name}] getStats reflects what was actually inserted`, async () => {
     const store = await seeded();
     const stats = await store.getStats();
@@ -258,6 +366,20 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     assert.equal(stats.contractCount, contractIds.length);
     assert.equal(stats.minLedger, Math.min(...fixtureEvents.map((e) => e.ledger)));
     assert.equal(stats.maxLedger, Math.max(...fixtureEvents.map((e) => e.ledger)));
+    await store.close();
+  });
+
+  test(`[${name}] getStats counts a row whose decode failed (#160)`, async () => {
+    const store = await seeded();
+    // A value that is not decodable XDR: the decoder records decode_error on
+    // the row rather than throwing, and the stat must see it.
+    const bad: RawEventInput = {
+      ...fixtureEvents[0]!, id: 'decode-error-under-test', value: 'not valid xdr',
+    };
+    await store.insertEvents([bad]);
+    const stats = await store.getStats();
+    assert.equal(stats.eventCount, fixtureEvents.length + 1);
+    assert.equal(stats.decodeErrorCount, 1);
     await store.close();
   });
 
@@ -378,6 +500,48 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
       assert.equal(imported, fixtureEvents.length);
       const page = await target.queryEvents({ limit: 1000, order: 'asc' });
       assert.equal(page.events.length, fixtureEvents.length);
+      await target.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test(`[${name}] exportSnapshot writes only events matching the filter (#155)`, async () => {
+    const { mkdtemp, rm, readFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+
+    const dir = await mkdtemp(join(tmpdir(), 'event-store-suite-'));
+    const path = join(dir, 'subset.ndjson');
+    try {
+      const source = await seeded();
+      const expected = fixtureEvents.filter((e) => e.contractId === someContract);
+      const exported = await source.exportSnapshot(path, { contractId: someContract });
+      assert.equal(exported, expected.length);
+      // The file itself must contain only that contract's events — this is
+      // what `lens export -c` hands back to the user.
+      const lines = (await readFile(path, 'utf8'))
+        .trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { contractId: string });
+      assert.equal(lines.length, expected.length);
+      assert.ok(lines.every((e) => e.contractId === someContract));
+
+      // Ledger range applies the same query semantics as queryEvents.
+      const ledgers = fixtureEvents.map((e) => e.ledger).sort((a, b) => a - b);
+      const lo = ledgers[Math.floor(ledgers.length / 3)]!;
+      const hi = ledgers[Math.floor((ledgers.length * 2) / 3)]!;
+      const rangedPath = join(dir, 'ranged.ndjson');
+      const rangedCount = await source.exportSnapshot(rangedPath, { fromLedger: lo, toLedger: hi });
+      const rlines = (await readFile(rangedPath, 'utf8'))
+        .trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { ledger: number });
+      assert.equal(rangedCount, fixtureEvents.filter((e) => e.ledger >= lo && e.ledger <= hi).length);
+      assert.equal(rlines.length, rangedCount);
+      assert.ok(rlines.every((e) => e.ledger >= lo && e.ledger <= hi));
+      await source.close();
+
+      // The subset snapshot re-imports into an empty store intact.
+      const target = await createStore();
+      const imported = await target.importSnapshot(path);
+      assert.equal(imported, expected.length);
       await target.close();
     } finally {
       await rm(dir, { recursive: true, force: true });

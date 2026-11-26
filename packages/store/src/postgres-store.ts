@@ -2,11 +2,18 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { decodeContractCursor, encodeContractCursor } from './contract-cursor.js';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
-import { decodeEvent, topicKey, topicType, extractAddresses } from './decode.js';
+import {
+  decodeEvent,
+  topicKey,
+  topicType,
+  extractAddresses,
+  parseMuxedAddress,
+  transferToMuxedId,
+} from './decode.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION } from './schema.js';
 import { POSTGRES_MIGRATIONS } from './postgres-schema.js';
-import { normaliseLimit, type EventStore, type PruneToSizeResult } from './store.js';
+import { normaliseLimit, MAX_QUERY_CONTRACT_IDS, type EventStore, type PruneToSizeResult } from './store.js';
 import type {
   ContractSpecRecord,
   AddressContractSummary,
@@ -16,6 +23,7 @@ import type {
   EventPage,
   EventQuery,
   LensEvent,
+  ListTopicsOptions,
   RawEventInput,
   StoreStats,
   StreamState,
@@ -202,6 +210,14 @@ export class PostgresEventStore implements EventStore {
       const applied = new Set(
         (await db.query('SELECT version FROM schema_migrations')).rows.map((r) => Number(r['version'])),
       );
+      // Same refusal as the SQLite store (#161): a database migrated by a
+      // newer soroban-lens has versions this build cannot parse.
+      const newestApplied = Math.max(0, ...applied);
+      if (newestApplied > LATEST_SCHEMA_VERSION) {
+        throw new Error(
+          `database schema is v${newestApplied}, but this build only knows migrations up to v${LATEST_SCHEMA_VERSION} — upgrade soroban-lens to open this database`,
+        );
+      }
       const pending = POSTGRES_MIGRATIONS.filter((m) => !applied.has(m.version)).sort(
         (a, b) => a.version - b.version,
       );
@@ -292,13 +308,55 @@ export class PostgresEventStore implements EventStore {
     // and Module 1 replays it on restart.
     return this.#tx(async (db) => {
       let inserted = 0;
+      const summaryDeltas = new Map<
+        string,
+        { contractId: string; eventCount: number; firstLedger: number; lastLedger: number; lastSeenAt: string }
+      >();
       for (const e of events) {
         // ON CONFLICT DO NOTHING gives idempotency on the event id, which is what
         // makes Module 1's at-least-once delivery safe to replay.
         const result = await db.query(INSERT_EVENT, insertParams(e));
         const changed = result.rowCount ?? 0;
         inserted += changed;
-        if (changed > 0) await this.#insertAddresses(db, e.id, e);
+        if (changed > 0) {
+          const delta = summaryDeltas.get(e.contractId);
+          if (delta) {
+            delta.eventCount++;
+            delta.firstLedger = Math.min(delta.firstLedger, e.ledger);
+            delta.lastLedger = Math.max(delta.lastLedger, e.ledger);
+            delta.lastSeenAt = delta.lastSeenAt > e.ledgerClosedAt ? delta.lastSeenAt : e.ledgerClosedAt;
+          } else {
+            summaryDeltas.set(e.contractId, {
+              contractId: e.contractId,
+              eventCount: 1,
+              firstLedger: e.ledger,
+              lastLedger: e.ledger,
+              lastSeenAt: e.ledgerClosedAt,
+            });
+          }
+          await this.#insertAddresses(db, e.id, e);
+        }
+      }
+      const deltas = [...summaryDeltas.values()];
+      if (deltas.length > 0) {
+        await db.query(
+          `INSERT INTO contract_summaries (contract_id, event_count, first_ledger, last_ledger, last_seen_at)
+           SELECT delta.contract_id, delta.event_count, delta.first_ledger, delta.last_ledger, delta.last_seen_at
+             FROM unnest($1::text[], $2::integer[], $3::integer[], $4::integer[], $5::text[])
+                  AS delta(contract_id, event_count, first_ledger, last_ledger, last_seen_at)
+           ON CONFLICT (contract_id) DO UPDATE SET
+             event_count = contract_summaries.event_count + EXCLUDED.event_count,
+             first_ledger = LEAST(contract_summaries.first_ledger, EXCLUDED.first_ledger),
+             last_ledger = GREATEST(contract_summaries.last_ledger, EXCLUDED.last_ledger),
+             last_seen_at = GREATEST(contract_summaries.last_seen_at, EXCLUDED.last_seen_at)`,
+          [
+            deltas.map((delta) => delta.contractId),
+            deltas.map((delta) => delta.eventCount),
+            deltas.map((delta) => delta.firstLedger),
+            deltas.map((delta) => delta.lastLedger),
+            deltas.map((delta) => delta.lastSeenAt),
+          ],
+        );
       }
       return inserted;
     });
@@ -306,15 +364,21 @@ export class PostgresEventStore implements EventStore {
 
   /** Mirrors `SqliteEventStore`: topics beyond the indexed four still get a `topicN` position. */
   async #insertAddresses(db: PgQueryable, eventId: string, e: LensEvent): Promise<void> {
-    const insert = (address: string, position: string): Promise<PgQueryResult> =>
+    const insert = (address: string, position: string, muxedId: string | null): Promise<PgQueryResult> =>
       db.query(
-        'INSERT INTO event_addresses (event_id, address, position) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [eventId, address, position],
+        `INSERT INTO event_addresses (event_id, address, position, muxed_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (event_id, address, position) DO UPDATE SET muxed_id = EXCLUDED.muxed_id
+         WHERE EXCLUDED.muxed_id IS NOT NULL AND event_addresses.muxed_id IS DISTINCT FROM EXCLUDED.muxed_id`,
+        [eventId, address, position, muxedId],
       );
+    const muxedId = transferToMuxedId(e);
     for (const [i, topicXdr] of e.topicsXdr.entries()) {
-      for (const address of extractAddresses(topicXdr)) await insert(address, `topic${i}`);
+      for (const address of extractAddresses(topicXdr)) {
+        await insert(address, `topic${i}`, i === 2 ? muxedId : null);
+      }
     }
-    for (const address of extractAddresses(e.valueXdr)) await insert(address, 'value');
+    for (const address of extractAddresses(e.valueXdr)) await insert(address, 'value', null);
     for (const [i, topic] of e.topics.entries()) {
       const key = i >= 4 ? topicKey(topic) : null;
       if (key === null) continue;
@@ -452,12 +516,11 @@ export class PostgresEventStore implements EventStore {
   async listContracts(limit = 100): Promise<ContractSummary[]> {
     const { rows } = await this.#pool.query(
       `SELECT contract_id,
-              COUNT(*)::int         AS event_count,
-              MIN(ledger)           AS first_ledger,
-              MAX(ledger)           AS last_ledger,
-              MAX(ledger_closed_at) AS last_seen_at
-       FROM events
-       GROUP BY contract_id
+              event_count,
+              first_ledger,
+              last_ledger,
+              last_seen_at
+       FROM contract_summaries
        ORDER BY last_ledger DESC, contract_id ASC
        LIMIT $1`,
       [normaliseLimit(limit)],
@@ -478,15 +541,25 @@ export class PostgresEventStore implements EventStore {
       c?.snapshot ??
       Number((await this.#pool.query('SELECT COALESCE(MAX(ledger), 0) AS m FROM events')).rows[0]?.['m'] ?? 0);
     const { rows } = await this.#pool.query(
-      `SELECT contract_id,
-              COUNT(*)::int         AS event_count,
-              MIN(ledger)           AS first_ledger,
-              MAX(ledger)           AS last_ledger,
-              MAX(ledger_closed_at) AS last_seen_at
-       FROM events
-       WHERE ledger <= $1
-       GROUP BY contract_id
-       ${c ? 'HAVING MAX(ledger) < $3 OR (MAX(ledger) = $3 AND contract_id COLLATE "C" > $4)' : ''}
+      `WITH snapshot AS (SELECT $1::integer AS ledger),
+       affected AS (
+         SELECT contract_id FROM contract_summaries
+          WHERE last_ledger > (SELECT ledger FROM snapshot)
+       ),
+       snapshot_summaries AS (
+         SELECT contract_id, event_count, first_ledger, last_ledger, last_seen_at
+           FROM contract_summaries
+          WHERE last_ledger <= (SELECT ledger FROM snapshot)
+         UNION ALL
+         SELECT e.contract_id, COUNT(*)::int, MIN(e.ledger), MAX(e.ledger), MAX(e.ledger_closed_at)
+           FROM events e
+           JOIN affected a ON a.contract_id = e.contract_id
+          WHERE e.ledger <= (SELECT ledger FROM snapshot)
+          GROUP BY e.contract_id
+       )
+       SELECT contract_id, event_count, first_ledger, last_ledger, last_seen_at
+         FROM snapshot_summaries
+       ${c ? 'WHERE last_ledger < $3 OR (last_ledger = $3 AND contract_id COLLATE "C" > $4)' : ''}
        ORDER BY last_ledger DESC, contract_id COLLATE "C" ASC
        LIMIT $2`,
       c ? [snapshot, size + 1, c.lastLedger, c.contractId] : [snapshot, size + 1],
@@ -509,16 +582,17 @@ export class PostgresEventStore implements EventStore {
   }
 
   async summarizeAddress(address: string): Promise<AddressContractSummary[]> {
+    const muxedAddress = parseMuxedAddress(address);
     const { rows } = await this.#pool.query(
       `SELECT e.contract_id,
               COUNT(DISTINCT e.id)::int AS event_count,
               MIN(e.ledger) AS first_ledger,
               MAX(e.ledger) AS last_ledger
        FROM event_addresses a JOIN events e ON e.id = a.event_id
-       WHERE a.address = $1
+       WHERE a.address = $1 ${muxedAddress ? 'AND a.muxed_id = $2' : ''}
        GROUP BY e.contract_id
        ORDER BY event_count DESC, e.contract_id COLLATE "C" ASC`,
-      [address],
+      muxedAddress ? [muxedAddress.baseAddress, muxedAddress.muxedId] : [address],
     );
     return rows.map((r) => ({
       contractId: String(r['contract_id']),
@@ -528,12 +602,24 @@ export class PostgresEventStore implements EventStore {
     }));
   }
 
-  async listTopics(contractId: string, limit = 50): Promise<{ topic: string; count: number }[]> {
+  async listTopics(
+    contractId: string,
+    options: number | ListTopicsOptions = {},
+  ): Promise<{ topic: string; count: number }[]> {
+    // A bare number is the old signature's `limit`; the object form also
+    // names the topic position (#153).
+    const { position = 0, limit = 50 } = typeof options === 'number' ? { limit: options } : options;
+    const column = TOPIC_COLUMNS[position];
+    if (column === undefined || !Number.isInteger(position)) {
+      throw new RangeError(`listTopics position must be an integer 0-${TOPIC_COLUMNS.length - 1}, got ${position}`);
+    }
+    // `column` comes from TOPIC_COLUMNS, never from the caller, so the
+    // interpolated name cannot be an injection vector.
     const { rows } = await this.#pool.query(
-      `SELECT topic0 AS topic, COUNT(*)::int AS count
+      `SELECT ${column} AS topic, COUNT(*)::int AS count
        FROM events
-       WHERE contract_id = $1 AND topic0 IS NOT NULL
-       GROUP BY topic0
+       WHERE contract_id = $1 AND ${column} IS NOT NULL
+       GROUP BY ${column}
        ORDER BY count DESC, topic COLLATE "C" ASC
        LIMIT $2`,
       [contractId, normaliseLimit(limit)],
@@ -559,7 +645,8 @@ export class PostgresEventStore implements EventStore {
       `SELECT COUNT(*)::int AS event_count,
               COUNT(DISTINCT contract_id)::int AS contract_count,
               MIN(ledger) AS min_ledger,
-              MAX(ledger) AS max_ledger
+              MAX(ledger) AS max_ledger,
+              COUNT(decode_error)::int AS decode_error_count
        FROM events`,
     );
     const version = await this.#pool.query('SELECT COALESCE(MAX(version), 0)::int AS v FROM schema_migrations');
@@ -573,6 +660,7 @@ export class PostgresEventStore implements EventStore {
       minLedger: nullable(row['min_ledger']),
       maxLedger: nullable(row['max_ledger']),
       schemaVersion: Number(version.rows[0]?.['v'] ?? 0),
+      decodeErrorCount: Number(row['decode_error_count'] ?? 0),
       // The whole database, not just this schema: Postgres has no cheaper figure.
       sizeBytes: nullable(size.rows[0]?.['bytes']),
       // Postgres' WAL is cluster-wide and managed by the server, not a file beside the data.
@@ -698,17 +786,32 @@ export class PostgresEventStore implements EventStore {
 
   async deleteEvents(ids: string[]): Promise<number> {
     if (ids.length === 0) return 0;
-    // One array parameter rather than a list of placeholders; event_addresses
-    // rows go via ON DELETE CASCADE, as for pruneBefore.
-    const result = await this.#pool.query('DELETE FROM events WHERE id = ANY($1::text[])', [ids]);
-    return result.rowCount ?? 0;
+    return this.#tx(async (db) => {
+      const { rows: affected } = await db.query(
+        'SELECT DISTINCT contract_id FROM events WHERE id = ANY($1::text[])',
+        [ids],
+      );
+      const result = await db.query('DELETE FROM events WHERE id = ANY($1::text[])', [ids]);
+      await this.#refreshContractSummaries(
+        db,
+        affected.map((row) => String(row['contract_id'])),
+      );
+      return result.rowCount ?? 0;
+    });
   }
 
   async pruneBefore(ledger: number): Promise<number> {
-    // No VACUUM: autovacuum reclaims the space, and a manual one would block
-    // other writers for no benefit. event_addresses rows go via ON DELETE CASCADE.
-    const result = await this.#pool.query('DELETE FROM events WHERE ledger < $1', [ledger]);
-    return result.rowCount ?? 0;
+    return this.#tx(async (db) => {
+      const { rows: affected } = await db.query('SELECT DISTINCT contract_id FROM events WHERE ledger < $1', [
+        ledger,
+      ]);
+      const result = await db.query('DELETE FROM events WHERE ledger < $1', [ledger]);
+      await this.#refreshContractSummaries(
+        db,
+        affected.map((row) => String(row['contract_id'])),
+      );
+      return result.rowCount ?? 0;
+    });
   }
 
   /**
@@ -740,12 +843,20 @@ export class PostgresEventStore implements EventStore {
       if (oldest === null || oldest === undefined) break;
       const cutoff = Number(oldest) + chunk;
       // Whole ledgers only: a half-pruned ledger would leave a gap mid-history.
-      const result = await this.#pool.query(
-        'WITH gone AS (DELETE FROM events WHERE ledger < $1 RETURNING ledger) ' +
-          'SELECT COUNT(*) AS n, COUNT(DISTINCT ledger) AS l, MAX(ledger) AS top FROM gone',
-        [cutoff],
-      );
-      const row = result.rows[0] ?? {};
+      const row = await this.#tx(async (db) => {
+        const stats = await db.query(
+          'SELECT COUNT(*)::int AS n, COUNT(DISTINCT ledger)::int AS l, MAX(ledger) AS top FROM events WHERE ledger < $1',
+          [cutoff],
+        );
+        const affected = await db.query('SELECT DISTINCT contract_id FROM events WHERE ledger < $1', [cutoff]);
+        if (Number(stats.rows[0]?.['n'] ?? 0) === 0) return stats.rows[0] ?? {};
+        await db.query('DELETE FROM events WHERE ledger < $1', [cutoff]);
+        await this.#refreshContractSummaries(
+          db,
+          affected.rows.map((item) => String(item['contract_id'])),
+        );
+        return stats.rows[0] ?? {};
+      });
       const deleted = Number(row['n'] ?? 0);
       if (deleted === 0) break;
       rowsRemoved += deleted;
@@ -776,6 +887,23 @@ export class PostgresEventStore implements EventStore {
     const rows = await this.#rawRows('WHERE id = $1', [id]);
     if (rows.length === 0) return;
     await this.#tx((db) => this.#rewrite(db, rows[0]!));
+  }
+
+  async repairContractSummary(contractId: string): Promise<void> {
+    await this.#tx((db) => this.#refreshContractSummaries(db, [contractId]));
+  }
+
+  async #refreshContractSummaries(db: PgQueryable, contractIds: string[]): Promise<void> {
+    if (contractIds.length === 0) return;
+    await db.query('DELETE FROM contract_summaries WHERE contract_id = ANY($1::text[])', [contractIds]);
+    await db.query(
+      `INSERT INTO contract_summaries (contract_id, event_count, first_ledger, last_ledger, last_seen_at)
+       SELECT contract_id, COUNT(*)::int, MIN(ledger), MAX(ledger), MAX(ledger_closed_at)
+         FROM events
+        WHERE contract_id = ANY($1::text[])
+        GROUP BY contract_id`,
+      [contractIds],
+    );
   }
 
   async #rawRows(whereClause: string, params: unknown[] = []): Promise<Record<string, unknown>[]> {
@@ -838,14 +966,14 @@ export class PostgresEventStore implements EventStore {
     await this.#insertAddresses(db, raw.id, event);
   }
 
-  async checkIntegrity(): Promise<{ id: string; problems: string[] }[]> {
+  async checkIntegrity(): Promise<{ kind: 'event' | 'contract_summary'; id: string; problems: string[] }[]> {
     const { rows } = await this.#pool.query(
       `SELECT id, topics_json, topics_xdr_json, value_json, topic_count,
               topic0, topic1, topic2, topic3
        FROM events`,
     );
 
-    const results: { id: string; problems: string[] }[] = [];
+    const results: { kind: 'event' | 'contract_summary'; id: string; problems: string[] }[] = [];
     for (const row of rows) {
       const problems: string[] = [];
       // JSONB guarantees the columns parse; what is left to check is their shape.
@@ -869,9 +997,82 @@ export class PostgresEventStore implements EventStore {
           if (expected !== actual) problems.push(`topic${i} is "${actual}", expected "${expected}" from topics_json`);
         });
       }
-      if (problems.length > 0) results.push({ id: String(row['id']), problems });
+      if (problems.length > 0) results.push({ kind: 'event', id: String(row['id']), problems });
     }
+    results.push(...(await this.#contractSummaryProblems()));
     return results;
+  }
+
+  async #contractSummaryProblems(): Promise<
+    { kind: 'contract_summary'; id: string; problems: string[] }[]
+  > {
+    const [actualResult, summaryResult] = await Promise.all([
+      this.#pool.query(
+        `SELECT contract_id, COUNT(*)::int AS event_count, MIN(ledger) AS first_ledger,
+                MAX(ledger) AS last_ledger, MAX(ledger_closed_at) AS last_seen_at
+         FROM events
+         GROUP BY contract_id`,
+      ),
+      this.#pool.query(
+        'SELECT contract_id, event_count, first_ledger, last_ledger, last_seen_at FROM contract_summaries',
+      ),
+    ]);
+    type SummaryRow = {
+      contract_id: string;
+      event_count: number;
+      first_ledger: number;
+      last_ledger: number;
+      last_seen_at: string;
+    };
+    const actualById = new Map<string, SummaryRow>(
+      actualResult.rows.map((row): [string, SummaryRow] => [
+        String(row['contract_id']),
+        {
+          contract_id: String(row['contract_id']),
+          event_count: Number(row['event_count']),
+          first_ledger: Number(row['first_ledger']),
+          last_ledger: Number(row['last_ledger']),
+          last_seen_at: String(row['last_seen_at']),
+        },
+      ]),
+    );
+    const storedById = new Map<string, SummaryRow>(
+      summaryResult.rows.map((row): [string, SummaryRow] => [
+        String(row['contract_id']),
+        {
+          contract_id: String(row['contract_id']),
+          event_count: Number(row['event_count']),
+          first_ledger: Number(row['first_ledger']),
+          last_ledger: Number(row['last_ledger']),
+          last_seen_at: String(row['last_seen_at']),
+        },
+      ]),
+    );
+    const ids = new Set([...actualById.keys(), ...storedById.keys()]);
+    const problems: { kind: 'contract_summary'; id: string; problems: string[] }[] = [];
+    for (const id of ids) {
+      const expected = actualById.get(id);
+      const stored = storedById.get(id);
+      if (
+        !expected ||
+        !stored ||
+        expected.event_count !== stored.event_count ||
+        expected.first_ledger !== stored.first_ledger ||
+        expected.last_ledger !== stored.last_ledger ||
+        expected.last_seen_at !== stored.last_seen_at
+      ) {
+        problems.push({
+          kind: 'contract_summary',
+          id,
+          problems: [
+            `contract summary is ${stored ? JSON.stringify(stored) : 'missing'}, expected ${
+              expected ? JSON.stringify(expected) : 'no events'
+            }`,
+          ],
+        });
+      }
+    }
+    return problems;
   }
 
   /**
@@ -894,7 +1095,7 @@ export class PostgresEventStore implements EventStore {
   // snapshots
   // ---------------------------------------------------------------------------
 
-  async exportSnapshot(destPath: string): Promise<number> {
+  async exportSnapshot(destPath: string, filter?: EventQuery): Promise<number> {
     const BATCH = 1000;
     const client = await this.#pool.connect();
     const out = createWriteStream(destPath, { encoding: 'utf8' });
@@ -903,12 +1104,18 @@ export class PostgresEventStore implements EventStore {
       // REPEATABLE READ gives one point-in-time view across every batch, even
       // while the indexer keeps writing — the Postgres counterpart of VACUUM INTO.
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      // #155: a subset export reuses the queryEvents WHERE builder; the
+      // keyset `id >` bound and the batch LIMIT take the trailing params, so
+      // filter placeholders keep $1..$k.
+      const where = filter ? buildWhere(filter) : { clause: '', values: [] as unknown[] };
+      const conditions = where.clause ? `${where.clause.slice('WHERE '.length)} AND ` : '';
+      const afterParam = where.values.length + 1;
+      const sql =
+        `SELECT * FROM events WHERE ${conditions}id > $${afterParam} ` +
+        `ORDER BY id ASC LIMIT $${afterParam + 1}`;
       let after = '';
       for (;;) {
-        const { rows } = await client.query(
-          'SELECT * FROM events WHERE id > $1 ORDER BY id ASC LIMIT $2',
-          [after, BATCH],
-        );
+        const { rows } = await client.query(sql, [...where.values, after, BATCH]);
         if (rows.length === 0) break;
         for (const row of rows) {
           if (!out.write(`${JSON.stringify(rowToEvent(row))}\n`)) await once(out, 'drain');
@@ -1071,7 +1278,27 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
     return `$${values.length}`;
   };
 
+  // contractId and contractIds are the same restriction written two ways —
+  // honouring both would AND them, which silently means "the overlap only".
+  if (query.contractId !== undefined && query.contractIds !== undefined) {
+    throw new RangeError('query sets both contractId and contractIds; use one or the other');
+  }
+  if (query.contractIds !== undefined && query.contractIds.length > MAX_QUERY_CONTRACT_IDS) {
+    throw new RangeError(
+      `contractIds is capped at ${MAX_QUERY_CONTRACT_IDS} ids, got ${query.contractIds.length}`,
+    );
+  }
   if (query.contractId) conditions.push(`contract_id = ${param(query.contractId)}`);
+  if (query.contractIds !== undefined) {
+    if (query.contractIds.length === 0) {
+      // An explicitly empty list is the empty set: it must match nothing, not
+      // become "no filter" and match everything.
+      conditions.push('FALSE');
+    } else {
+      conditions.push(`contract_id IN (${query.contractIds.map((id) => param(id)).join(', ')})`);
+    }
+  }
+  if (query.type !== undefined) conditions.push(`type = ${param(query.type)}`);
   if (query.txHash) conditions.push(`tx_hash = ${param(query.txHash)}`);
   if (query.search) {
     // A substring match over the stored JSON text, case-insensitive like the
@@ -1081,14 +1308,24 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
     conditions.push(`(topics_json::text ILIKE ${p} OR value_json::text ILIKE ${p})`);
   }
   if (query.address) {
-    // IN (subquery), as in the SQLite store: a JOIN would multiply an event that
-    // mentions the address at several positions before LIMIT sees it.
-    // addressPosition narrows the same subquery (#147).
-    const position =
-      query.addressPosition !== undefined ? ` AND position = ${param(query.addressPosition)}` : '';
-    conditions.push(
-      `id IN (SELECT event_id FROM event_addresses WHERE address = ${param(query.address)}${position})`,
-    );
+    const muxedAddress = parseMuxedAddress(query.address);
+    if (muxedAddress) {
+      const baseAddress = param(muxedAddress.baseAddress);
+      const muxedId = param(muxedAddress.muxedId);
+      const position = query.addressPosition !== undefined ? ` AND position = ${param(query.addressPosition)}` : '';
+      conditions.push(
+        `id IN (SELECT event_id FROM event_addresses WHERE address = ${baseAddress} AND muxed_id = ${muxedId}${position})`,
+      );
+    } else {
+      // IN (subquery), as in the SQLite store: a JOIN would multiply an event that
+      // mentions the address at several positions before LIMIT sees it.
+      // addressPosition narrows the same subquery (#147).
+      const position =
+        query.addressPosition !== undefined ? ` AND position = ${param(query.addressPosition)}` : '';
+      conditions.push(
+        `id IN (SELECT event_id FROM event_addresses WHERE address = ${param(query.address)}${position})`,
+      );
+    }
   }
   // Compared against undefined, not truthiness: index 0 is a real, common value.
   if (query.transactionIndex !== undefined) conditions.push(`transaction_index = ${param(query.transactionIndex)}`);
@@ -1101,13 +1338,12 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
   if (query.successfulOnly === true) conditions.push('in_successful_call = TRUE');
 
   // `topicTypes` runs parallel to `topics` (#146); see the SQLite store.
-  const columns = ['topic0', 'topic1', 'topic2', 'topic3'] as const;
   const depth = Math.max(query.topics?.length ?? 0, query.topicTypes?.length ?? 0);
   for (let i = 0; i < depth; i++) {
     const topic = query.topics?.[i] ?? null;
     const type = query.topicTypes?.[i] ?? null;
     if (topic === null && type === null) continue;
-    const column = columns[i];
+    const column = TOPIC_COLUMNS[i];
     if (!column) {
       const parts = [`position = ${param(i)}`];
       if (topic !== null) parts.push(`topic = ${param(topic)}`);
@@ -1121,6 +1357,9 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
 
   return { clause: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '', values };
 }
+
+/** The indexed topic columns, in position order — the only valid `topicN` names. */
+const TOPIC_COLUMNS = ['topic0', 'topic1', 'topic2', 'topic3'] as const;
 
 function likeEscape(text: string): string {
   return text.replace(/[\\%_]/g, (c) => `\\${c}`);

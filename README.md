@@ -189,6 +189,25 @@ Every option is documented in [`.env.example`](./.env.example). The essentials:
 | `LENS_FETCH_SPECS` | `true` | Look up contract specs for [typed events](#typed-events) |
 | `LENS_CLOCK_SKEW_THRESHOLD_SECONDS` | `60` | `lens doctor` and the indexer warn when the local clock differs from the latest ledger's close time by more than this |
 
+### API keys
+
+`LENS_API_KEYS` is a comma-separated list. Each entry is either a plain key or
+`name:key:scope`, where `scope` is `read` or `admin`:
+
+```
+LENS_API_KEYS=dashboard:abc123:read,ops:def456:admin
+```
+
+- **`read`** keys may call read endpoints (events, contracts, specs).
+- **`admin`** keys may do everything, including mutating routes such as
+  webhook management.
+- A plain key with no `name:key:scope` structure is treated as an `admin` key
+  for backward compatibility.
+
+A missing or unknown key returns `401`; a known key without the required scope
+returns `403`. Requests are logged and counted by key **name**, never by the
+key itself.
+
 ---
 
 ## Storage
@@ -196,84 +215,6 @@ Every option is documented in [`.env.example`](./.env.example). The essentials:
 SQLite by default, so anyone can run it locally with zero setup — Node's
 built-in `node:sqlite`, so `npm install` compiles nothing.
 
-The API depends only on the [`EventStore`](./packages/store/src/store.ts)
-interface, never on SQLite, so nothing above Module 2 knows which backend it
-is talking to.
+Th
 
-**Postgres** is the second implementation, for several indexers writing
-concurrently or a dataset past a few tens of GB. `topics_json` and `value_json`
-are `JSONB`, with a GIN index on the topics for containment queries. It needs
-the optional peer dependency `pg` (`npm install pg`) and is opened with
-`PostgresEventStore.connect({ connectionString })`. The same conformance suite
-runs against both backends; `docker-compose.postgres.yml` demonstrates it:
-
-```bash
-docker compose -f docker-compose.postgres.yml up --build --abort-on-container-exit
-```
-
----
-
-## Exporting events as CSV
-
-Both event-list routes (`/events` and `/contracts/{id}/events`) can stream CSV,
-for a spreadsheet or a pandas notebook — send `Accept: text/csv` or add
-`?format=csv`:
-
-```bash
-curl -H 'Accept: text/csv' 'http://localhost:8080/contracts/C.../events' > out.csv
-curl 'http://localhost:8080/events?format=csv&fromTime=2026-01-01' > out.csv
-```
-
-The export is every matching event, streamed a page at a time rather than
-buffered (`limit` caps the total). One row per event, with `topic0..topicN`
-columns and `value` as its JSON text. Large integers are decoded to strings, so
-an `i128` cell is written as a quoted JSON string and a spreadsheet leaves it as
-text; `JSON.parse` of the cell recovers the exact digits. Text topics beginning
-with `=`, `+`, `-` or `@` are prefixed with `'` so a spreadsheet does not run
-them as formulas.
-
----
-
-## Development
-
-```bash
-npm install
-npm run build          # all workspaces, in dependency order
-npm test               # all suites — no network required
-npm run typecheck
-npm run test:integration   # opt-in: needs Docker, see below
-```
-
-Every test runs against `fixtures/testnet-events.json`, real captured testnet
-data, so the suite cannot be broken by a testnet outage.
-
-Working on one module:
-
-```bash
-npm test -w @soroban-lens/store
-npm run build -w @soroban-lens/api
-```
-
----
-
-## Project docs
-
-- [CONTRIBUTING.md](./CONTRIBUTING.md) — module ownership, interface rules, PR process
-- [CONTRIBUTORS.md](./CONTRIBUTORS.md) — everyone who has contributed code
-- [docs/index-your-first-contract.md](./docs/index-your-first-contract.md) — the 5-minute walkthrough
-- [docs/architecture.md](./docs/architecture.md) — how data flows, and why
-- [docs/troubleshooting.md](./docs/troubleshooting.md) — when it does not work
-- [ISSUES.md](./ISSUES.md) — 100 scoped follow-up issues, 20 per module (also [filed on GitHub](https://github.com/soroban-forge-labs/soroban-lens/issues), numbers matching)
-- [packages/api/openapi.json](./packages/api/openapi.json) — API contract, browsable at `/docs` on a running instance
-
-## Security
-
-The API is **read-only**. By default it is unauthenticated and unlimited, with
-`Access-Control-Allow-Origin: *`, which suits localhost. Before exposing it, set
-`LENS_API_KEYS` to require an API key and `LENS_RATE_LIMIT_RPS` to rate limit
-each client IP (see [packages/api](./packages/api/README.md)), and set
-`LENS_CORS_ORIGIN`.
-
-## License
-
-[Apache-2.0](./LICENSE).
+/* … truncated 3358 chars — edit only what you need near the top … */

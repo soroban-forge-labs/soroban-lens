@@ -12,6 +12,7 @@ export {
   recordFromWasmFile,
   describeSpecRecord,
   rpcSpecSource,
+  refreshContractSpecs,
 } from './specs.js';
 export type { SpecSource } from './specs.js';
 export { applyFixes, formatFixes } from './fix.js';
