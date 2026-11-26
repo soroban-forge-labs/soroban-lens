@@ -342,6 +342,30 @@ function AppInner(): React.JSX.Element {
     };
   }, [selectedIds, events, selected.baseUrl]);
 
+  const loadHealth = useCallback((): void => {
+    const controller = new AbortController();
+    api
+      .health(selected.baseUrl, controller.signal)
+      .then((h) => {
+        setHealth(h);
+        setHealthError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setHealth(null);
+        setHealthError(err instanceof ApiRequestError ? err.message : String(err));
+      });
+    // Refreshed with health, so "catching up" turns into results (or into
+    // "never ran") without a reload.
+    api
+      .status(selected.baseUrl, controller.signal)
+      .then(setIndexerStatus)
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setIndexerStatus(null);
+      });
+  }, [selected.baseUrl]);
+
   const loadFirstPage = useCallback(async (): Promise<void> => {
     if (!contractIdValid || !ledgerRangeValid) return;
     const isCurrent = requestGate.current.begin();
@@ -464,29 +488,6 @@ function AppInner(): React.JSX.Element {
     filters.live && !streaming && !activityRange,
   );
 
-  const loadHealth = useCallback((): void => {
-    const controller = new AbortController();
-    api
-      .health(selected.baseUrl, controller.signal)
-      .then((h) => {
-        setHealth(h);
-        setHealthError(null);
-      })
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setHealth(null);
-        setHealthError(err instanceof ApiRequestError ? err.message : String(err));
-      });
-    // Refreshed with health, so "catching up" turns into results (or into
-    // "never ran") without a reload.
-    api
-      .status(selected.baseUrl, controller.signal)
-      .then(setIndexerStatus)
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setIndexerStatus(null);
-      });
-  }, [selected.baseUrl]);
 
   // Poll health on a slow interval; it rarely changes and doesn't need to
   // track every events poll. usePolling also runs once immediately on mount.
