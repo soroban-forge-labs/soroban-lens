@@ -6,12 +6,14 @@ import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { SqliteEventStore } from '@soroban-lens/store';
 
 const run = promisify(execFile);
 const BIN = fileURLToPath(new URL('../dist/bin.js', import.meta.url));
 // seed's default fixture path is relative; run from the repo root so it resolves
 // the same way it would for a real user, regardless of the test runner's own cwd.
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
+const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
 
 /**
  * Invoke `lens` as a real subprocess.
@@ -75,6 +77,66 @@ test('export then import round-trips through a real subprocess invocation', asyn
   assert.equal(JSON.parse(stats.stdout).eventCount, 60);
 
   await rm(dir, { recursive: true, force: true });
+});
+
+test('lens stats reports a decode error count and points at lens redecode (#160)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cli-stats-'));
+  const dbPath = join(dir, 'lens.db');
+  try {
+    assert.equal((await cli(['seed', '--db', dbPath])).code, 0);
+
+    // A stored row whose decode failed — the case the hint exists for.
+    const store = new SqliteEventStore({ path: dbPath });
+    const any = (await store.queryEvents({ limit: 1 })).events[0];
+    await store.insertDecoded([{ ...any, id: 'decode-error-row', decodeError: 'synthetic' }]);
+    await store.close();
+
+    const { code, stdout, stderr } = await cli(['stats', '--db', dbPath]);
+    assert.equal(code, 0, stderr);
+    assert.equal(JSON.parse(stdout).decodeErrorCount, 1);
+    assert.match(stderr, /redecode/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('export -c writes only that contract, and the subset re-imports (#155)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cli-snap-'));
+  const dbPath = join(dir, 'source.db');
+  const snapshotPath = join(dir, 'subset.ndjson');
+  const targetPath = join(dir, 'target.db');
+  try {
+    assert.equal((await cli(['seed', '--db', dbPath])).code, 0);
+
+    const exported = await cli(['export', '--db', dbPath, '-c', SAC, snapshotPath]);
+    assert.equal(exported.code, 0, exported.stderr);
+    const events = (await readFile(snapshotPath, 'utf8'))
+      .trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(events.length > 0 && events.length < 60, `subset has ${events.length} events`);
+    assert.ok(events.every((e) => e.contractId === SAC));
+
+    // Ledger range composes with -c and bounds inclusively.
+    const rangedPath = join(dir, 'ranged.ndjson');
+    const ranged = await cli(['export', '--db', dbPath, '-c', SAC,
+      '--from-ledger', '1', '--to-ledger', '2', rangedPath]);
+    assert.equal(ranged.code, 0, ranged.stderr);
+    const revents = (await readFile(rangedPath, 'utf8'))
+      .trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(revents.every((e) => e.contractId === SAC && e.ledger >= 1 && e.ledger <= 2));
+
+    // And a malformed id is a usage error, not an empty file.
+    const bad = await cli(['export', '--db', dbPath, '-c', 'not-an-id', join(dir, 'x.ndjson')]);
+    assert.equal(bad.code, 2);
+    assert.match(bad.stderr, /not a contract id/);
+
+    // The subset snapshot re-imports into an empty database intact.
+    const imported = await cli(['import', '--db', targetPath, snapshotPath]);
+    assert.equal(imported.code, 0, imported.stderr);
+    const stats = await cli(['stats', '--db', targetPath]);
+    assert.equal(JSON.parse(stats.stdout).eventCount, events.length);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('export requires a destination path', async () => {

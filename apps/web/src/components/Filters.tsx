@@ -66,8 +66,8 @@ export function Filters({
         >
           <option value="">Choose an indexed contract…</option>
           {knownContracts.map((contract) => (
-            <option key={contract.contractId} value={contract.contractId}>
-              {contract.contractId} · {contract.eventCount.toLocaleString()} events · Last activity{' '}
+            <option key={contract.contractId} value={contract.contractId} title={contract.label ? contract.contractId : undefined}>
+              {contract.label ? `${contract.label} (${contract.contractId.slice(0, 8)}…)` : contract.contractId} · {contract.eventCount.toLocaleString()} events · Last activity{' '}
               {new Date(contract.lastSeenAt).toLocaleString()}
             </option>
           ))}
@@ -80,6 +80,20 @@ export function Filters({
         <button type="button" className="link-button" onClick={onUseExample}>
           {t('useTestnetExample')}
         </button>
+      </div>
+
+      <div className="field">
+        <label htmlFor="topicPosition">Topic position</label>
+        <select
+          id="topicPosition"
+          value={value.topicPosition}
+          onChange={(e) => set('topicPosition', Number(e.target.value))}
+        >
+          <option value={0}>topic[0] (event name)</option>
+          <option value={1}>topic[1]</option>
+          <option value={2}>topic[2]</option>
+          <option value={3}>topic[3]</option>
+        </select>
       </div>
 
       <div className="field">
