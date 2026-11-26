@@ -56,9 +56,11 @@ export interface EventStore {
    * `destPath` — a format that outlives this backend, unlike a raw copy of
    * the database file. Consistent even while the indexer is writing:
    * internally takes a point-in-time snapshot before reading from it.
+   * With `filter` (#155), only events matching it are written — the same
+   * `EventQuery` semantics as queryEvents.
    * @returns how many events were written.
    */
-  exportSnapshot(destPath: string): Promise<number>;
+  exportSnapshot(destPath: string, filter?: EventQuery): Promise<number>;
 
   /**
    * Read an NDJSON snapshot written by exportSnapshot() (or `lens seed`'s
