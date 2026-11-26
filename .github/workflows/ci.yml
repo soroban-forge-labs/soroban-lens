@@ -211,6 +211,19 @@ jobs:
           echo "API returned $COUNT events"
           [ "$COUNT" -gt 0 ] || { echo "expected indexed events from the fixture"; exit 1; }
 
+          # TODO(#201): uncomment once apps/web/test/e2e/ exists:
+          # cd apps/web && VITE_API_URL=http://127.0.0.1:8080 npm run build
+          # npx playwright test apps/web/test/e2e/ --reporter=dot --trace=on-first-retry
+
+      # Upload Playwright traces on failure (ready for when #201 adds the suite).
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: apps/web/test-results/
+          retention-days: 7
+
   openapi:
     name: OpenAPI spec lints clean
     runs-on: ubuntu-latest

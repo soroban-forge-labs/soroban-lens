@@ -38,7 +38,11 @@ for search.
   is off); the others use `skipTotal`. Covers hot and cold contracts, topic
   prefix, hot and cold address, ledger and time windows, tx hash, a deep
   cursor page, single-event lookup, FTS search (skipped when SQLite has no
-  FTS5), `countByTopic`, `countByTimeBucket` and `listContracts`.
+  FTS5), `countByTopic` and `countByTimeBucket`. Contract listing compares a
+  fresh `GROUP BY events` scan (`query.list_contracts_group_by`) with the
+  summary-table lookup used by `listContracts` (`query.list_contracts`). The
+  latter keeps the pre-change metric name so CI compares the optimization with
+  the old implementation.
 - **`api.*`**: the built API (`packages/api/dist/bin.js`) as a child process:
   `/health`, `/contracts`, `/contracts/<id>/events?limit=50` for a hot and a
   cold contract, and eight concurrent clients against the hot one (requests per
@@ -47,6 +51,10 @@ for search.
 Latencies are medians (p50); p95 is recorded alongside. Every case checks that
 it actually returned rows, so a broken filter fails the run instead of
 reporting a fast, meaningless number.
+
+The contract-list comparison uses the same deterministic fixture and page
+size for both paths. Run the default 1,000,000-event fixture for a representative
+measurement; `npm run bench:quick` is only a smoke test.
 
 ## Comparing
 
@@ -63,6 +71,14 @@ worse (`--threshold`), ignoring latency changes smaller than 0.5 ms
 
 Compare runs from the same machine. Absolute numbers depend on hardware, which
 is why there is no committed baseline file.
+
+### Contract summaries (#152)
+
+On the 1,000,000-event fixture (seed 1), listing 100 contracts took 12,190.555
+ms p50 / 13,035.985 ms p95 with a fresh `GROUP BY events` scan, compared with
+0.468 ms p50 / 0.722 ms p95 through `listContracts` and the summary table
+(seven samples per path). This run used Node v24.15.0 on Windows x64 with an
+Intel Core i7-7600U; absolute timings are machine-specific.
 
 ## In CI
 

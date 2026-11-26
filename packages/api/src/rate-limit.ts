@@ -81,11 +81,24 @@ export class TokenBucketLimiter {
  * says a trusted proxy sets it (`trustProxy`); otherwise any caller could mint
  * a fresh bucket per request by sending a different value.
  */
-export function clientKey(req: IncomingMessage, trustProxy: boolean): string {
+export function clientIp(req: IncomingMessage, trustProxy: boolean): string {
   if (trustProxy) {
     const forwarded = req.headers['x-forwarded-for'];
     const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
     if (first) return first;
   }
   return req.socket.remoteAddress ?? 'unknown';
+}
+
+/**
+ * The bucket a request counts against.
+ *
+ * When the request presents a valid API key, the bucket is keyed by that key so
+ * that distinct keys behind one NAT get separate budgets and a single key spread
+ * across many addresses shares one. Anonymous requests fall back to the client
+ * IP (see `clientIp`).
+ */
+export function clientKey(req: IncomingMessage, trustProxy: boolean, apiKey?: string | null): string {
+  if (apiKey) return `key:${apiKey}`;
+  return `ip:${clientIp(req, trustProxy)}`;
 }
