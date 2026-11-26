@@ -26,6 +26,8 @@ interface Props {
   onNavigate: (eventId: string, delta: 1 | -1) => void;
   /** 1-based position among all loaded rows, for screen readers when only some are rendered. */
   rowIndex?: number | undefined;
+  /** Set the address or contract filter by clicking an address in a decoded field (#79). */
+  onAddressClick?: (address: string) => void;
   /** Open the transaction events panel for this hash (#65). */
   onTxHashClick?: (txHash: string) => void;
   /** Human-readable label for this event's contract, when available (Module 3). Full id shown on hover. */
@@ -35,7 +37,7 @@ interface Props {
 /** One table row, expanding in place to show the full decoded payload. */
 export function EventRow({
   event, network, expanded, onToggleExpanded, showContract, onTopicClick, selected, onToggleSelect, absolute,
-  onNavigate, rowIndex, onTxHashClick, contractLabel,
+  onNavigate, rowIndex, onAddressClick, onTxHashClick, contractLabel,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
   const firstTopic = event.topics[0];
@@ -223,7 +225,9 @@ export function EventRow({
                             )}
                           </td>
                           <td>
-                            {event.typed?.source === 'stellar-asset' && field.name === 'amount' && field.type === 'i128'
+                            {onAddressClick && field.type === 'Address' && typeof field.value === 'string' && ADDRESS_ID.test(field.value)
+                              ? <button type="button" className="address-filter-btn mono" onClick={() => onAddressClick(field.value as string)}>{field.value as string}</button>
+                              : event.typed?.source === 'stellar-asset' && field.name === 'amount' && field.type === 'i128'
                               ? <code title={String(field.value)}>{formatSacAmount(String(field.value))}</code>
                               : <code>{prettyJson(field.value)}</code>}
                           </td>
