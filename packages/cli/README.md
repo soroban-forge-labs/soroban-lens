@@ -23,7 +23,7 @@ lens index     # run the pipeline: ingest -> decode -> store
 lens seed      # load the committed testnet fixture
 lens stats     # what is in the database
 lens tail      # follow new events as they are indexed
-lens spec      # contract specs for typed events: list | fetch | import
+lens spec      # contract specs for typed events: list | fetch | import | refresh
 ```
 
 Run them from the repo with `npm run doctor`, `npm run index`, `npm run seed`.
@@ -96,10 +96,30 @@ It reads the database directly (`--db`, `LENS_DB_PATH`), so it runs wherever
 the indexer's database is reachable: next to `lens index`, or inside the
 container with `docker compose exec indexer node packages/cli/dist/bin.js tail`.
 
+### `lens spec refresh`
+
+Re-fetches the spec for every contract in `contract_specs` — after a contract
+upgrade, or once an RPC that failed earlier is back — instead of looping over
+`lens spec fetch -c <id>` in a shell:
+
+```bash
+lens spec refresh                 # every stored contract
+lens spec refresh --only-missing  # only contracts with no spec or an errored fetch
+```
+
+Fetches run with a concurrency limit, and a summary of refreshed, skipped and
+failed contracts is printed at the end.
+
 ## Configuration precedence
 
-Flags beat environment beats defaults — so compose can set the environment
-while a developer overrides one value on the command line. Every variable is
+Flags beat environment beats the config file beats defaults — so compose can set
+the environment while a developer overrides one value on the command line, and a
+checked-in `lens.config.json` can carry the deployment's contracts, headers and
+retry settings instead of a long env block.
+
+`lens.config.json` is optional and uses the same keys as the `LENS_*` variables.
+It is resolved in [`src/config.ts`](./src/config.ts), so every command picks it
+up. The JSON Schema is published in [`docs/`](../../docs). Every variable is
 documented in [`.env.example`](../../.env.example).
 
 ## Where the modules meet

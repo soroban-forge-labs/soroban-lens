@@ -326,6 +326,39 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  test(`[${name}] listContractsPage keeps its ledger snapshot while new events arrive`, async () => {
+    const store = await seeded();
+    const expected = await store.listContracts(1000);
+    expected.sort(
+      (a, b) => b.lastLedger - a.lastLedger || (a.contractId < b.contractId ? -1 : a.contractId > b.contractId ? 1 : 0),
+    );
+    const first = await store.listContractsPage(1);
+    assert.deepEqual(first.contracts, expected.slice(0, 1));
+    const firstCursor = first.nextCursor;
+    if (firstCursor === null) throw new Error('the contract fixture must span multiple pages');
+
+    const lastLedger = Math.max(...fixtureEvents.map((event) => event.ledger));
+    const laterLedger = lastLedger + 1;
+    const laterEvent = {
+      ...fixtureEvents[0]!,
+      id: `${(BigInt(laterLedger) * 4294967296n).toString().padStart(19, '0')}-0000000000`,
+      contractId: first.contracts[0]!.contractId,
+      ledger: laterLedger,
+      ledgerClosedAt: new Date(new Date(fixtureEvents.at(-1)!.ledgerClosedAt).getTime() + 5000).toISOString(),
+    };
+    await store.insertEvents([laterEvent]);
+
+    const seen = [...first.contracts];
+    let cursor: string | null = firstCursor;
+    while (cursor) {
+      const page = await store.listContractsPage(1, cursor);
+      seen.push(...page.contracts);
+      cursor = page.nextCursor;
+    }
+    assert.deepEqual(seen, expected);
+    await store.close();
+  });
+
   test(`[${name}] getStats reflects what was actually inserted`, async () => {
     const store = await seeded();
     const stats = await store.getStats();
@@ -467,6 +500,48 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
       assert.equal(imported, fixtureEvents.length);
       const page = await target.queryEvents({ limit: 1000, order: 'asc' });
       assert.equal(page.events.length, fixtureEvents.length);
+      await target.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test(`[${name}] exportSnapshot writes only events matching the filter (#155)`, async () => {
+    const { mkdtemp, rm, readFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+
+    const dir = await mkdtemp(join(tmpdir(), 'event-store-suite-'));
+    const path = join(dir, 'subset.ndjson');
+    try {
+      const source = await seeded();
+      const expected = fixtureEvents.filter((e) => e.contractId === someContract);
+      const exported = await source.exportSnapshot(path, { contractId: someContract });
+      assert.equal(exported, expected.length);
+      // The file itself must contain only that contract's events — this is
+      // what `lens export -c` hands back to the user.
+      const lines = (await readFile(path, 'utf8'))
+        .trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { contractId: string });
+      assert.equal(lines.length, expected.length);
+      assert.ok(lines.every((e) => e.contractId === someContract));
+
+      // Ledger range applies the same query semantics as queryEvents.
+      const ledgers = fixtureEvents.map((e) => e.ledger).sort((a, b) => a - b);
+      const lo = ledgers[Math.floor(ledgers.length / 3)]!;
+      const hi = ledgers[Math.floor((ledgers.length * 2) / 3)]!;
+      const rangedPath = join(dir, 'ranged.ndjson');
+      const rangedCount = await source.exportSnapshot(rangedPath, { fromLedger: lo, toLedger: hi });
+      const rlines = (await readFile(rangedPath, 'utf8'))
+        .trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { ledger: number });
+      assert.equal(rangedCount, fixtureEvents.filter((e) => e.ledger >= lo && e.ledger <= hi).length);
+      assert.equal(rlines.length, rangedCount);
+      assert.ok(rlines.every((e) => e.ledger >= lo && e.ledger <= hi));
+      await source.close();
+
+      // The subset snapshot re-imports into an empty store intact.
+      const target = await createStore();
+      const imported = await target.importSnapshot(path);
+      assert.equal(imported, expected.length);
       await target.close();
     } finally {
       await rm(dir, { recursive: true, force: true });

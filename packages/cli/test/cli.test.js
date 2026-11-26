@@ -12,6 +12,7 @@ import {
   formatReport,
   redactHeaders,
   StoreBackedCursors,
+  describeConfig,
 } from '../dist/index.js';
 
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -256,6 +257,43 @@ test('doctor reports header names without their values', async () => {
   assert.ok(!text.includes(secret), 'doctor leaked a header value into its report');
   assert.match(text, /RPC headers/);
   assert.match(text, /Authorization: <redacted>/);
+});
+
+// ── #213 lens config ──────────────────────────────────────────────────────────
+
+test('describeConfig reports where each setting came from', () => {
+  const config = resolveConfig(
+    { network: 'testnet', db: '/flag.db' },
+    { LENS_API_PORT: '9000', LENS_PAGE_SIZE: '500' },
+  );
+  const { text } = describeConfig(config, { network: 'testnet', db: '/flag.db' }, {
+    LENS_API_PORT: '9000',
+    LENS_PAGE_SIZE: '500',
+  });
+
+  const sourceOf = (name) => {
+    const line = text.split('\n').find((l) => l.trim().startsWith(`${name} `) || l.trim().startsWith(`${name}:`));
+    assert.ok(line, `describeConfig output is missing ${name}`);
+    return line;
+  };
+
+  assert.match(sourceOf('network'), /flag/);
+  assert.match(sourceOf('dbPath'), /flag/);
+  assert.match(sourceOf('apiPort'), /env/);
+  assert.match(sourceOf('pageSize'), /env/);
+  assert.match(sourceOf('pollIntervalMs'), /default/);
+  assert.match(sourceOf('maxPollIntervalMs'), /default/);
+});
+
+test('describeConfig never prints an RPC header value', () => {
+  const secret = 'Bearer sk-live-do-not-log-me';
+  const config = resolveConfig({ rpcHeaders: [`Authorization: ${secret}`] }, {});
+  const { text } = describeConfig(config, { rpcHeaders: [`Authorization: ${secret}`] }, {});
+
+  assert.ok(!text.includes(secret), 'describeConfig leaked a header value');
+  assert.ok(!text.includes('sk-live'), 'describeConfig leaked part of a header value');
+  assert.match(text, /Authorization/);
+  assert.match(text, /<redacted>/);
 });
 
 // ── #21 lens prune ────────────────────────────────────────────────────────────
@@ -532,6 +570,67 @@ test('--contracts-file: account id on line 2 reports line 2', async () => {
     assert.equal(code, 2);
     assert.match(stderr, /line 2/);
     assert.match(stderr, /Account ids start with 'G'/);
+  } finally {
+    await _rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #215 lens.config.json ─────────────────────────────────────────────────────
+
+test('a lens.config.json file drives the resolved config', async () => {
+  const dir = await _mkdtemp(join(tmpdir(), 'lens-cli-cfg-'));
+  try {
+    const configPath = join(dir, 'lens.config.json');
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        contractIds: [FAKE_IDS[0], FAKE_IDS[1]],
+        dbPath: join(dir, 'from-file.db'),
+        pageSize: 50,
+      }),
+    );
+    const config = resolveConfig({}, { LENS_CONFIG_FILE: configPath });
+    assert.deepEqual(config.contractIds, [FAKE_IDS[0], FAKE_IDS[1]]);
+    assert.equal(config.dbPath, join(dir, 'from-file.db'));
+    assert.equal(config.pageSize, 50);
+  } finally {
+    await _rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a LENS_* env var overrides the config file value', async () => {
+  const dir = await _mkdtemp(join(tmpdir(), 'lens-cli-cfg-'));
+  try {
+    const configPath = join(dir, 'lens.config.json');
+    await writeFile(
+      configPath,
+      JSON.stringify({ LENS_DB_PATH: join(dir, 'from-file.db'), LENS_PAGE_SIZE: 50 }),
+    );
+    const config = resolveConfig(
+      { configFile: configPath },
+      { LENS_DB_PATH: join(dir, 'from-env.db'), LENS_PAGE_SIZE: '75' },
+    );
+    assert.equal(config.dbPath, join(dir, 'from-env.db'));
+    assert.equal(config.pageSize, 75);
+  } finally {
+    await _rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('flags still override both the config file and the environment', async () => {
+  const dir = await _mkdtemp(join(tmpdir(), 'lens-cli-cfg-'));
+  try {
+    const configPath = join(dir, 'lens.config.json');
+    await writeFile(
+      configPath,
+      JSON.stringify({ LENS_DB_PATH: join(dir, 'from-file.db'), LENS_PAGE_SIZE: 50 }),
+    );
+    const config = resolveConfig(
+      { configFile: configPath, db: join(dir, 'from-flag.db'), pageSize: 10 },
+      { LENS_DB_PATH: join(dir, 'from-env.db'), LENS_PAGE_SIZE: '75' },
+    );
+    assert.equal(config.dbPath, join(dir, 'from-flag.db'));
+    assert.equal(config.pageSize, 10);
   } finally {
     await _rm(dir, { recursive: true, force: true });
   }
