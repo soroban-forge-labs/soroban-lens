@@ -24,6 +24,8 @@ interface Props {
   onToggleSelect: (id: string) => void;
   /** Whether the Ledger column shows absolute time instead of relative. */
   absolute: boolean;
+  /** Open the transaction events panel for a given hash (#65). */
+  onTxHashClick?: (txHash: string) => void;
   /** Lookup from contractId to its human-readable label (Module 3). */
   contractLabels?: Record<string, string>;
 }
@@ -44,7 +46,7 @@ interface Viewport {
  * the layout changes when windowing switches on.
  */
 export function EventTable({
-  events, network, expandedEventIds, onToggleExpanded, showContract, onTopicClick, loading, emptyMessage, selectedIds, onToggleSelect, absolute,
+  events, network, expandedEventIds, onToggleExpanded, showContract, onTopicClick, loading, emptyMessage, selectedIds, onToggleSelect, absolute, onTxHashClick,
   contractLabels,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
@@ -213,6 +215,7 @@ export function EventTable({
             onToggleSelect={onToggleSelect}
             absolute={absolute}
             onNavigate={navigate}
+            onTxHashClick={onTxHashClick}
             contractLabel={contractLabels?.[event.contractId]}
             // +2: aria-rowindex is 1-based and the header row is row 1.
             rowIndex={virtualized ? range.start + i + 2 : undefined}

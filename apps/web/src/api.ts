@@ -1,6 +1,7 @@
 import type {
   ApiErrorBody,
   ContractActivity,
+  ContractSpec,
   ContractSummary,
   EventPage,
   Health,
@@ -133,6 +134,7 @@ async function request<T>(baseUrl: string, path: string, signal?: AbortSignal): 
 
 export interface EventQueryParams {
   contractId?: string;
+  address?: string;
   topics?: (string | null)[];
   fromLedger?: number;
   toLedger?: number;
@@ -148,6 +150,7 @@ export function buildEventPath(params: EventQueryParams): string {
   const search = new URLSearchParams();
   if (params.limit !== undefined) search.set('limit', String(params.limit));
   if (params.cursor) search.set('cursor', params.cursor);
+  if (params.address) search.set('address', params.address);
   if (params.fromLedger !== undefined) search.set('fromLedger', String(params.fromLedger));
   if (params.toLedger !== undefined) search.set('toLedger', String(params.toLedger));
   if (params.fromTime !== undefined) search.set('fromTime', params.fromTime);
@@ -224,4 +227,10 @@ export const api = {
     const qs = position ? `?position=${position}` : '';
     return request<{ topics: TopicCount[] }>(baseUrl, `/contracts/${encodeURIComponent(contractId)}/topics${qs}`, signal);
   },
+
+  transaction: (baseUrl: string, txHash: string, signal?: AbortSignal): Promise<{ events: LensEvent[] }> =>
+    request<{ events: LensEvent[] }>(baseUrl, `/transactions/${encodeURIComponent(txHash)}`, signal),
+
+  contractSpec: (baseUrl: string, contractId: string, signal?: AbortSignal): Promise<ContractSpec> =>
+    request<ContractSpec>(baseUrl, `/contracts/${encodeURIComponent(contractId)}/spec`, signal),
 };

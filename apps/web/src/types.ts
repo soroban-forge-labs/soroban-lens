@@ -119,3 +119,21 @@ export interface TopicCount {
 export interface ApiErrorBody {
   error: { code: string; message: string; parameter?: string };
 }
+
+export interface SpecEventField {
+  name: string;
+  type: string;
+  location: 'topic' | 'data';
+}
+
+export interface SpecEvent {
+  name: string;
+  fields: SpecEventField[];
+}
+
+/** `GET /contracts/{id}/spec` — declared events and their field types. */
+export interface ContractSpec {
+  contractId: string;
+  source: 'wasm' | 'stellar-asset';
+  events: SpecEvent[];
+}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiRequestError, buildStreamPath, configuredNetworks } from './api.js';
-import type { ContractActivity, ContractSummary, Health, IndexerStatus, LensEvent, TopicCount } from './types.js';
+import type { ContractActivity, ContractSpec, ContractSummary, Health, IndexerStatus, LensEvent, TopicCount } from './types.js';
 import { createLatestGate } from './requests.js';
 import { describeEmptyState } from './emptyState.js';
 import { Filters } from './components/Filters.js';
@@ -50,7 +50,7 @@ function AppInner(): React.JSX.Element {
   // the exact view. localStorage is the fallback for a bare visit only.
   const [urlState, setUrlState] = useUrlState(
     {
-      filters: { contractId: '', topic: '', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+      filters: { contractId: '', topic: '', topicPosition: 0, address: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '', fromTime: '', toTime: '' },
       network: networks[0]!.label,
       expandedEventId: null,
     },
@@ -91,6 +91,14 @@ function AppInner(): React.JSX.Element {
   const [errorRequestId, setErrorRequestId] = useState<string | undefined>(undefined);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Transaction events panel (#65)
+  const [txPanelHash, setTxPanelHash] = useState<string | null>(null);
+  const [txPanelEvents, setTxPanelEvents] = useState<LensEvent[]>([]);
+  const [txPanelLoading, setTxPanelLoading] = useState(false);
+  const [txPanelError, setTxPanelError] = useState<string | null>(null);
+  // Contract spec panel (#66)
+  const [contractSpec, setContractSpec] = useState<ContractSpec | null>(null);
+  const [contractSpecError, setContractSpecError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
@@ -197,10 +205,13 @@ function AppInner(): React.JSX.Element {
     toLedgerNum === undefined ||
     fromLedgerNum <= toLedgerNum;
 
+  const addressValid = filters.address === '' || /^[GC][A-Z2-7]{55}$/.test(filters.address);
+
   const query = useMemo(
     () => ({
       ...(contractIdValid && debouncedContractId ? { contractId: debouncedContractId } : {}),
       ...(debouncedTopic ? { topics: [debouncedTopic] } : {}),
+      ...(addressValid && filters.address ? { address: filters.address } : {}),
       ...(filters.successfulOnly ? { successfulOnly: true } : {}),
       ...(activityRange
         ? {
@@ -212,11 +223,13 @@ function AppInner(): React.JSX.Element {
         : {
             ...(fromLedgerNum !== undefined ? { fromLedger: fromLedgerNum } : {}),
             ...(toLedgerNum !== undefined ? { toLedger: toLedgerNum } : {}),
+            ...(filters.fromTime ? { fromTime: filters.fromTime } : {}),
+            ...(filters.toTime ? { toTime: filters.toTime } : {}),
           }),
       limit: PAGE_SIZE,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly, fromLedgerNum, toLedgerNum, activityRange],
+    [contractIdValid, debouncedContractId, debouncedTopic, addressValid, filters.address, filters.successfulOnly, filters.fromTime, filters.toTime, fromLedgerNum, toLedgerNum, activityRange],
   );
 
   const contractSummary = contracts.find((contract) => contract.contractId === debouncedContractId);
@@ -279,8 +292,33 @@ function AppInner(): React.JSX.Element {
     contractSummary,
   ]);
 
+  // Fetch contract spec when a valid contract is selected (#66)
+  useEffect(() => {
+    if (!contractIdValid || !debouncedContractId) { setContractSpec(null); setContractSpecError(null); return; }
+    const controller = new AbortController();
+    api.contractSpec(selected.baseUrl, debouncedContractId, controller.signal)
+      .then((spec) => { setContractSpec(spec); setContractSpecError(null); })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setContractSpec(null);
+        setContractSpecError(err instanceof ApiRequestError && err.status === 404 ? null : (err instanceof Error ? err.message : String(err)));
+      });
+    return () => controller.abort();
+  }, [selected.baseUrl, contractIdValid, debouncedContractId]);
+
   // Stops a slow response for an old filter overwriting a newer one.
   const requestGate = useRef(createLatestGate());
+
+  // Open transaction events panel (#65)
+  const openTxPanel = useCallback((txHash: string): void => {
+    setTxPanelHash(txHash);
+    setTxPanelEvents([]);
+    setTxPanelError(null);
+    setTxPanelLoading(true);
+    api.transaction(selected.baseUrl, txHash)
+      .then((result) => { setTxPanelEvents(result.events); setTxPanelLoading(false); })
+      .catch((err: unknown) => { setTxPanelError(err instanceof Error ? err.message : 'Failed to load transaction'); setTxPanelLoading(false); });
+  }, [selected.baseUrl]);
 
   const toggleSelect = useCallback((id: string): void => {
     setSelectedIds((current) => {
@@ -833,6 +871,41 @@ function AppInner(): React.JSX.Element {
         </section>
       )}
 
+      {/* Contract spec panel (#66) */}
+      {debouncedContractId && contractIdValid && (contractSpec || contractSpecError) && (
+        <details className="spec-panel">
+          <summary>Declared events {contractSpec ? `(${contractSpec.events.length})` : ''}</summary>
+          {contractSpecError ? (
+            <p className="warning small">{contractSpecError}</p>
+          ) : contractSpec && contractSpec.events.length === 0 ? (
+            <p className="muted small">No spec available for this contract.</p>
+          ) : contractSpec ? (
+            <ul className="spec-event-list">
+              {contractSpec.events.map((ev) => (
+                <li key={ev.name}>
+                  <button
+                    type="button"
+                    className="link-button mono"
+                    onClick={() => changeFilters({ ...filters, topic: ev.name })}
+                  >
+                    {ev.name}
+                  </button>
+                  {' '}
+                  <span className="muted small">({contractSpec.source})</span>
+                  {ev.fields.length > 0 && (
+                    <ul className="spec-field-list">
+                      {ev.fields.map((f) => (
+                        <li key={f.name} className="mono small">{f.location}: {f.name}: {f.type}</li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </details>
+      )}
+
       <ErrorBoundary title="Event Table Error">
         <EventTable
           events={filteredEvents}
@@ -846,9 +919,42 @@ function AppInner(): React.JSX.Element {
           onTopicClick={(topic) => changeFilters({ ...filters, topic })}
           absolute={absoluteTime}
           emptyMessage={emptyMessage}
+          onTxHashClick={openTxPanel}
           contractLabels={Object.fromEntries(contracts.filter((c) => c.label).map((c) => [c.contractId, c.label!]))}
         />
       </ErrorBoundary>
+
+      {/* Transaction events panel (#65) */}
+      {txPanelHash && (
+        <div className="tx-panel" role="dialog" aria-label="Transaction events">
+          <div className="tx-panel-header">
+            <span className="mono small">{txPanelHash}</span>
+            <button type="button" className="link-button" onClick={() => setTxPanelHash(null)}>Close</button>
+          </div>
+          {txPanelLoading && <p className="muted small">Loading transaction events…</p>}
+          {txPanelError && <p className="warning small">{txPanelError}</p>}
+          {!txPanelLoading && !txPanelError && txPanelEvents.length === 0 && (
+            <p className="muted small">No events found for this transaction.</p>
+          )}
+          {txPanelEvents.length > 0 && (
+            <ErrorBoundary title="Transaction Events Error">
+              <EventTable
+                events={txPanelEvents}
+                network={selected.label}
+                expandedEventIds={expandedEventIds}
+                onToggleExpanded={toggleEventExpanded}
+                showContract={true}
+                loading={false}
+                selectedIds={selectedIdSet}
+                onToggleSelect={toggleSelect}
+                onTopicClick={(topic) => changeFilters({ ...filters, topic })}
+                absolute={absoluteTime}
+                emptyMessage=""
+              />
+            </ErrorBoundary>
+          )}
+        </div>
+      )}
 
       {nextCursor && (
         <button
