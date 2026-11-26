@@ -25,6 +25,9 @@ An invalid port or occupied bind address fails startup.
 | `lens_metrics_ready` | 1 after the first acknowledged page; 0 before that |
 | `lens_rpc_request_duration_seconds` | Histogram per `method`, covering every successful or failed attempt, excluding retry waits |
 | `lens_rpc_errors_total` | Failed attempts by `method` and `kind`: `rate_limit` (429), `http_4xx` (other client errors: a 401/403 is usually a wrong provider key), `http_5xx` (provider outage), `timeout`, `json_rpc`, or `transport` |
+| `lens_rpc_active_provider{index}` | 1 for the provider currently serving requests, 0 for the others; `index` is the provider's position in the pool, never its URL |
+| `lens_rpc_failovers_total` | Number of times the pool switched away from the active provider after an error |
+| `lens_rpc_provider_errors_total{index}` | Failed attempts per provider `index`, so a flaky backup is visible even when the primary recovers |
 | `lens_cursor_restarts_total` | Successful cursor clears following a retention gap |
 
 The same server exposes `/healthz` and `/readyz` as JSON endpoints. Liveness
@@ -77,6 +80,14 @@ the provider is down. `docs/ingestion-alerts.yml` alerts on each separately.
 Error labels never contain provider messages,
 headers, URLs, cursors, or contract IDs.
 
+Provider labels are positional (`index="0"`, `index="1"`, ...) and never include
+URLs, so credentials or API keys in a provider URL or its query string cannot
+leak through metrics. The active provider index is also persisted with indexer
+progress, so `/status` reports which endpoint is currently serving requests and
+how many failovers have occurred. A sustained `lens_rpc_active_provider{index="1"}`
+of 1 means the indexer is running on a backup; watch `lens_rpc_failovers_total`
+and `lens_rpc_provider_errors_total` to spot a flapping primary.
+
 Run Prometheus with `--config.file=docs/prometheus.yml` from the repository root.
 It loads `docs/ingestion-alerts.yml` and scrapes the local indexer every 15 seconds.
 Choose a different Prometheus listening port (for example `--web.listen-address=:9091`)
@@ -88,3 +99,37 @@ gated on the first acknowledged page. A separate alert detects an unavailable
 endpoint. Route firing alerts through your existing Alertmanager configuration.
 
 The endpoint uses the [Prometheus text exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/).
+
+## Grafana dashboard
+
+`docs/grafana-dashboard.json` is a ready-made dashboard built only on the
+metrics above: ingestion rate, ledger lag, RPC latency percentiles, RPC errors
+by kind, and cursor restarts. It has no datasource baked in, so it binds to
+whatever Prometheus datasource you pick at import time.
+
+1. Start Prometheus with `--config.file=docs/prometheus.yml` as described above
+   and confirm the `lens` target is `UP` under **Status → Targets**.
+2. In Grafana, add a Prometheus datasource pointing at that Prometheus (for
+   example `http://localhost:9091` if you moved Prometheus off port 9090). This
+   is the only prerequisite; the dashboard does not create datasources.
+3. Import the dashboard: **Dashboards → New → Import**, upload
+   `docs/grafana-dashboard.json` (or paste its contents), then select the
+   Prometheus datasource when prompted and click **Import**. The dashboard UID
+   is fixed, so re-importing updates the existing copy instead of duplicating
+   it.
+
+Every panel needs a running indexer with `LENS_METRICS_PORT` set and at least
+one acknowledged page, so that Prometheus has scraped the series. Until then
+panels show "No data" rather than errors:
+
+- Ingestion rate and cursor restarts need `lens_events_ingested_total` and
+  `lens_cursor_restarts_total`; the restart panel stays empty until a retention
+  gap forces a cursor clear.
+- Lag panels read `lens_current_ledger` and `lens_latest_ledger`, which appear
+  after the first page.
+- RPC latency percentiles and errors by kind need
+  `lens_rpc_request_duration_seconds` and `lens_rpc_errors_total`; the error
+  panel is empty while no attempt fails.
+
+Metrics reset on indexer restart, so rate panels need a couple of scrape
+intervals (15 seconds each) to show a value after a restart.

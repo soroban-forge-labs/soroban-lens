@@ -1,5 +1,5 @@
 import type { LensEvent } from '../types.js';
-import { absoluteTime, prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
+import { absoluteTime, formatSacAmount, prettyJson, relativeTime, summarise, summariseTyped, topicPath, truncate } from '../format.js';
 import { useLocale } from '../i18n/index.js';
 import { CopyButton } from './CopyButton.js';
 import { ExplorerLink } from './ExplorerLink.js';
@@ -14,10 +14,6 @@ interface Props {
   onToggleExpanded: (eventId: string) => void;
   showContract: boolean;
   onTopicClick: (topic: string) => void;
-  /** #205: set the address filter to this account address. */
-  onAddressClick: (address: string) => void;
-  /** #205: set the contract filter to this contract address. */
-  onContractClick: (contractId: string) => void;
   selected: boolean;
   onToggleSelect: (id: string) => void;
   /** Show the ledger close time as an absolute timestamp instead of "3h ago". */
@@ -30,12 +26,18 @@ interface Props {
   onNavigate: (eventId: string, delta: 1 | -1) => void;
   /** 1-based position among all loaded rows, for screen readers when only some are rendered. */
   rowIndex?: number | undefined;
+  /** Set the address or contract filter by clicking an address in a decoded field (#79). */
+  onAddressClick?: (address: string) => void;
+  /** Open the transaction events panel for this hash (#65). */
+  onTxHashClick?: (txHash: string) => void;
+  /** Human-readable label for this event's contract, when available (Module 3). Full id shown on hover. */
+  contractLabel?: string | undefined;
 }
 
 /** One table row, expanding in place to show the full decoded payload. */
 export function EventRow({
-  event, network, expanded, onToggleExpanded, showContract, onTopicClick, onAddressClick, onContractClick,
-  selected, onToggleSelect, absolute, onNavigate, rowIndex,
+  event, network, expanded, onToggleExpanded, showContract, onTopicClick, selected, onToggleSelect, absolute,
+  onNavigate, rowIndex, onAddressClick, onTxHashClick, contractLabel,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
   const firstTopic = event.topics[0];
@@ -101,7 +103,7 @@ export function EventRow({
         </td>
         {showContract && (
           <td className="col-contract" title={event.contractId}>
-            <span className="mono">{truncate(event.contractId)}</span>
+            <span className="mono">{contractLabel ?? truncate(event.contractId)}</span>
             <CopyButton value={event.contractId} label="contract ID" />
           </td>
         )}
@@ -139,9 +141,20 @@ export function EventRow({
           )}
         </td>
         <td className="col-tx" title={event.txHash}>
-          <ExplorerLink network={network} entity="tx" value={event.txHash} title="Open this transaction in a block explorer">
-            <span className="mono">{truncate(event.txHash, 6, 6)}</span>
-          </ExplorerLink>
+          {onTxHashClick ? (
+            <button
+              type="button"
+              className="link-button mono"
+              onClick={() => onTxHashClick(event.txHash)}
+              title="Show all events for this transaction"
+            >
+              {truncate(event.txHash, 6, 6)}
+            </button>
+          ) : (
+            <ExplorerLink network={network} entity="tx" value={event.txHash} title="Open this transaction in a block explorer">
+              <span className="mono">{truncate(event.txHash, 6, 6)}</span>
+            </ExplorerLink>
+          )}
           <CopyButton value={event.txHash} label="transaction hash" />
         </td>
       </tr>
@@ -212,15 +225,11 @@ export function EventRow({
                             )}
                           </td>
                           <td>
-                            {field.type === 'Address' && typeof field.value === 'string' && ADDRESS_ID.test(field.value) ? (
-                              <AddressFilterButton
-                                address={field.value}
-                                onAddressClick={onAddressClick}
-                                onContractClick={onContractClick}
-                              />
-                            ) : (
-                              <code>{prettyJson(field.value)}</code>
-                            )}
+                            {onAddressClick && field.type === 'Address' && typeof field.value === 'string' && ADDRESS_ID.test(field.value)
+                              ? <button type="button" className="address-filter-btn mono" onClick={() => onAddressClick(field.value as string)}>{field.value as string}</button>
+                              : event.typed?.source === 'stellar-asset' && field.name === 'amount' && field.type === 'i128'
+                              ? <code title={String(field.value)}>{formatSacAmount(String(field.value))}</code>
+                              : <code>{prettyJson(field.value)}</code>}
                           </td>
                         </tr>
                       ))}
@@ -233,24 +242,25 @@ export function EventRow({
                 <h4>{t('topicsHeading')}</h4>
                 <ol className="topic-list">
                   {event.topics.map((topic, i) => {
-                    // #205: only a value the decoder typed as an address becomes
-                    // a filter button — a plain string that merely looks like a
-                    // StrKey stays text.
-                    const address = topic.type === 'address' && typeof topic.value === 'string' && ADDRESS_ID.test(topic.value)
+                    // Account and contract addresses are the identifiers worth
+                    // leaving the app for; everything else is just data.
+                    const address = typeof topic.value === 'string' && ADDRESS_ID.test(topic.value)
                       ? topic.value
                       : null;
                     return (
                       <li key={i}>
                         <span className="type-tag">{topic.type}</span>
-                        {address ? (
-                          <AddressFilterButton
-                            address={address}
-                            onAddressClick={onAddressClick}
-                            onContractClick={onContractClick}
-                          />
-                        ) : (
-                          <code>{prettyJson(topic.value)}</code>
-                        )}
+                        <code>
+                          {address ? (
+                            <ExplorerLink
+                              network={network}
+                              entity={address.startsWith('G') ? 'account' : 'contract'}
+                              value={address}
+                            >
+                              {address}
+                            </ExplorerLink>
+                          ) : prettyJson(topic.value)}
+                        </code>
                       </li>
                     );
                   })}
@@ -280,34 +290,4 @@ export function EventRow({
     </>
   );
 }
-/**
- * A decoded address rendered as a filter button (#205): an account (G…) sets
- * the address filter, a contract (C…) — which only ever appears in a contract
- * position — sets the contract filter.
- */
-function AddressFilterButton({
-  address, onAddressClick, onContractClick,
-}: {
-  address: string;
-  onAddressClick: (address: string) => void;
-  onContractClick: (contractId: string) => void;
-}): React.JSX.Element {
-  const { t } = useLocale();
-  const isContract = address.startsWith('C');
-  return (
-    <button
-      type="button"
-      className="topic-chip address-chip"
-      title={isContract ? t('filterByContract', { id: address }) : t('filterByAddress', { id: address })}
-      onClick={(e) => {
-        e.stopPropagation();
-        if (isContract) onContractClick(address);
-        else onAddressClick(address);
-      }}
-    >
-      {address}
-    </button>
-  );
-}
-
 // Component for displaying individual event rows in the table

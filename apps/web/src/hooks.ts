@@ -92,36 +92,28 @@ export function useDebounced<T>(value: T, delayMs: number): T {
   return debounced;
 }
 
-/**
- * Validate a persisted value against its defaults before using it (#194).
- *
- * A blob saved before a field existed, or one carrying a field that no longer
- * exists, would otherwise produce `undefined`s and stale keys. Object-shaped
- * state merges the stored keys over the defaults and drops keys the defaults
- * do not know; a stored value that is not an object at all resets to the
- * defaults. Primitive state is kept only when its type matches the default's —
- * and with a `null` default there is no type to check, so anything stored is
- * kept (e.g. `lens.theme`, where null just means "no saved choice yet").
- */
-export function restorePersisted<T>(stored: unknown, defaults: T): T {
-  if (defaults !== null && typeof defaults === 'object' && !Array.isArray(defaults)) {
-    if (stored === null || typeof stored !== 'object' || Array.isArray(stored)) return defaults;
-    const storedRecord = stored as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(defaults as Record<string, unknown>)) {
-      out[key] = key in storedRecord ? storedRecord[key] : (defaults as Record<string, unknown>)[key];
-    }
-    return out as T;
-  }
-  return defaults === null || typeof stored === typeof defaults ? (stored as T) : defaults;
-}
-
 /** Persist a piece of UI state in localStorage, surviving a reload. */
 export function usePersistentState<T>(key: string, initial: T): [T, (value: T) => void] {
   const [state, setState] = useState<T>(() => {
     try {
       const stored = window.localStorage.getItem(key);
-      return stored === null ? initial : restorePersisted(JSON.parse(stored), initial);
+      if (stored === null) return initial;
+      const parsed = JSON.parse(stored) as unknown;
+      // For plain-object state, merge stored over defaults so new fields added
+      // to the defaults are present even when old stored state lacks them.
+      if (
+        typeof initial === 'object' && initial !== null && !Array.isArray(initial) &&
+        typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ) {
+        const init = initial as Record<string, unknown>;
+        const p = parsed as Record<string, unknown>;
+        const merged: Record<string, unknown> = { ...init };
+        for (const k of Object.keys(init)) {
+          if (k in p) merged[k] = p[k];
+        }
+        return merged as T;
+      }
+      return parsed as T;
     } catch {
       return initial;
     }
@@ -166,15 +158,14 @@ export function useUrlState(
         filters: {
           contractId: parsed.filters.contractId,
           topic: parsed.filters.topic,
+          topicPosition: parsed.filters.topicPosition,
           address: parsed.filters.address,
-          search: parsed.filters.search,
+          fromTime: parsed.filters.fromTime,
+          toTime: parsed.filters.toTime,
           successfulOnly: parsed.filters.successfulOnly,
           live: parsed.filters.live,
           fromLedger: parsed.filters.fromLedger,
           toLedger: parsed.filters.toLedger,
-          timeRange: parsed.filters.timeRange,
-          customFromTime: parsed.filters.customFromTime,
-          customToTime: parsed.filters.customToTime,
         },
         network: parsed.network || initial.network,
         expandedEventId: parsed.expandedEventId,
@@ -188,10 +179,9 @@ export function useUrlState(
       if (f || n) {
         restored = {
           // Merge over the defaults: filters saved before a field existed
-          // (e.g. fromLedger/toLedger) must not come back undefined, and keys
-          // that no longer exist are dropped (#194).
-          filters: f ? restorePersisted(JSON.parse(f), initial.filters) : initial.filters,
-          network: n && typeof JSON.parse(n) === 'string' ? (JSON.parse(n) as string) : initial.network,
+          // (e.g. fromLedger/toLedger) must not come back undefined.
+          filters: f ? { ...initial.filters, ...(JSON.parse(f) as Partial<UrlState['filters']>) } : initial.filters,
+          network: n ? (JSON.parse(n) as string) : initial.network,
           expandedEventId: null,
         };
       }
@@ -232,7 +222,7 @@ export function useUrlState(
     const onPopState = (): void => {
       const parsed = parseUrl(window.location.pathname, window.location.search);
       const next: UrlState = parsed ?? {
-        filters: { ...prev.current.filters },
+        filters: { contractId: '', topic: '', topicPosition: 0, address: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '', fromTime: '', toTime: '' },
         network: '',
         expandedEventId: null,
       };

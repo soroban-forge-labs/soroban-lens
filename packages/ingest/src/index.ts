@@ -80,7 +80,7 @@ export { AdaptivePageSize, assertBounds } from './page-size.js';
 export type { PageSizeBounds, AdaptivePageSizeOptions } from './page-size.js';
 export { diffLedgerWindow, describeReorg, isEmptyDiff, DEFAULT_REORG_DEPTH } from './reorg.js';
 export type { ReorgDiff, ReorgStore, StoredEventRef } from './reorg.js';
-export { encodeTopicSegment, parseTopicFilters, TopicFlagError, TOPIC_PREFIXES, MAX_TOPIC_FILTERS, MAX_TOPIC_SEGMENTS } from './topics.js';
+export { encodeTopicSegment, parseTopicFilters, TopicFlagError, TOPIC_PREFIXES, MAX_TOPIC_FILTERS, MAX_TOPIC_SEGMENTS, parseEventType, resolveEventType, parseEndLedger, validateEndLedgerRange } from './topics.js';
 export { RecordedRpcClient } from './recorded-client.js';
 export { RpcRecorder } from './recorder.js';
 export type { RecordingFixture, RecordedExchange, RecorderOptions } from './recorder.js';

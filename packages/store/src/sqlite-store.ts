@@ -7,7 +7,7 @@ import { createReadStream } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import { decodeEvent, topicKey, topicType, extractAddresses } from './decode.js';
+import { decodeEvent, topicKey, topicType, extractAddresses, parseMuxedAddress, transferToMuxedId } from './decode.js';
 import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
@@ -113,6 +113,7 @@ export class SqliteEventStore implements EventStore {
   #statements: Statements | null = null;
   #checkpointTimer: ReturnType<typeof setInterval> | undefined;
   #searchAvailable = false;
+  #closed = false;
   readonly #readOnly: boolean;
 
   constructor(options: SqliteStoreOptions) {
@@ -134,6 +135,19 @@ export class SqliteEventStore implements EventStore {
       if (!readOnly) this.#db.exec('PRAGMA synchronous = NORMAL');
       this.#db.exec('PRAGMA foreign_keys = ON');
       // Wait rather than fail when the indexer holds the write lock.
+      this.#db.exec('PRAGMA busy_timeout = 5000');
+
+      // WAL lets the API read while the indexer writes, which is the whole point
+      // of running both against one file. NORMAL trades an fsync per commit for
+      // throughput; on a crash the worst case is replaying the last batch, which
+      // is already the delivery guarantee we have from Module 1.
+      if (options.path !== ':memory:' && !readOnly) this.#db.exec('PRAGMA journal_mode = WAL');
+      if (!readOnly) this.#db.exec('PRAGMA synchronous = NORMAL');
+      this.#db.exec('PRAGMA foreign_keys = ON');
+      // Wait rather than fail when the indexer holds the write lock. Windows
+      // releases file locks less eagerly than POSIX, so a reader closing a
+      // statement can still briefly block a writer; a generous timeout plus the
+      // retry helper below is what keeps that from surfacing as a test failure.
       this.#db.exec('PRAGMA busy_timeout = 5000');
 
       this.#searchAvailable = options.forceDisableFts5 ? false : this.#hasFts5();
@@ -309,6 +323,10 @@ export class SqliteEventStore implements EventStore {
     this.#db.exec('BEGIN');
     try {
       let inserted = 0;
+      const summaryDeltas = new Map<
+        string,
+        { contractId: string; eventCount: number; firstLedger: number; lastLedger: number; lastSeenAt: string }
+      >();
       for (const e of events) {
         const result = stmt.run(...insertParams(e));
         const changed = Number(result.changes ?? 0);
@@ -317,7 +335,48 @@ export class SqliteEventStore implements EventStore {
         // already fully indexed, and re-running extraction on it would be
         // wasted work, not a correctness issue — INSERT OR IGNORE on the
         // composite key absorbs a genuine repeat either way.
-        if (changed > 0) this.#insertAddresses(e.id, e);
+        if (changed > 0) {
+          const delta = summaryDeltas.get(e.contractId);
+          if (delta) {
+            delta.eventCount++;
+            delta.firstLedger = Math.min(delta.firstLedger, e.ledger);
+            delta.lastLedger = Math.max(delta.lastLedger, e.ledger);
+            delta.lastSeenAt = delta.lastSeenAt > e.ledgerClosedAt ? delta.lastSeenAt : e.ledgerClosedAt;
+          } else {
+            summaryDeltas.set(e.contractId, {
+              contractId: e.contractId,
+              eventCount: 1,
+              firstLedger: e.ledger,
+              lastLedger: e.ledger,
+              lastSeenAt: e.ledgerClosedAt,
+            });
+          }
+          this.#insertAddresses(e.id, e);
+        }
+      }
+      const deltas = [...summaryDeltas.values()];
+      for (let i = 0; i < deltas.length; i += 5000) {
+        const batch = deltas.slice(i, i + 5000);
+        const values = batch.map(() => '(?, ?, ?, ?, ?)').join(', ');
+        this.#db
+          .prepare(
+            `INSERT INTO contract_summaries (contract_id, event_count, first_ledger, last_ledger, last_seen_at)
+             VALUES ${values}
+             ON CONFLICT(contract_id) DO UPDATE SET
+               event_count = contract_summaries.event_count + excluded.event_count,
+               first_ledger = MIN(contract_summaries.first_ledger, excluded.first_ledger),
+               last_ledger = MAX(contract_summaries.last_ledger, excluded.last_ledger),
+               last_seen_at = MAX(contract_summaries.last_seen_at, excluded.last_seen_at)`,
+          )
+          .run(
+            ...batch.flatMap((delta) => [
+              delta.contractId,
+              delta.eventCount,
+              delta.firstLedger,
+              delta.lastLedger,
+              delta.lastSeenAt,
+            ]),
+          );
       }
       this.#db.exec('COMMIT');
       return inserted;
@@ -337,11 +396,14 @@ export class SqliteEventStore implements EventStore {
    */
   #insertAddresses(eventId: string, e: LensEvent): void {
     const stmt = this.#prepared().insertAddress;
+    const muxedId = transferToMuxedId(e);
     e.topicsXdr.forEach((topicXdr, i) => {
       const position = `topic${i}`; // topic0..topic3 are indexed; topic4+ still get a position
-      for (const address of extractAddresses(topicXdr)) stmt.run(eventId, address, position);
+      for (const address of extractAddresses(topicXdr)) {
+        stmt.run(eventId, address, position, i === 2 ? muxedId : null);
+      }
     });
-    for (const address of extractAddresses(e.valueXdr)) stmt.run(eventId, address, 'value');
+    for (const address of extractAddresses(e.valueXdr)) stmt.run(eventId, address, 'value', null);
     // Topics at position 4+ go to the event_topics side table (#164).
     const deep = this.#prepared().insertDeepTopic;
     e.topics.forEach((topic, i) => {
@@ -465,12 +527,11 @@ export class SqliteEventStore implements EventStore {
     const rows = this.#db
       .prepare(
         `SELECT contract_id,
-                COUNT(*)        AS event_count,
-                MIN(ledger)     AS first_ledger,
-                MAX(ledger)     AS last_ledger,
-                MAX(ledger_closed_at) AS last_seen_at
-         FROM events
-         GROUP BY contract_id
+                event_count,
+                first_ledger,
+                last_ledger,
+                last_seen_at
+         FROM contract_summaries
          ORDER BY last_ledger DESC
          LIMIT ?`,
       )
@@ -499,19 +560,29 @@ export class SqliteEventStore implements EventStore {
       ((this.#db.prepare('SELECT COALESCE(MAX(ledger), 0) AS m FROM events').get() as { m: number }).m);
     const rows = this.#db
       .prepare(
-        `SELECT contract_id,
-                COUNT(*)        AS event_count,
-                MIN(ledger)     AS first_ledger,
-                MAX(ledger)     AS last_ledger,
-                MAX(ledger_closed_at) AS last_seen_at
-         FROM events
-         WHERE ledger <= ?
-         GROUP BY contract_id
-         ${c ? 'HAVING MAX(ledger) < ? OR (MAX(ledger) = ? AND contract_id > ?)' : ''}
+        `WITH snapshot(s) AS (VALUES (?)),
+         affected AS (
+           SELECT contract_id FROM contract_summaries
+            WHERE last_ledger > (SELECT s FROM snapshot)
+         ),
+         snapshot_summaries AS (
+           SELECT contract_id, event_count, first_ledger, last_ledger, last_seen_at
+             FROM contract_summaries
+            WHERE last_ledger <= (SELECT s FROM snapshot)
+           UNION ALL
+           SELECT e.contract_id, COUNT(*), MIN(e.ledger), MAX(e.ledger), MAX(e.ledger_closed_at)
+             FROM events e
+             JOIN affected a ON a.contract_id = e.contract_id
+            WHERE e.ledger <= (SELECT s FROM snapshot)
+            GROUP BY e.contract_id
+         )
+         SELECT contract_id, event_count, first_ledger, last_ledger, last_seen_at
+           FROM snapshot_summaries
+         ${c ? 'WHERE last_ledger < ? OR (last_ledger = ? AND contract_id > ?)' : ''}
          ORDER BY last_ledger DESC, contract_id ASC
          LIMIT ?`,
       )
-      .all(...(c ? [snapshot, c.lastLedger, c.lastLedger, c.contractId] : [snapshot]), size + 1) as {
+      .all(snapshot, ...(c ? [c.lastLedger, c.lastLedger, c.contractId] : []), size + 1) as {
       contract_id: string;
       event_count: number;
       first_ledger: number;
@@ -536,6 +607,7 @@ export class SqliteEventStore implements EventStore {
   }
 
   async summarizeAddress(address: string): Promise<AddressContractSummary[]> {
+    const muxedAddress = parseMuxedAddress(address);
     const rows = this.#db
       .prepare(
         `SELECT e.contract_id AS contract_id,
@@ -543,11 +615,16 @@ export class SqliteEventStore implements EventStore {
                 MIN(e.ledger) AS first_ledger,
                 MAX(e.ledger) AS last_ledger
          FROM event_addresses a JOIN events e ON e.id = a.event_id
-         WHERE a.address = ?
+         WHERE a.address = ? ${muxedAddress ? 'AND a.muxed_id = ?' : ''}
          GROUP BY e.contract_id
          ORDER BY event_count DESC, e.contract_id ASC`,
       )
-      .all(address) as { contract_id: string; event_count: number; first_ledger: number; last_ledger: number }[];
+      .all(...(muxedAddress ? [muxedAddress.baseAddress, muxedAddress.muxedId] : [address])) as {
+      contract_id: string;
+      event_count: number;
+      first_ledger: number;
+      last_ledger: number;
+    }[];
     return rows.map((r) => ({
       contractId: r.contract_id,
       eventCount: r.event_count,
@@ -789,15 +866,21 @@ export class SqliteEventStore implements EventStore {
     let removed = 0;
     this.#db.exec('BEGIN');
     try {
+      const affected = new Set<string>();
       // Chunked under SQLite's bound-parameter limit. event_addresses goes by
       // ON DELETE CASCADE and events_fts by its delete trigger, as for prune.
       for (let i = 0; i < ids.length; i += DELETE_CHUNK) {
         const chunk = ids.slice(i, i + DELETE_CHUNK);
+        const contracts = this.#db
+          .prepare(`SELECT DISTINCT contract_id FROM events WHERE id IN (${chunk.map(() => '?').join(',')})`)
+          .all(...chunk) as { contract_id: string }[];
+        for (const row of contracts) affected.add(row.contract_id);
         const result = this.#db
           .prepare(`DELETE FROM events WHERE id IN (${chunk.map(() => '?').join(',')})`)
           .run(...chunk);
         removed += Number(result.changes);
       }
+      this.#refreshContractSummaries([...affected]);
       this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.exec('ROLLBACK');
@@ -819,8 +902,15 @@ export class SqliteEventStore implements EventStore {
     if (before === 0) return 0;
 
     this.#db.exec('BEGIN');
+    let removed = 0;
     try {
-      this.#db.prepare('DELETE FROM events WHERE ledger < ?').run(ledger);
+      const affected = (
+        this.#db.prepare('SELECT DISTINCT contract_id FROM events WHERE ledger < ?').all(ledger) as {
+          contract_id: string;
+        }[]
+      ).map((row) => row.contract_id);
+      removed = Number(this.#db.prepare('DELETE FROM events WHERE ledger < ?').run(ledger).changes);
+      this.#refreshContractSummaries(affected);
       this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.exec('ROLLBACK');
@@ -838,12 +928,12 @@ export class SqliteEventStore implements EventStore {
     // truncating the main file directly — the file on disk does not actually
     // shrink until a checkpoint flushes and truncates that WAL, so both run
     // together here.
-    if (this.#path !== ':memory:') {
+    if (removed > 0 && this.#path !== ':memory:') {
       this.#db.exec('VACUUM');
       this.#db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     }
 
-    return before;
+    return removed;
   }
 
   /**
@@ -897,7 +987,13 @@ export class SqliteEventStore implements EventStore {
 
       this.#db.exec('BEGIN');
       try {
+        const affected = (
+          this.#db.prepare('SELECT DISTINCT contract_id FROM events WHERE ledger < ?').all(cutoff) as {
+            contract_id: string;
+          }[]
+        ).map((row) => row.contract_id);
         this.#db.prepare('DELETE FROM events WHERE ledger < ?').run(cutoff);
+        this.#refreshContractSummaries(affected);
         this.#db.exec('COMMIT');
       } catch (error) {
         this.#db.exec('ROLLBACK');
@@ -950,7 +1046,7 @@ export class SqliteEventStore implements EventStore {
     return rows.length;
   }
 
-  async checkIntegrity(): Promise<{ id: string; problems: string[] }[]> {
+  async checkIntegrity(): Promise<{ kind: 'event' | 'contract_summary'; id: string; problems: string[] }[]> {
     const rows = this.#db
       .prepare(
         `SELECT id, topics_json, topics_xdr_json, value_json, topic_count,
@@ -969,7 +1065,7 @@ export class SqliteEventStore implements EventStore {
       topic3: string | null;
     }[];
 
-    const results: { id: string; problems: string[] }[] = [];
+    const results: { kind: 'event' | 'contract_summary'; id: string; problems: string[] }[] = [];
     for (const row of rows) {
       const problems: string[] = [];
 
@@ -1004,9 +1100,63 @@ export class SqliteEventStore implements EventStore {
         });
       }
 
-      if (problems.length > 0) results.push({ id: row.id, problems });
+      if (problems.length > 0) results.push({ kind: 'event', id: row.id, problems });
     }
+    results.push(...this.#contractSummaryProblems());
     return results;
+  }
+
+  #contractSummaryProblems(): { kind: 'contract_summary'; id: string; problems: string[] }[] {
+    const actual = this.#db
+      .prepare(
+        `SELECT contract_id, COUNT(*) AS event_count, MIN(ledger) AS first_ledger,
+                MAX(ledger) AS last_ledger, MAX(ledger_closed_at) AS last_seen_at
+         FROM events
+         GROUP BY contract_id`,
+      )
+      .all() as {
+      contract_id: string;
+      event_count: number;
+      first_ledger: number;
+      last_ledger: number;
+      last_seen_at: string;
+    }[];
+    const summaries = this.#db
+      .prepare('SELECT contract_id, event_count, first_ledger, last_ledger, last_seen_at FROM contract_summaries')
+      .all() as {
+      contract_id: string;
+      event_count: number;
+      first_ledger: number;
+      last_ledger: number;
+      last_seen_at: string;
+    }[];
+    const actualById = new Map(actual.map((row) => [row.contract_id, row]));
+    const storedById = new Map(summaries.map((row) => [row.contract_id, row]));
+    const ids = new Set([...actualById.keys(), ...storedById.keys()]);
+    const problems: { kind: 'contract_summary'; id: string; problems: string[] }[] = [];
+    for (const id of ids) {
+      const expected = actualById.get(id);
+      const stored = storedById.get(id);
+      if (
+        !expected ||
+        !stored ||
+        expected.event_count !== stored.event_count ||
+        expected.first_ledger !== stored.first_ledger ||
+        expected.last_ledger !== stored.last_ledger ||
+        expected.last_seen_at !== stored.last_seen_at
+      ) {
+        problems.push({
+          kind: 'contract_summary',
+          id,
+          problems: [
+            `contract summary is ${stored ? JSON.stringify(stored) : 'missing'}, expected ${
+              expected ? JSON.stringify(expected) : 'no events'
+            }`,
+          ],
+        });
+      }
+    }
+    return problems;
   }
 
   async repairRow(id: string): Promise<void> {
@@ -1022,6 +1172,33 @@ export class SqliteEventStore implements EventStore {
     } catch (error) {
       this.#db.exec('ROLLBACK');
       throw error;
+    }
+  }
+
+  async repairContractSummary(contractId: string): Promise<void> {
+    this.#db.exec('BEGIN');
+    try {
+      this.#refreshContractSummaries([contractId]);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  #refreshContractSummaries(contractIds: string[]): void {
+    if (contractIds.length === 0) return;
+    const remove = this.#db.prepare('DELETE FROM contract_summaries WHERE contract_id = ?');
+    const refresh = this.#db.prepare(
+      `INSERT INTO contract_summaries (contract_id, event_count, first_ledger, last_ledger, last_seen_at)
+       SELECT contract_id, COUNT(*), MIN(ledger), MAX(ledger), MAX(ledger_closed_at)
+         FROM events
+        WHERE contract_id = ?
+        GROUP BY contract_id`,
+    );
+    for (const contractId of contractIds) {
+      remove.run(contractId);
+      refresh.run(contractId);
     }
   }
 
@@ -1134,14 +1311,18 @@ export class SqliteEventStore implements EventStore {
     // connection (the indexer) is mid-write — it is SQLite's own supported
     // mechanism for exactly this, which is why the issue names it directly.
     // Copying the live file instead risks capturing a torn WAL checkpoint.
-    const tempPath =
-      this.#path === ':memory:'
-        ? join(tmpdir(), `lens-snapshot-${randomUUID()}.db`)
-        : `${this.#path}.snapshot-${randomUUID()}`;
+    //
+    // The temp path is always built with join(tmpdir(), ...): a path derived
+    // from the database path with a hard-coded separator breaks on Windows,
+    // and a temp file next to the database can be locked by the same process.
+    const tempPath = join(tmpdir(), `lens-snapshot-${randomUUID()}.db`);
     this.#db.prepare('VACUUM INTO ?').run(tempPath);
 
     const snapshot = new DatabaseSync(tempPath);
     try {
+      // Read every row into memory and close the statement before touching the
+      // output file: on Windows an open statement keeps the temp database's
+      // file handle alive, and rm() then fails with EBUSY.
       // #155: a subset export reuses the queryEvents WHERE builder verbatim —
       // the snapshot has the same schema, so a filter means exactly the same
       // thing here as it does on a live query.
@@ -1161,7 +1342,8 @@ export class SqliteEventStore implements EventStore {
       return rows.length;
     } finally {
       snapshot.close();
-      await rm(tempPath, { force: true });
+      // Retry the unlink: Windows can hold the handle a moment past close().
+      await rmWithRetry(tempPath);
     }
   }
 
@@ -1219,7 +1401,18 @@ export class SqliteEventStore implements EventStore {
   }
 
   async close(): Promise<void> {
-    if (this.#checkpointTimer) clearInterval(this.#checkpointTimer);
+    if (this.#closed) return;
+    this.#closed = true;
+    if (this.#checkpointTimer) {
+      clearInterval(this.#checkpointTimer);
+      this.#checkpointTimer = undefined;
+    }
+    // Drop cached statements before closing the connection: on Windows an
+    // outstanding statement keeps the database file handle open, so a test
+    // that closes the store and then deletes its temp directory fails with
+    // EBUSY unless everything is released first.
+    this.#statements = null;
+    this.#countCache.clear();
     this.#db.close();
   }
 }
@@ -1289,9 +1482,12 @@ function buildStatements(db: DatabaseSync): Statements {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     byId: db.prepare('SELECT * FROM events WHERE id = ?'),
-    insertAddress: db.prepare(
-      'INSERT OR IGNORE INTO event_addresses (event_id, address, position) VALUES (?, ?, ?)',
-    ),
+    insertAddress: db.prepare(`
+      INSERT INTO event_addresses (event_id, address, position, muxed_id)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (event_id, address, position) DO UPDATE SET muxed_id = excluded.muxed_id
+      WHERE excluded.muxed_id IS NOT NULL AND event_addresses.muxed_id IS NOT excluded.muxed_id
+    `),
     insertDeepTopic: db.prepare(
       'INSERT OR IGNORE INTO event_topics (event_id, position, topic, type) VALUES (?, ?, ?, ?)',
     ),
@@ -1400,24 +1596,32 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
     values.push(ftsPhraseQuery(query.search));
   }
   if (query.address) {
-    // IN (subquery), not a JOIN or a correlated EXISTS: a JOIN would multiply
-    // the row when an address appears at several positions in one event,
-    // before the pagination LIMIT ever sees it. A correlated EXISTS measured
-    // slower in practice — SQLite drove it from a full scan of events,
-    // checking event_addresses per row, rather than from the address index —
-    // confirmed with EXPLAIN QUERY PLAN before choosing this form over it.
-    // IN (SELECT ...) drives from idx_event_addresses_address instead: find
-    // the matching event_ids first, then look each up by primary key.
-    if (query.addressPosition !== undefined) {
-      // Narrowing the same subquery (#147). idx_event_addresses_address is
-      // (address, event_id) on a WITHOUT ROWID table whose primary key ends in
-      // position, so the index already carries position: the plan stays a
-      // covering-index search on address, with position checked in the index.
-      conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ? AND position = ?)');
-      values.push(query.address, query.addressPosition);
+    const muxedAddress = parseMuxedAddress(query.address);
+    if (muxedAddress) {
+      const position = query.addressPosition !== undefined ? ' AND position = ?' : '';
+      conditions.push(
+        `id IN (SELECT event_id FROM event_addresses WHERE address = ? AND muxed_id = ?${position})`,
+      );
+      values.push(muxedAddress.baseAddress, muxedAddress.muxedId);
+      if (query.addressPosition !== undefined) values.push(query.addressPosition);
     } else {
-      conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ?)');
-      values.push(query.address);
+      // IN (subquery), not a JOIN or a correlated EXISTS: a JOIN would multiply
+      // the row when an address appears at several positions in one event,
+      // before the pagination LIMIT ever sees it. A correlated EXISTS measured
+      // slower in practice — SQLite drove it from a full scan of events,
+      // checking event_addresses per row, rather than from the address index —
+      // confirmed with EXPLAIN QUERY PLAN before choosing this form over it.
+      // IN (SELECT ...) drives from idx_event_addresses_address instead: find
+      // the matching event_ids first, then look each up by primary key.
+      if (query.addressPosition !== undefined) {
+        // Narrowing the same subquery (#147). The address index includes
+        // position through the WITHOUT ROWID primary key.
+        conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ? AND position = ?)');
+        values.push(query.address, query.addressPosition);
+      } else {
+        conditions.push('id IN (SELECT event_id FROM event_addresses WHERE address = ?)');
+        values.push(query.address);
+      }
     }
   }
   // Compared against undefined, not truthiness: index 0 is the first
@@ -1528,6 +1732,26 @@ function fileSize(path: string): number | null {
     return statSync(path).size;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Remove a file, retrying briefly on Windows' transient EBUSY/EPERM.
+ *
+ * POSIX unlinks a file whose handle is still open; Windows refuses until the
+ * last handle closes, and SQLite can take a moment past `close()` to release
+ * its own. A few short retries turn that race into a non-event.
+ */
+async function rmWithRetry(path: string, attempts = 10): Promise<void> {
+  for (let i = 0; ; i++) {
+    try {
+      await rm(path, { force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (i >= attempts || (code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY')) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25 * (i + 1)));
+    }
   }
 }
 

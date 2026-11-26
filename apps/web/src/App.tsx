@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiRequestError, buildStreamPath, configuredNetworks } from './api.js';
-import type { ContractActivity, ContractSummary, EventPage, Health, IndexerStatus, LensEvent, TopicCount } from './types.js';
+import type { ContractActivity, ContractSpec, ContractSummary, Health, IndexerStatus, LensEvent, TopicCount } from './types.js';
 import { createLatestGate } from './requests.js';
-import { mergeLivePage } from './live.js';
 import { describeEmptyState } from './emptyState.js';
 import { Filters } from './components/Filters.js';
 import type { FilterState } from './route.js';
@@ -18,12 +17,8 @@ import { LocaleProvider, useLocale, LOCALE_CODES, LOCALE_LABELS } from './i18n/i
 const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMPQVUU2HHGCYSC'; // XLM SAC
 const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
-const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
-/** Health refreshes on its own slower cadence, not on every live tick (#195). */
 const HEALTH_INTERVAL_MS = 30_000;
-/** Account or contract StrKey — the shape the API's `address=` accepts (#188). */
-const ADDRESS_PATTERN = /^[GC][A-Z2-7]{55}$/;
-const TIME_PRESET_SECONDS: Record<string, number> = { '15m': 15 * 60, '1h': 60 * 60, '24h': 24 * 60 * 60 };
+const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
 const ACTIVITY_DAYS = 30;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 
@@ -55,7 +50,7 @@ function AppInner(): React.JSX.Element {
   // the exact view. localStorage is the fallback for a bare visit only.
   const [urlState, setUrlState] = useUrlState(
     {
-      filters: { contractId: '', topic: '', address: '', search: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '', timeRange: '', customFromTime: '', customToTime: '' },
+      filters: { contractId: '', topic: '', topicPosition: 0, address: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '', fromTime: '', toTime: '' },
       network: networks[0]!.label,
       expandedEventId: null,
     },
@@ -71,9 +66,6 @@ function AppInner(): React.JSX.Element {
 
 
   const [events, setEvents] = useState<LensEvent[]>([]);
-  // Latest loaded rows for callbacks that must not take `events` as a dep.
-  const eventsRef = useRef<LensEvent[]>([]);
-  eventsRef.current = events;
   const [expandedEventIds, setExpandedEventIds] = useState<Set<string>>(
     () => new Set(expandedEventId ? [expandedEventId] : []),
   );
@@ -96,9 +88,20 @@ function AppInner(): React.JSX.Element {
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityRange, setActivityRange] = useState<ActivityRange | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  const [errorRequestId, setErrorRequestId] = useState<string | undefined>(undefined);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Transaction events panel (#65)
+  const [txPanelHash, setTxPanelHash] = useState<string | null>(null);
+  const [txPanelEvents, setTxPanelEvents] = useState<LensEvent[]>([]);
+  const [txPanelLoading, setTxPanelLoading] = useState(false);
+  const [txPanelError, setTxPanelError] = useState<string | null>(null);
+  // Contract spec panel (#66)
+  const [contractSpec, setContractSpec] = useState<ContractSpec | null>(null);
+  const [contractSpecError, setContractSpecError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   // A 404 for a contract means this indexer has never seen it; an empty page
   // with emptyReason means it is indexed but nothing matches the filters.
@@ -108,48 +111,40 @@ function AppInner(): React.JSX.Element {
   // state: an empty table means different things depending on both.
   const [indexerStatus, setIndexerStatus] = useState<IndexerStatus | null>(null);
   const [loadErrorStatus, setLoadErrorStatus] = useState<number | null>(null);
-  // "Load more" failures stay next to the button (#196) — the main banner is
-  // for first-page failures, where the rows on screen are still fine.
-  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [theme, toggleTheme] = useTheme();
   // Absolute vs relative timestamps in the Ledger column. Persisted so the
   // choice survives a reload, like the theme.
   const [absoluteTime, setAbsoluteTime] = usePersistentState('lens.absoluteTime', false);
-
-  // #195: /health and /status share one refresh on their own interval; a new
-  // call aborts the previous in-flight one so back-to-back triggers stay cheap.
-  const healthAbort = useRef<AbortController | null>(null);
-  const refreshHealth = useCallback((): void => {
-    healthAbort.current?.abort();
-    const controller = new AbortController();
-    healthAbort.current = controller;
-    api
-      .health(selected.baseUrl, controller.signal)
-      .then((h) => {
-        setHealth(h);
-        setHealthError(null);
-      })
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setHealth(null);
-        setHealthError(err instanceof ApiRequestError ? err.message : String(err));
-      });
-    // Refreshed with health, so "catching up" turns into results (or into
-    // "never ran") without a reload.
-    api
-      .status(selected.baseUrl, controller.signal)
-      .then(setIndexerStatus)
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setIndexerStatus(null);
-      });
-  }, [selected.baseUrl]);
 
   // Ordered: the first ticked event is the left side of the comparison.
   const [selectedIds, setSelectedIds] = useState<string[]>(readCompareParam);
   const [comparePair, setComparePair] = useState<[LensEvent, LensEvent] | null>(null);
   const [compareError, setCompareError] = useState<string | null>(null);
   const contractInputRef = useRef<HTMLInputElement>(null);
+  // true while a live-poll/stream refresh is in flight (not a query change)
+  const isLiveRefresh = useRef(false);
+  const [unseenCount, setUnseenCount] = useState(0);
+  const prevTotalRef = useRef(0);
+
+  // Track unseen live events while the tab is hidden (#76).
+  useEffect(() => {
+    if (document.hidden && total > prevTotalRef.current) {
+      setUnseenCount((c) => c + (total - prevTotalRef.current));
+    }
+    prevTotalRef.current = total;
+  }, [total]);
+
+  useEffect(() => {
+    const onVisibility = (): void => { if (!document.hidden) setUnseenCount(0); };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
+  useEffect(() => {
+    const label = filters.contractId ? `${filters.contractId.slice(0, 8)}…` : null;
+    const base = label ? `${label} – Soroban Lens` : 'Soroban Lens';
+    document.title = unseenCount > 0 ? `(${unseenCount}) ${base}` : base;
+  }, [filters.contractId, unseenCount]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -192,14 +187,11 @@ function AppInner(): React.JSX.Element {
   // Typing a 56-character contract id should not fire 56 requests.
   const debouncedContractId = useDebounced(filters.contractId, 300);
   const debouncedTopic = useDebounced(filters.topic, 300);
-  const debouncedAddress = useDebounced(filters.address, 300);
-  const debouncedSearch = useDebounced(filters.search, 300);
+
+  const [searchText, setSearchText] = useState('');
+  const debouncedSearch = useDebounced(searchText, 300);
 
   const contractIdValid = debouncedContractId === '' || CONTRACT_ID_PATTERN.test(debouncedContractId);
-  const addressValid = debouncedAddress === '' || ADDRESS_PATTERN.test(debouncedAddress);
-  // #189: the store treats a 1–2 char term as "match nothing", so a partial
-  // term shows the inline hint and does not send a request at all.
-  const searchReady = debouncedSearch === '' || debouncedSearch.length >= 3;
 
   // Parse ledger bounds: only include when valid non-empty integers.
   const fromLedgerNum =
@@ -216,46 +208,14 @@ function AppInner(): React.JSX.Element {
     toLedgerNum === undefined ||
     fromLedgerNum <= toLedgerNum;
 
-  // #190: preset windows convert to epoch seconds at query time; a custom
-  // range parses ISO-8601 or epoch seconds like the tail filter does.
-  const parseTimeBound = useCallback((raw: string): number | undefined => {
-    const v = raw.trim();
-    if (!v) return undefined;
-    if (/^-?\d+$/.test(v)) return Number(v);
-    const parsed = Date.parse(v);
-    return Number.isNaN(parsed) ? undefined : Math.floor(parsed / 1000);
-  }, []);
-  const timeBounds = useMemo(() => {
-    const presetSeconds = TIME_PRESET_SECONDS[filters.timeRange];
-    if (presetSeconds !== undefined) {
-      const now = Math.floor(Date.now() / 1000);
-      return { fromTime: String(now - presetSeconds), toTime: String(now) };
-    }
-    if (filters.timeRange === 'custom') {
-      const from = parseTimeBound(filters.customFromTime);
-      const to = parseTimeBound(filters.customToTime);
-      return {
-        ...(from !== undefined ? { fromTime: String(from) } : {}),
-        ...(to !== undefined ? { toTime: String(to) } : {}),
-      };
-    }
-    return {};
-  }, [filters.timeRange, filters.customFromTime, filters.customToTime, parseTimeBound]);
-  const timeRangeLabel =
-    filters.timeRange === 'custom'
-      ? 'custom range'
-      : filters.timeRange
-        ? `last ${filters.timeRange}`
-        : null;
+  const addressValid = filters.address === '' || /^[GC][A-Z2-7]{55}$/.test(filters.address);
 
   const query = useMemo(
     () => ({
       ...(contractIdValid && debouncedContractId ? { contractId: debouncedContractId } : {}),
       ...(debouncedTopic ? { topics: [debouncedTopic] } : {}),
-      ...(addressValid && debouncedAddress ? { address: debouncedAddress } : {}),
-      ...(searchReady && debouncedSearch ? { search: debouncedSearch } : {}),
+      ...(addressValid && filters.address ? { address: filters.address } : {}),
       ...(filters.successfulOnly ? { successfulOnly: true } : {}),
-      ...timeBounds,
       ...(activityRange
         ? {
             fromLedger: activityRange.fromLedger,
@@ -266,11 +226,13 @@ function AppInner(): React.JSX.Element {
         : {
             ...(fromLedgerNum !== undefined ? { fromLedger: fromLedgerNum } : {}),
             ...(toLedgerNum !== undefined ? { toLedger: toLedgerNum } : {}),
+            ...(filters.fromTime ? { fromTime: filters.fromTime } : {}),
+            ...(filters.toTime ? { toTime: filters.toTime } : {}),
           }),
       limit: PAGE_SIZE,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [contractIdValid, debouncedContractId, debouncedTopic, addressValid, debouncedAddress, searchReady, debouncedSearch, filters.successfulOnly, fromLedgerNum, toLedgerNum, activityRange, timeBounds],
+    [contractIdValid, debouncedContractId, debouncedTopic, addressValid, filters.address, filters.successfulOnly, filters.fromTime, filters.toTime, fromLedgerNum, toLedgerNum, activityRange],
   );
 
   const contractSummary = contracts.find((contract) => contract.contractId === debouncedContractId);
@@ -333,8 +295,33 @@ function AppInner(): React.JSX.Element {
     contractSummary,
   ]);
 
+  // Fetch contract spec when a valid contract is selected (#66)
+  useEffect(() => {
+    if (!contractIdValid || !debouncedContractId) { setContractSpec(null); setContractSpecError(null); return; }
+    const controller = new AbortController();
+    api.contractSpec(selected.baseUrl, debouncedContractId, controller.signal)
+      .then((spec) => { setContractSpec(spec); setContractSpecError(null); })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setContractSpec(null);
+        setContractSpecError(err instanceof ApiRequestError && err.status === 404 ? null : (err instanceof Error ? err.message : String(err)));
+      });
+    return () => controller.abort();
+  }, [selected.baseUrl, contractIdValid, debouncedContractId]);
+
   // Stops a slow response for an old filter overwriting a newer one.
   const requestGate = useRef(createLatestGate());
+
+  // Open transaction events panel (#65)
+  const openTxPanel = useCallback((txHash: string): void => {
+    setTxPanelHash(txHash);
+    setTxPanelEvents([]);
+    setTxPanelError(null);
+    setTxPanelLoading(true);
+    api.transaction(selected.baseUrl, txHash)
+      .then((result) => { setTxPanelEvents(result.events); setTxPanelLoading(false); })
+      .catch((err: unknown) => { setTxPanelError(err instanceof Error ? err.message : 'Failed to load transaction'); setTxPanelLoading(false); });
+  }, [selected.baseUrl]);
 
   const toggleSelect = useCallback((id: string): void => {
     setSelectedIds((current) => {
@@ -345,6 +332,12 @@ function AppInner(): React.JSX.Element {
   }, []);
 
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+
+  const filteredEvents = useMemo(() => {
+    if (!debouncedSearch) return events;
+    const q = debouncedSearch.toLowerCase();
+    return events.filter((e) => JSON.stringify(e).toLowerCase().includes(q));
+  }, [events, debouncedSearch]);
 
   // The selection lives in the URL so a comparison can be shared as a link.
   useEffect(() => {
@@ -390,21 +383,52 @@ function AppInner(): React.JSX.Element {
     };
   }, [selectedIds, events, selected.baseUrl]);
 
-  // Shared tail of every first-page-style request: a fresh page replaces the
-  // summary state, and a 404 on a contract means this indexer never saw it.
-  const applyPageState = useCallback((page: EventPage): void => {
-    setTotal(page.total);
-    setTotalIsEstimate(page.totalIsEstimate ?? false);
-    setContractUnknown(false);
-    setEmptyReason(page.emptyReason ?? null);
-    setError(null);
-    setLoadErrorStatus(null);
-    setLoadMoreError(null);
-    setLastUpdated(Date.now());
-  }, []);
+  const loadHealth = useCallback((): void => {
+    const controller = new AbortController();
+    api
+      .health(selected.baseUrl, controller.signal)
+      .then((h) => {
+        setHealth(h);
+        setHealthError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setHealth(null);
+        setHealthError(err instanceof ApiRequestError ? err.message : String(err));
+      });
+    // Refreshed with health, so "catching up" turns into results (or into
+    // "never ran") without a reload.
+    api
+      .status(selected.baseUrl, controller.signal)
+      .then(setIndexerStatus)
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setIndexerStatus(null);
+      });
+  }, [selected.baseUrl]);
 
-  const handlePageError = useCallback(
-    (err: unknown): void => {
+  const loadFirstPage = useCallback(async (): Promise<void> => {
+    if (!contractIdValid || !ledgerRangeValid) return;
+    const isCurrent = requestGate.current.begin();
+    try {
+      const page = await api.events(selected.baseUrl, query);
+      if (!isCurrent()) return;
+      setEvents((current) => {
+        if (!isLiveRefresh.current || current.length === 0) return page.events;
+        // On a live-poll refresh, keep any "load more" rows not in the new page.
+        const seen = new Set(current.map((e) => e.id));
+        return [...page.events.filter((e) => !seen.has(e.id)), ...current];
+      });
+      setTotal(page.total);
+      setTotalIsEstimate(page.totalIsEstimate ?? false);
+      setNextCursor(page.nextCursor);
+      setContractUnknown(false);
+      setEmptyReason(page.emptyReason ?? null);
+      setError(null);
+      setLoadErrorStatus(null);
+      setLastUpdated(Date.now());
+    } catch (err) {
+      if (!isCurrent()) return;
       // ApiRequestError status 0 is "no response"; anything else threw after one.
       setLoadErrorStatus(err instanceof ApiRequestError ? err.status : -1);
       if (err instanceof ApiRequestError && err.status === 404 && query.contractId) {
@@ -420,55 +444,17 @@ function AppInner(): React.JSX.Element {
         return;
       }
       setError(err instanceof ApiRequestError ? err.message : String(err));
-      // #195: a failed request is exactly when the status bar is stale, so
-      // health refreshes right away rather than waiting for its interval.
-      refreshHealth();
-    },
-    [query.contractId, refreshHealth],
-  );
-
-  const loadFirstPage = useCallback(async (): Promise<void> => {
-    if (!contractIdValid || !ledgerRangeValid || !addressValid || !searchReady) return;
-    const isCurrent = requestGate.current.begin();
-    try {
-      const page = await api.events(selected.baseUrl, query);
-      if (!isCurrent()) return;
-      setEvents(page.events);
-      setNextCursor(page.nextCursor);
-      applyPageState(page);
-    } catch (err) {
-      if (!isCurrent()) return;
-      handlePageError(err);
+      setErrorRequestId(err instanceof ApiRequestError ? err.requestId : undefined);
+      // A poll failure may mean the backend went away; refresh health right away.
+      loadHealth();
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid, addressValid, searchReady, applyPageState, handlePageError]);
-
-  // #186: a live tick re-reads page one but must not throw away rows the
-  // reader pulled in with "Load more". New ids land at the top; every loaded
-  // row stays put, and nextCursor keeps pointing past the oldest one.
-  const pollPage = useCallback(async (): Promise<void> => {
-    if (!contractIdValid || !ledgerRangeValid || !addressValid || !searchReady) return;
-    const isCurrent = requestGate.current.begin();
-    try {
-      const page = await api.events(selected.baseUrl, query);
-      if (!isCurrent()) return;
-      const freshLoad = eventsRef.current.length === 0;
-      setEvents((current) => mergeLivePage(current, page.events));
-      // When rows are already loaded the cursor stays put: it points past
-      // the oldest row, and page one's cursor would strand the deeper pages.
-      if (freshLoad) setNextCursor(page.nextCursor);
-      applyPageState(page);
-    } catch (err) {
-      if (!isCurrent()) return;
-      handlePageError(err);
-    }
-  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid, addressValid, searchReady, applyPageState, handlePageError]);
+  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid, loadHealth]);
 
   const loadMore = useCallback(async (): Promise<void> => {
     if (!nextCursor || loadingMore) return;
     setLoadingMore(true);
-    setLoadMoreError(null);
     try {
       const page = await api.events(selected.baseUrl, { ...query, cursor: nextCursor });
       // Append by id, because a live refresh may have already added some of
@@ -480,6 +466,7 @@ function AppInner(): React.JSX.Element {
       setNextCursor(page.nextCursor);
       setTotal(page.total);
       setTotalIsEstimate(page.totalIsEstimate ?? false);
+      setLoadMoreError(null);
     } catch (err) {
       setLoadMoreError(err instanceof ApiRequestError ? err.message : String(err));
     } finally {
@@ -501,20 +488,22 @@ function AppInner(): React.JSX.Element {
   // When the query or network changes, fetch fresh data but keep the old rows
   // on screen until the new ones arrive.
   useEffect(() => {
-    if (!contractIdValid || !ledgerRangeValid || !addressValid || !searchReady) {
+    if (!contractIdValid || !ledgerRangeValid) {
       setLoading(false);
       return;
     }
+    isLiveRefresh.current = false;
+    setPendingCount(0);
     setLoading(true);
     setNextCursor(null);
     void loadFirstPage();
-  }, [loadFirstPage, contractIdValid, ledgerRangeValid, addressValid, searchReady]);
+  }, [loadFirstPage, contractIdValid, ledgerRangeValid]);
 
   // Live updates arrive over SSE; polling is the fallback for whenever the
   // stream is not open (before it connects, while the browser retries a drop,
   // or against an API that does not offer it).
   const streamUrl =
-    filters.live && contractIdValid && addressValid && searchReady && !activityRange
+    filters.live && contractIdValid && !activityRange
       ? `${selected.baseUrl}${buildStreamPath(query)}`
       : null;
   const streaming = useEventStream(
@@ -526,33 +515,32 @@ function AppInner(): React.JSX.Element {
           current.some((e) => e.id === event.id) ? current : [event, ...current],
         );
         setTotal((current) => current + 1);
+        setPendingCount((n) => n + 1);
         setLastUpdated(Date.now());
       } catch {
         // A malformed message is skipped; the next poll or reconnect resyncs.
       }
     },
-    // A stream only carries events from now on, so catch up on connect —
-    // merged, so rows loaded with "Load more" survive the resync (#186).
+    // A stream only carries events from now on, so catch up on connect.
     () => {
-      void pollPage();
+      isLiveRefresh.current = true;
+      void loadFirstPage();
     },
   );
 
   usePolling(
     () => {
-      void pollPage();
+      isLiveRefresh.current = true;
+      void loadFirstPage();
     },
     LIVE_INTERVAL_MS,
     filters.live && !streaming && !activityRange,
   );
 
-  // #195: health/status run on their own slower cadence — refreshing on every
-  // live tick made the API answer /health as often as /events.
-  useEffect(() => {
-    refreshHealth();
-    return () => healthAbort.current?.abort();
-  }, [refreshHealth]);
-  usePolling(refreshHealth, HEALTH_INTERVAL_MS, true);
+
+  // Poll health on a slow interval; it rarely changes and doesn't need to
+  // track every events poll. usePolling also runs once immediately on mount.
+  usePolling(loadHealth, HEALTH_INTERVAL_MS, true);
 
   // Topic suggestions only exist per contract.
   useEffect(() => {
@@ -562,23 +550,18 @@ function AppInner(): React.JSX.Element {
     }
     const controller = new AbortController();
     api
-      .topics(selected.baseUrl, debouncedContractId, controller.signal)
+      .topics(selected.baseUrl, debouncedContractId, controller.signal, filters.topicPosition || undefined)
       .then((r) => setTopics(r.topics))
       .catch(() => setTopics([]));
     return () => controller.abort();
-  }, [selected.baseUrl, debouncedContractId, contractIdValid]);
+  }, [selected.baseUrl, debouncedContractId, contractIdValid, filters.topicPosition]);
 
   const showContract = !filters.contractId;
   const changeFilters = (next: FilterState): void => {
     if (
       next.contractId !== filters.contractId ||
       next.topic !== filters.topic ||
-      next.address !== filters.address ||
-      next.search !== filters.search ||
-      next.successfulOnly !== filters.successfulOnly ||
-      next.timeRange !== filters.timeRange ||
-      next.customFromTime !== filters.customFromTime ||
-      next.customToTime !== filters.customToTime
+      next.successfulOnly !== filters.successfulOnly
     ) {
       setActivityRange(null);
     }
@@ -633,17 +616,37 @@ function AppInner(): React.JSX.Element {
 
   const exportCsv = useCallback(() => {
     if (events.length === 0) return;
-    const headers = ['id', 'ledger', 'ledger_closed_at', 'contract_id', 'tx_hash', 'in_successful_call', 'topics', 'value'];
-    const rows = events.map((e) => [
-      e.id,
-      e.ledger,
-      e.ledgerClosedAt,
-      e.contractId,
-      e.txHash,
-      e.inSuccessfulContractCall,
-      `"${e.topics.map((tc) => JSON.stringify(tc.value)).join(' | ').replace(/"/g, '""')}"`,
-      `"${JSON.stringify(e.value.value).replace(/"/g, '""')}"`,
-    ]);
+
+    // When every row shares one typed event name, write one column per typed
+    // field instead of JSON blobs — the result opens straight into a spreadsheet.
+    const typedNames = new Set(events.map((e) => e.typed?.name).filter(Boolean));
+    const singleTyped = typedNames.size === 1 ? events[0]?.typed : undefined;
+    const typedFieldNames = singleTyped ? singleTyped.fields.map((f) => f.name) : [];
+
+    const baseHeaders = ['id', 'ledger', 'ledger_closed_at', 'contract_id', 'tx_hash', 'in_successful_call'];
+    const headers = singleTyped
+      ? [...baseHeaders, ...typedFieldNames]
+      : [...baseHeaders, 'topics', 'value'];
+
+    const csvEsc = (v: unknown): string => {
+      const s = typeof v === 'string' ? v : JSON.stringify(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n')
+        ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    const rows = events.map((e) => {
+      const base = [e.id, e.ledger, e.ledgerClosedAt, e.contractId, e.txHash, e.inSuccessfulContractCall];
+      if (singleTyped) {
+        const fieldMap = Object.fromEntries((e.typed?.fields ?? []).map((f) => [f.name, f.value]));
+        return [...base, ...typedFieldNames.map((n) => csvEsc(fieldMap[n] ?? ''))];
+      }
+      return [
+        ...base,
+        csvEsc(e.topics.map((tc) => JSON.stringify(tc.value)).join(' | ')),
+        csvEsc(JSON.stringify(e.value.value)),
+      ];
+    });
+
     const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -741,17 +744,35 @@ function AppInner(): React.JSX.Element {
         <p className="warning banner">{t('invalidContractId')}</p>
       )}
 
-      {!addressValid && (
-        <p className="warning banner">{t('invalidAddress')}</p>
-      )}
-
       {error && contractIdValid && (
         <p className="warning banner" role="alert">
           {error}
+          {errorRequestId && (
+            <span style={{ display: 'block', marginTop: '4px', fontSize: '11px' }}>
+              Request ID:{' '}
+              <code style={{ fontFamily: 'monospace' }}>{errorRequestId}</code>{' '}
+              <button
+                type="button"
+                className="link-button"
+                style={{ fontSize: '11px' }}
+                onClick={() => void navigator.clipboard.writeText(errorRequestId)}
+              >
+                copy
+              </button>
+            </span>
+          )}
         </p>
       )}
 
       <div className="result-meta">
+        <input
+          type="search"
+          className="event-search"
+          placeholder="Search events…"
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          aria-label="Search loaded events"
+        />
         <div className="result-meta-left">
           <span
             aria-live="polite"
@@ -760,11 +781,6 @@ function AppInner(): React.JSX.Element {
           >
             {eventCountText}
           </span>
-          {timeRangeLabel && !activityRange && (
-            <span className="muted small" title={t('timeRangeActiveTitle')}>
-              {timeRangeLabel}
-            </span>
-          )}
           {filters.live && !activityRange && (
             <span
               className="live-dot"
@@ -772,6 +788,15 @@ function AppInner(): React.JSX.Element {
             >
               {t('live')}
             </span>
+          )}
+          {pendingCount > 0 && (
+            <button
+              type="button"
+              className="new-events-pill"
+              onClick={() => { setPendingCount(0); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+            >
+              {pendingCount} new event{pendingCount === 1 ? '' : 's'} ↑
+            </button>
           )}
         </div>
         {events.length > 0 && (
@@ -857,9 +882,44 @@ function AppInner(): React.JSX.Element {
         </section>
       )}
 
+      {/* Contract spec panel (#66) */}
+      {debouncedContractId && contractIdValid && (contractSpec || contractSpecError) && (
+        <details className="spec-panel">
+          <summary>Declared events {contractSpec ? `(${contractSpec.events.length})` : ''}</summary>
+          {contractSpecError ? (
+            <p className="warning small">{contractSpecError}</p>
+          ) : contractSpec && contractSpec.events.length === 0 ? (
+            <p className="muted small">No spec available for this contract.</p>
+          ) : contractSpec ? (
+            <ul className="spec-event-list">
+              {contractSpec.events.map((ev) => (
+                <li key={ev.name}>
+                  <button
+                    type="button"
+                    className="link-button mono"
+                    onClick={() => changeFilters({ ...filters, topic: ev.name })}
+                  >
+                    {ev.name}
+                  </button>
+                  {' '}
+                  <span className="muted small">({contractSpec.source})</span>
+                  {ev.fields.length > 0 && (
+                    <ul className="spec-field-list">
+                      {ev.fields.map((f) => (
+                        <li key={f.name} className="mono small">{f.location}: {f.name}: {f.type}</li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </details>
+      )}
+
       <ErrorBoundary title="Event Table Error">
         <EventTable
-          events={events}
+          events={filteredEvents}
           network={selected.label}
           expandedEventIds={expandedEventIds}
           onToggleExpanded={toggleEventExpanded}
@@ -868,31 +928,65 @@ function AppInner(): React.JSX.Element {
           selectedIds={selectedIdSet}
           onToggleSelect={toggleSelect}
           onTopicClick={(topic) => changeFilters({ ...filters, topic })}
-          onAddressClick={(address) => changeFilters({ ...filters, address })}
-          onContractClick={(contractId) => changeFilters({ ...filters, contractId })}
+          onAddressClick={(addr) => changeFilters({ ...filters, [addr.startsWith('G') ? 'address' : 'contractId']: addr })}
           absolute={absoluteTime}
           emptyMessage={emptyMessage}
+          onTxHashClick={openTxPanel}
+          contractLabels={Object.fromEntries(contracts.filter((c) => c.label).map((c) => [c.contractId, c.label!]))}
         />
       </ErrorBoundary>
 
-      {nextCursor && (
-        <button
-          type="button"
-          className="load-more"
-          onClick={() => void loadMore()}
-          disabled={loadingMore}
-        >
-          {loadingMore ? t('loadingMore') : t('loadMore', { count: PAGE_SIZE })}
-        </button>
+      {/* Transaction events panel (#65) */}
+      {txPanelHash && (
+        <div className="tx-panel" role="dialog" aria-label="Transaction events">
+          <div className="tx-panel-header">
+            <span className="mono small">{txPanelHash}</span>
+            <button type="button" className="link-button" onClick={() => setTxPanelHash(null)}>Close</button>
+          </div>
+          {txPanelLoading && <p className="muted small">Loading transaction events…</p>}
+          {txPanelError && <p className="warning small">{txPanelError}</p>}
+          {!txPanelLoading && !txPanelError && txPanelEvents.length === 0 && (
+            <p className="muted small">No events found for this transaction.</p>
+          )}
+          {txPanelEvents.length > 0 && (
+            <ErrorBoundary title="Transaction Events Error">
+              <EventTable
+                events={txPanelEvents}
+                network={selected.label}
+                expandedEventIds={expandedEventIds}
+                onToggleExpanded={toggleEventExpanded}
+                showContract={true}
+                loading={false}
+                selectedIds={selectedIdSet}
+                onToggleSelect={toggleSelect}
+                onTopicClick={(topic) => changeFilters({ ...filters, topic })}
+                absolute={absoluteTime}
+                emptyMessage=""
+              />
+            </ErrorBoundary>
+          )}
+        </div>
       )}
 
-      {loadMoreError && (
-        <p className="warning" role="alert">
-          {loadMoreError}{' '}
-          <button type="button" className="link-button" onClick={() => void loadMore()}>
-            {t('retry')}
+      {nextCursor && (
+        <div className="load-more-wrap">
+          {loadMoreError && (
+            <p className="warning banner load-more-error" role="alert">
+              {loadMoreError}{' '}
+              <button type="button" className="retry-link" onClick={() => void loadMore()}>
+                Retry
+              </button>
+            </p>
+          )}
+          <button
+            type="button"
+            className="load-more"
+            onClick={() => void loadMore()}
+            disabled={loadingMore}
+          >
+            {loadingMore ? t('loadingMore') : t('loadMore', { count: PAGE_SIZE })}
           </button>
-        </p>
+        </div>
       )}
 
       <footer className="app-footer">

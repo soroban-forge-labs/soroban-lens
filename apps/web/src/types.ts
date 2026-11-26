@@ -72,6 +72,8 @@ export interface ContractSummary {
   firstLedger: number;
   lastLedger: number;
   lastSeenAt: string;
+  /** Human-readable label assigned to the contract, when the API returns one (Module 3). */
+  label?: string;
 }
 
 export interface ActivityBucket {
@@ -96,6 +98,34 @@ export interface Health {
   events: number;
   contracts: number;
   schemaVersion: number;
+  /** Active RPC provider (#110); absent until the API reports it. */
+  rpcProvider?: ActiveProvider;
+  /** Contract ids whose streams are paused (#326); absent until the API reports it. */
+  pausedContracts?: string[];
+}
+
+/**
+ * The RPC endpoint the indexer is currently using (#110). `label` is a
+ * human-readable name (e.g. "primary", "backup-1"), never the raw URL.
+ */
+export interface ActiveProvider {
+  label: string;
+  /** True when this is the configured primary endpoint, not a failover. */
+  primary: boolean;
+}
+
+/**
+ * One per indexer stream. `paused` is set when the stream was paused via
+ * `lens contracts pause <id>` (#326); the poller skips it and resumes from
+ * `cursor` when unpaused.
+ */
+export interface IndexerStream {
+  key: string;
+  cursor: string;
+  ledger: number;
+  updatedAt: string;
+  /** True when this contract stream is paused. Absent on older API versions. */
+  paused?: boolean;
 }
 
 /** `GET /status`: store statistics plus the indexer's stored cursors. */
@@ -106,7 +136,9 @@ export interface IndexerStatus {
   maxLedger: number | null;
   schemaVersion: number;
   /** One per indexer stream. Empty until the indexer has run at least once. */
-  streams: { key: string; cursor: string; ledger: number; updatedAt: string }[];
+  streams: IndexerStream[];
+  /** Absent on older API versions that predate provider reporting (#110). */
+  activeProvider?: ActiveProvider;
 }
 
 export interface TopicCount {
@@ -116,4 +148,22 @@ export interface TopicCount {
 
 export interface ApiErrorBody {
   error: { code: string; message: string; parameter?: string };
+}
+
+export interface SpecEventField {
+  name: string;
+  type: string;
+  location: 'topic' | 'data';
+}
+
+export interface SpecEvent {
+  name: string;
+  fields: SpecEventField[];
+}
+
+/** `GET /contracts/{id}/spec` — declared events and their field types. */
+export interface ContractSpec {
+  contractId: string;
+  source: 'wasm' | 'stellar-asset';
+  events: SpecEvent[];
 }

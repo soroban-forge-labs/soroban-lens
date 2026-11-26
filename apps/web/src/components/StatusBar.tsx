@@ -27,6 +27,18 @@ export function StatusBar({
   const reported = health?.network ?? '';
   const mismatch = reported !== '' && reported !== 'unknown' && reported !== selected.label;
 
+  // The active RPC provider comes from /status (#110). Older APIs omit it, so
+  // we hide the indicator entirely rather than showing a misleading blank.
+  // We show the human label, never the raw URL, and warn when the indexer has
+  // failed over off the primary endpoint.
+  const provider = health?.rpcProvider;
+  const providerLabel = provider?.label ?? '';
+  const providerIsBackup = provider?.primary === false;
+
+  // Paused contract streams come from /status (#326). Older APIs omit the
+  // field, so we only render the indicator when at least one stream is paused.
+  const pausedContracts = health?.pausedContracts ?? [];
+
   return (
     <div className="status-bar">
       <div className="status-left">
@@ -54,6 +66,24 @@ export function StatusBar({
             <span className={`status-pill status-${health.status}`} role="status">
               {health.status === 'ok' ? t('connected') : t('degraded')}
             </span>
+            {providerLabel !== '' && (
+              <span
+                className={`status-pill small${providerIsBackup ? ' status-warning' : ''}`}
+                role="status"
+                title={providerIsBackup ? t('rpcProviderBackup') : t('rpcProviderPrimary')}
+              >
+                {t('rpcProvider', { provider: providerLabel })}
+              </span>
+            )}
+            {pausedContracts.length > 0 && (
+              <span
+                className="status-pill small status-warning"
+                role="status"
+                title={pausedContracts.join(', ')}
+              >
+                {t('pausedContracts', { count: pausedContracts.length })}
+              </span>
+            )}
             <span className="muted small">
               {t('healthStats', {
                 count: health.events.toLocaleString(),
