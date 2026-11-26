@@ -152,6 +152,9 @@ function AppInner(): React.JSX.Element {
   const debouncedContractId = useDebounced(filters.contractId, 300);
   const debouncedTopic = useDebounced(filters.topic, 300);
 
+  const [searchText, setSearchText] = useState('');
+  const debouncedSearch = useDebounced(searchText, 300);
+
   const contractIdValid = debouncedContractId === '' || CONTRACT_ID_PATTERN.test(debouncedContractId);
 
   // Parse ledger bounds: only include when valid non-empty integers.
@@ -263,6 +266,12 @@ function AppInner(): React.JSX.Element {
   }, []);
 
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+
+  const filteredEvents = useMemo(() => {
+    if (!debouncedSearch) return events;
+    const q = debouncedSearch.toLowerCase();
+    return events.filter((e) => JSON.stringify(e).toLowerCase().includes(q));
+  }, [events, debouncedSearch]);
 
   // The selection lives in the URL so a comparison can be shared as a link.
   useEffect(() => {
@@ -638,6 +647,14 @@ function AppInner(): React.JSX.Element {
       )}
 
       <div className="result-meta">
+        <input
+          type="search"
+          className="event-search"
+          placeholder="Search events…"
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          aria-label="Search loaded events"
+        />
         <div className="result-meta-left">
           <span
             aria-live="polite"
@@ -740,7 +757,7 @@ function AppInner(): React.JSX.Element {
 
       <ErrorBoundary title="Event Table Error">
         <EventTable
-          events={events}
+          events={filteredEvents}
           network={selected.label}
           expandedEventIds={expandedEventIds}
           onToggleExpanded={toggleEventExpanded}
