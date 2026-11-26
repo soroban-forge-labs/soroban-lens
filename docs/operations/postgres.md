@@ -140,11 +140,11 @@ tables.
 
 ```sh
 # 1. Export from the existing SQLite database
-lens export --database ./data/lens.db --out lens-export.jsonl
+lens export lens-export.jsonl --db ./data/lens.db
 
 # 2. Point at Postgres and import
 LENS_DATABASE_URL="postgres://lens:lens@localhost:5432/lens" \
-  lens import --in lens-export.jsonl
+  lens import lens-export.jsonl
 
 # 3. Verify the row counts match
 lens doctor

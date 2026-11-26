@@ -18,6 +18,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
+import { DatabaseSync } from 'node:sqlite';
 import { createDataset, RARE_SEARCH_TERM } from './lib/dataset.js';
 import { sample, summarize } from './lib/stats.js';
 import { get, startApi } from './lib/api.js';
@@ -155,7 +156,6 @@ async function main() {
         SLOW,
         undefined,
       ],
-      ['list_contracts', () => store.listContracts(100), SLOW, undefined],
     ];
 
     // Full-text search needs FTS5, which not every SQLite build has; skip it
@@ -175,6 +175,33 @@ async function main() {
       const timings = await sample(fn, { ...opts, check });
       recordLatency(`query.${name}`, timings);
       console.error(`  query.${name}: p50 ${metrics[`query.${name}`].value}ms`);
+    }
+
+    const scanDb = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const contractLimit = Math.min(100, contracts.length);
+      const aggregate = scanDb.prepare(
+        `SELECT contract_id, COUNT(*) AS event_count, MIN(ledger) AS first_ledger,
+                MAX(ledger) AS last_ledger, MAX(ledger_closed_at) AS last_seen_at
+         FROM events
+         GROUP BY contract_id
+         ORDER BY last_ledger DESC
+         LIMIT ?`,
+      );
+      const checkContracts = (contracts) => {
+        if (contracts.length !== contractLimit) {
+          throw new Error(`expected ${contractLimit} contract summaries, got ${contracts.length}`);
+        }
+      };
+      const scanTimings = await sample(() => aggregate.all(contractLimit), { ...SLOW, check: checkContracts });
+      recordLatency('query.list_contracts_group_by', scanTimings);
+      console.error(`  query.list_contracts_group_by: p50 ${metrics['query.list_contracts_group_by'].value}ms`);
+
+      const summaryTimings = await sample(() => store.listContracts(contractLimit), { ...SLOW, check: checkContracts });
+      recordLatency('query.list_contracts', summaryTimings);
+      console.error(`  query.list_contracts: p50 ${metrics['query.list_contracts'].value}ms`);
+    } finally {
+      scanDb.close();
     }
 
     await store.close();

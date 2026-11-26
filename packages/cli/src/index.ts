@@ -1,6 +1,6 @@
 /** Module 5 — the `lens` CLI, exposed as a library for tests and embedding. */
-export { resolveConfig, splitList, parseHeaders, redactHeaders } from './config.js';
-export type { LensConfig, ConfigOverrides } from './config.js';
+export { resolveConfig, describeConfig, splitList, parseHeaders, redactHeaders } from './config.js';
+export type { LensConfig, ConfigOverrides, ConfigSource, ConfigSources } from './config.js';
 export { runDoctor, formatReport } from './doctor.js';
 export type { CheckResult, CheckStatus } from './doctor.js';
 export { runIndexer, StoreBackedCursors, StoreBackedReorgs } from './indexer.js';
@@ -12,6 +12,7 @@ export {
   recordFromWasmFile,
   describeSpecRecord,
   rpcSpecSource,
+  refreshContractSpecs,
 } from './specs.js';
 export type { SpecSource } from './specs.js';
 export { applyFixes, formatFixes } from './fix.js';

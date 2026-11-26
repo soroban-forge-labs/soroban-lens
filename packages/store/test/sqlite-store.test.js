@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, statSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
+import { xdr, nativeToScVal, Address, encodeMuxedAccount, encodeMuxedAccountToAddress } from '@stellar/stellar-sdk';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -55,6 +56,20 @@ test('migrate() is idempotent', async () => {
   await store.migrate();
   await store.migrate();
   assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
+  await store.close();
+});
+
+test('contract summaries backfill when their migration is applied to an existing event store', async () => {
+  const store = await seeded();
+  const expected = await store.listContracts(MAX_QUERY_LIMIT);
+  const migration = MIGRATIONS.find((item) => item.name === 'contract-summaries');
+  if (!migration) throw new Error('contract-summaries migration is missing');
+  const rolledBack = await store.migrateDown(migration.version - 1);
+  assert.ok(rolledBack.includes(migration.version));
+
+  await store.migrate();
+  assert.deepEqual(await store.listContracts(MAX_QUERY_LIMIT), expected);
+  assert.deepEqual(await store.checkIntegrity(), []);
   await store.close();
 });
 
@@ -233,6 +248,45 @@ test('listContracts summarises each contract, most recent first', async () => {
   const ledgers = contracts.map((c) => c.lastLedger);
   assert.deepEqual(ledgers, [...ledgers].sort((a, b) => b - a));
   await store.close();
+});
+
+test('contract summaries stay consistent through snapshot import, delete, and prune', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-contract-summaries-'));
+  const snapshotPath = join(dir, 'snapshot.ndjson');
+  const source = await seeded();
+  await source.exportSnapshot(snapshotPath);
+  const expected = await source.listContracts(MAX_QUERY_LIMIT);
+
+  const target = new SqliteEventStore({ path: ':memory:' });
+  await target.importSnapshot(snapshotPath);
+  assert.deepEqual(await target.listContracts(MAX_QUERY_LIMIT), expected);
+  assert.deepEqual(await target.checkIntegrity(), []);
+
+  const firstEvent = fixture.events[0];
+  const before = expected.find((summary) => summary.contractId === firstEvent.contractId);
+  await target.deleteEvents([firstEvent.id]);
+  const after = (await target.listContracts(MAX_QUERY_LIMIT)).find(
+    (summary) => summary.contractId === firstEvent.contractId,
+  );
+  assert.equal(after.eventCount, before.eventCount - 1);
+  assert.deepEqual(await target.checkIntegrity(), []);
+
+  const lastLedger = Math.max(...fixture.events.map((event) => event.ledger));
+  await target.pruneBefore(lastLedger + 1);
+  assert.deepEqual(await target.listContracts(MAX_QUERY_LIMIT), []);
+  assert.deepEqual(await target.checkIntegrity(), []);
+
+  const sizeStore = new SqliteEventStore({ path: join(dir, 'size.db') });
+  await sizeStore.insertEvents(fixture.events);
+  const sizePrune = await sizeStore.pruneToSize(0, 1);
+  assert.equal(sizePrune.rowsRemoved, fixture.events.length);
+  assert.deepEqual(await sizeStore.listContracts(MAX_QUERY_LIMIT), []);
+  assert.deepEqual(await sizeStore.checkIntegrity(), []);
+
+  await source.close();
+  await target.close();
+  await sizeStore.close();
+  await rm(dir, { recursive: true, force: true });
 });
 
 test('listTopics ranks a contract distinct topics by frequency', async () => {
@@ -983,9 +1037,10 @@ test('a migration can be applied and rolled back', async () => {
   const store = new SqliteEventStore({ path: ':memory:' });
   assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
 
-  const rolledBack = await store.migrateDown(LATEST_SCHEMA_VERSION - 1);
+  const previousVersion = MIGRATIONS.filter((migration) => migration.version < LATEST_SCHEMA_VERSION).at(-1)?.version ?? 0;
+  const rolledBack = await store.migrateDown(previousVersion);
   assert.deepEqual(rolledBack, [LATEST_SCHEMA_VERSION]);
-  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION - 1);
+  assert.equal((await store.getStats()).schemaVersion, previousVersion);
 
   // And forward again, via the ordinary migrate() path.
   await store.migrate();
@@ -1329,6 +1384,44 @@ test('filtering by address also finds one mentioned only inside the decoded valu
 
   const page = await store.queryEvents({ address: addressInValue, limit: MAX_QUERY_LIMIT });
   assert.ok(page.events.some((e) => e.id === event.id));
+  await store.close();
+});
+
+test('a muxed-account address finds its transfer while the base account still matches (#148)', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  const baseAddress = 'GDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB5GSA';
+  const sender = 'GBYRNL77SLMBVGJLFYVWB762E7ZJJVSGEDOU626FPOCGOMPG776JQHHT';
+  const muxedAddress = encodeMuxedAccountToAddress(encodeMuxedAccount(baseAddress, '7'));
+  const data = xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: nativeToScVal('amount', { type: 'symbol' }),
+      val: nativeToScVal(5n, { type: 'i128' }),
+    }),
+    new xdr.ScMapEntry({
+      key: nativeToScVal('to_muxed_id', { type: 'symbol' }),
+      val: nativeToScVal(7n, { type: 'u64' }),
+    }),
+  ]);
+  const symbol = (value) => nativeToScVal(value, { type: 'symbol' }).toXDR('base64');
+  const address = (value) => new Address(value).toScVal().toXDR('base64');
+  const string = (value) => nativeToScVal(value, { type: 'string' }).toXDR('base64');
+  const event = {
+    ...fixture.events[0],
+    id: 'muxed-account-transfer-test-event',
+    topic: [symbol('transfer'), address(sender), address(baseAddress), string('native')],
+    value: data.toXDR('base64'),
+  };
+  await store.insertEvents([event]);
+
+  const muxed = await store.queryEvents({ address: muxedAddress });
+  assert.deepEqual(muxed.events.map((result) => result.id), [event.id]);
+  assert.ok((await store.queryEvents({ address: baseAddress })).events.some((result) => result.id === event.id));
+  assert.equal((await store.queryEvents({ address: encodeMuxedAccountToAddress(encodeMuxedAccount(baseAddress, '8')) })).total, 0);
+  assert.equal((await store.summarizeAddress(muxedAddress))[0].eventCount, 1);
+
+  await store.migrateDown(LATEST_SCHEMA_VERSION - 1);
+  await store.migrate();
+  assert.deepEqual((await store.queryEvents({ address: muxedAddress })).events.map((result) => result.id), [event.id]);
   await store.close();
 });
 

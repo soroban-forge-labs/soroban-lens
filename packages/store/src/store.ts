@@ -56,9 +56,11 @@ export interface EventStore {
    * `destPath` — a format that outlives this backend, unlike a raw copy of
    * the database file. Consistent even while the indexer is writing:
    * internally takes a point-in-time snapshot before reading from it.
+   * With `filter` (#155), only events matching it are written — the same
+   * `EventQuery` semantics as queryEvents.
    * @returns how many events were written.
    */
-  exportSnapshot(destPath: string): Promise<number>;
+  exportSnapshot(destPath: string, filter?: EventQuery): Promise<number>;
 
   /**
    * Read an NDJSON snapshot written by exportSnapshot() (or `lens seed`'s
@@ -224,17 +226,19 @@ export interface EventStore {
   redecode(all?: boolean): Promise<number>;
 
   /**
-   * Check stored invariants: `topics_json` parses and its length matches
-   * `topic_count`; `topic0..3` match a fresh projection of the parsed
-   * topics; `value_json` and `topics_xdr_json` parse at all. Nothing writes
-   * these bugs today, but nothing has ever checked for them either — a disk
-   * fault, a hand edit, or a future migration bug could leave one behind.
-   * @returns one entry per row with a problem, empty when the database is clean.
+   * Check stored invariants: event JSON and topic projections are consistent,
+   * and contract_summaries match a fresh aggregate over events. Nothing writes
+   * these bugs today, but a disk fault, hand edit, or future migration bug
+   * could leave one behind.
+   * @returns one entry per affected event or contract summary.
    */
-  checkIntegrity(): Promise<{ id: string; problems: string[] }[]>;
+  checkIntegrity(): Promise<{ kind: 'event' | 'contract_summary'; id: string; problems: string[] }[]>;
 
   /** Recompute one row's derived columns from its stored raw XDR. */
   repairRow(id: string): Promise<void>;
+
+  /** Recompute one contract's summary from the events table. */
+  repairContractSummary(contractId: string): Promise<void>;
 
   close(): Promise<void>;
 }
@@ -255,6 +259,9 @@ export interface PruneToSizeResult {
 
 /** Ceiling on `limit`, enforced by every implementation. */
 export const DEFAULT_MAX_QUERY_LIMIT = 1000;
+
+/** Most contract ids one `contractIds` filter may name. */
+export const MAX_CONTRACT_IDS = 100;
 
 /**
  * Ceiling on `limit`, overridable with `LENS_MAX_QUERY_LIMIT`.

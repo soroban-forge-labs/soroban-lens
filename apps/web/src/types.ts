@@ -5,10 +5,6 @@
  * the API package. `packages/api/openapi.json` is the contract; regenerate with
  * an OpenAPI client generator if you would rather not maintain these by hand.
  * Generated: 2026-09-16
- *
- * Drift guard: `scripts/check-client-types.mjs` compares these shapes against
- * `packages/api/openapi.json` and fails CI when they diverge. Run
- * `node scripts/check-client-types.mjs` locally to see the diff.
  */
 
 export interface DecodedValue {
@@ -76,6 +72,8 @@ export interface ContractSummary {
   firstLedger: number;
   lastLedger: number;
   lastSeenAt: string;
+  /** Human-readable label assigned to the contract, when the API returns one (Module 3). */
+  label?: string;
 }
 
 export interface ActivityBucket {
@@ -120,4 +118,22 @@ export interface TopicCount {
 
 export interface ApiErrorBody {
   error: { code: string; message: string; parameter?: string };
+}
+
+export interface SpecEventField {
+  name: string;
+  type: string;
+  location: 'topic' | 'data';
+}
+
+export interface SpecEvent {
+  name: string;
+  fields: SpecEventField[];
+}
+
+/** `GET /contracts/{id}/spec` — declared events and their field types. */
+export interface ContractSpec {
+  contractId: string;
+  source: 'wasm' | 'stellar-asset';
+  events: SpecEvent[];
 }

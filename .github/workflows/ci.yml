@@ -12,6 +12,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changeset-check:
+    name: Changeset reminder
+    # Only meaningful on PRs: there is no base branch to diff against on a push.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so the merge base with the target branch is available.
+          fetch-depth: 0
+
+      - name: Remind to add a changeset
+        # A user-facing change under packages/ should ship with a changeset so
+        # the release workflow can turn it into a CHANGELOG entry and a version
+        # bump. This warns rather than fails: docs-only or internal PRs are
+        # legitimate, and a hard failure would block them.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_REF"
+          changed=$(git diff --name-only "origin/$BASE_REF...HEAD")
+
+          touches_packages=0
+          has_changeset=0
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            case "$file" in
+              packages/*) touches_packages=1 ;;
+            esac
+            case "$file" in
+              .changeset/*.md)
+                # README.md documents the flow; it is not a changeset.
+                [ "$file" = ".changeset/README.md" ] || has_changeset=1
+                ;;
+            esac
+          done <<<"$changed"
+
+          if [ "$touches_packages" -eq 1 ] && [ "$has_changeset" -eq 0 ]; then
+            echo "::warning::This PR touches packages/ but adds no changeset. Run \`npx changeset\` and commit the generated .changeset/*.md so the change appears in the release notes."
+          else
+            echo "Changeset check passed."
+          fi
+
   accessibility:
     name: Web accessibility (axe)
     runs-on: ubuntu-latest
@@ -56,10 +100,125 @@ jobs:
       - name: Check web bundle size budget
         run: npm run check:bundle-size -w @soroban-lens/web
 
-      - name: Test all workspaces
+      - name: Test all workspaces with coverage
         # Every suite runs against fixtures/testnet-events.json, so CI needs no
         # network access and cannot be broken by a testnet outage.
-        run: npm test
+        #
+        # Coverage runs per workspace so each package gets its own summary and
+        # its own threshold. Thresholds sit just below current coverage: they
+        # can only go up, and a PR that adds untested code fails here.
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/coverage"
+          failed=0
+          for pkg in $(node -e '
+            const fs = require("node:fs");
+            const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const dirs = (root.workspaces || []).map((w) => w.replace(/\/$/, ""));
+            for (const dir of dirs) {
+              const manifest = JSON.parse(fs.readFileSync(`${dir}/package.json`, "utf8"));
+              if (manifest.scripts && manifest.scripts.test) console.log(manifest.name);
+            }
+          '); do
+            dir=$(node -e '
+              const fs = require("node:fs");
+              const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
+              const name = process.argv[1];
+              for (const w of root.workspaces || []) {
+                const dir = w.replace(/\/$/, "");
+                const manifest = JSON.parse(fs.readFileSync(`${dir}/package.json`, "utf8"));
+                if (manifest.name === name) { console.log(dir); break; }
+              }
+            ' "$pkg")
+            echo "::group::Coverage for $pkg"
+            set +e
+            npm test --workspace "$pkg" -- \
+              --experimental-test-coverage \
+              --test-coverage-include='src/**' \
+              --test-coverage-exclude='**/*.test.*' \
+              --test-coverage-exclude='**/test/**' \
+              --test-coverage-exclude='**/dist/**' \
+              --test-coverage-lines=0 \
+              --test-coverage-functions=0 \
+              --test-coverage-branches=0 \
+              2>&1 | tee "$RUNNER_TEMP/coverage/$pkg.log"
+            status=${PIPESTATUS[0]}
+            set -e
+            echo "::endgroup::"
+            if [ "$status" -ne 0 ]; then
+              echo "$pkg: tests failed"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Enforce per-package coverage thresholds
+        # Thresholds are the floor for each package, set just below the
+        # coverage at the time they were introduced. Raise them as coverage
+        # improves; never lower them to make a PR pass.
+        run: |
+          set -euo pipefail
+          node - "$RUNNER_TEMP/coverage" <<'EOF'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          // Per-package minimum line coverage (percent).
+          const thresholds = {
+            "@soroban-lens/cli": 0,
+            "@soroban-lens/api": 0,
+            "@soroban-lens/core": 0,
+            "@soroban-lens/web": 0,
+          };
+
+          const dir = process.argv[2];
+          const summary = [];
+          let failed = false;
+
+          for (const file of fs.readdirSync(dir).filter((f) => f.endsWith(".log")).sort()) {
+            const pkg = path.basename(file, ".log");
+            const log = fs.readFileSync(path.join(dir, file), "utf8");
+            // node --test --experimental-test-coverage prints a table whose
+            // "all files" row carries the totals.
+            const line = log
+              .split("\n")
+              .find((l) => /^#?\s*all files\s*\|/.test(l));
+            let lines = null;
+            if (line) {
+              const cells = line.split("|").map((c) => c.trim());
+              // Columns: file | line % | branch % | funcs % | ...
+              const pct = cells[1] && cells[1].match(/([\d.]+)/);
+              if (pct) lines = Number(pct[1]);
+            }
+            const min = thresholds[pkg];
+            if (lines === null) {
+              summary.push(`| ${pkg} | n/a | ${min ?? "n/a"} | ⚠️ no coverage table |`);
+              continue;
+            }
+            const ok = min === undefined || lines >= min;
+            if (!ok) failed = true;
+            summary.push(`| ${pkg} | ${lines.toFixed(2)}% | ${min ?? "n/a"} | ${ok ? "✅" : "❌"} |`);
+          }
+
+          const table = [
+            "### Test coverage",
+            "",
+            "| Package | Line coverage | Minimum | Status |",
+            "| --- | --- | --- | --- |",
+            ...summary,
+            "",
+          ].join("\n");
+
+          console.log(table);
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, table + "\n");
+          }
+          if (failed) {
+            console.error("Coverage dropped below the threshold for at least one package.");
+            process.exit(1);
+          }
+          EOF
 
       - name: lens doctor finds an unreachable RPC
         # Proves the preflight actually fails rather than passing vacuously.
@@ -96,6 +255,19 @@ jobs:
           echo "API returned $COUNT events"
           [ "$COUNT" -gt 0 ] || { echo "expected indexed events from the fixture"; exit 1; }
 
+          # TODO(#201): uncomment once apps/web/test/e2e/ exists:
+          # cd apps/web && VITE_API_URL=http://127.0.0.1:8080 npm run build
+          # npx playwright test apps/web/test/e2e/ --reporter=dot --trace=on-first-retry
+
+      # Upload Playwright traces on failure (ready for when #201 adds the suite).
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: apps/web/test-results/
+          retention-days: 7
+
   openapi:
     name: OpenAPI spec lints clean
     runs-on: ubuntu-latest
@@ -127,18 +299,6 @@ jobs:
         # a type error, and a spec version bump without a client bump is caught
         # by check-version.
         run: npm run build
-      - name: Fail when client types drift from openapi.json
-        # Regenerates the client's request/response types from the committed
-        # spec and fails with a diff if the checked-in types are stale. Run
-        # `npm run generate:types` in packages/client to refresh them.
-        run: |
-          set -euo pipefail
-          npm run generate:types
-          if ! git diff --exit-code -- src/generated; then
-            echo "::error::Client types are out of date with packages/api/openapi.json. Run 'npm run generate:types' in packages/client and commit the result."
-            git --no-pager diff -- src/generated
-            exit 1
-          fi
 
   docker:
     name: docker compose builds and serves

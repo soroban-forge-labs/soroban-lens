@@ -79,18 +79,6 @@ Committed, and the same file the server serves at `/openapi.json`, so the two
 cannot drift. A test asserts every implemented route appears in the spec: add a
 route without documenting it and CI fails.
 
-The client's request/response types in `apps/web/src/types.ts` are generated
-from `openapi.json`. Do not hand-edit them. After changing the spec, regenerate
-and commit the result:
-
-```bash
-npm run gen:types        # regenerate apps/web/src/types.ts from openapi.json
-npm run check:types      # verify committed types match the spec (CI runs this)
-```
-
-`check:types` fails the build with a diff when the committed types are stale, so
-a spec change that forgets the client types cannot land.
-
 ## Getting set up
 
 ```bash
@@ -101,6 +89,15 @@ npm test
 
 No network needed. Every suite runs against `fixtures/testnet-events.json`,
 which is real captured testnet data.
+
+### Node version and editor setup
+
+`.nvmrc` pins the Node version CI tests on. Run `nvm use` (or `fnm use`, or
+`asdf install`) before `npm install` so you get that version rather than
+whatever your shell defaults to.
+
+`.editorconfig` sets 2-space indentation, LF line endings and a final newline,
+so editors that honour it need no manual configuration.
 
 ## Working on one module
 
@@ -165,6 +162,13 @@ decoding cases the file is there to cover.
 4. `npm test` and `npm run build` must pass. CI also builds the Docker images
    and runs the stack end to end against the fixture.
 5. Update the module's README when you change its interface.
+
+### Changesets
+
+Any user-facing PR needs a changeset: run `npx changeset`, pick the affected
+packages and the bump type, and commit the generated `.changeset/*.md` file.
+The release workflow turns changesets into `CHANGELOG.md` entries and version
+bumps. CI warns when a PR touches `packages/` without one.
 
 ## Filing issues
 
