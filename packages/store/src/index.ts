@@ -21,12 +21,15 @@ export type {
   ContractSpecRecord,
   TypedEvent,
   TypedField,
+  ListTopicsOptions,
 } from './types.js';
 
 export type { EventStore, PruneToSizeResult } from './store.js';
 export {
   MAX_QUERY_LIMIT,
+  MAX_QUERY_CONTRACT_IDS,
   DEFAULT_MAX_QUERY_LIMIT,
+  MAX_CONTRACT_IDS,
   DEFAULT_QUERY_LIMIT,
   resolveMaxQueryLimit,
   normaliseLimit,
@@ -40,7 +43,16 @@ export type { PostgresStoreOptions, PgPool, PgClient, PgQueryable, PgQueryResult
 export { POSTGRES_MIGRATIONS } from './postgres-schema.js';
 export type { PostgresMigration } from './postgres-schema.js';
 
-export { decodeEvent, decodeScVal, toJsonSafe, scValTypeName, topicKey, topicType, extractAddresses } from './decode.js';
+export {
+  decodeEvent,
+  decodeScVal,
+  toJsonSafe,
+  scValTypeName,
+  topicKey,
+  topicType,
+  extractAddresses,
+  parseMuxedAddress,
+} from './decode.js';
 export {
   ContractTypedDecoder,
   SpecCache,

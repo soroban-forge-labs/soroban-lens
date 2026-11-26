@@ -72,6 +72,8 @@ export interface ContractSummary {
   firstLedger: number;
   lastLedger: number;
   lastSeenAt: string;
+  /** Human-readable label assigned to the contract, when the API returns one (Module 3). */
+  label?: string;
 }
 
 export interface ActivityBucket {

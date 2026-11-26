@@ -17,6 +17,7 @@ import { LocaleProvider, useLocale, LOCALE_CODES, LOCALE_LABELS } from './i18n/i
 const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMPQVUU2HHGCYSC'; // XLM SAC
 const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
+const HEALTH_INTERVAL_MS = 30_000;
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
 const ACTIVITY_DAYS = 30;
 const SECONDS_PER_DAY = 24 * 60 * 60;
@@ -49,7 +50,7 @@ function AppInner(): React.JSX.Element {
   // the exact view. localStorage is the fallback for a bare visit only.
   const [urlState, setUrlState] = useUrlState(
     {
-      filters: { contractId: '', topic: '', address: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '', fromTime: '', toTime: '' },
+      filters: { contractId: '', topic: '', topicPosition: 0, address: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '', fromTime: '', toTime: '' },
       network: networks[0]!.label,
       expandedEventId: null,
     },
@@ -88,6 +89,7 @@ function AppInner(): React.JSX.Element {
   const [activityRange, setActivityRange] = useState<ActivityRange | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  const [errorRequestId, setErrorRequestId] = useState<string | undefined>(undefined);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // Transaction events panel (#65)
@@ -99,6 +101,7 @@ function AppInner(): React.JSX.Element {
   const [contractSpec, setContractSpec] = useState<ContractSpec | null>(null);
   const [contractSpecError, setContractSpecError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   // A 404 for a contract means this indexer has never seen it; an empty page
   // with emptyReason means it is indexed but nothing matches the filters.
@@ -118,6 +121,28 @@ function AppInner(): React.JSX.Element {
   const [comparePair, setComparePair] = useState<[LensEvent, LensEvent] | null>(null);
   const [compareError, setCompareError] = useState<string | null>(null);
   const contractInputRef = useRef<HTMLInputElement>(null);
+  const [unseenCount, setUnseenCount] = useState(0);
+  const prevTotalRef = useRef(0);
+
+  // Track unseen live events while the tab is hidden (#76).
+  useEffect(() => {
+    if (document.hidden && total > prevTotalRef.current) {
+      setUnseenCount((c) => c + (total - prevTotalRef.current));
+    }
+    prevTotalRef.current = total;
+  }, [total]);
+
+  useEffect(() => {
+    const onVisibility = (): void => { if (!document.hidden) setUnseenCount(0); };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
+  useEffect(() => {
+    const label = filters.contractId ? `${filters.contractId.slice(0, 8)}…` : null;
+    const base = label ? `${label} – Soroban Lens` : 'Soroban Lens';
+    document.title = unseenCount > 0 ? `(${unseenCount}) ${base}` : base;
+  }, [filters.contractId, unseenCount]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -160,6 +185,9 @@ function AppInner(): React.JSX.Element {
   // Typing a 56-character contract id should not fire 56 requests.
   const debouncedContractId = useDebounced(filters.contractId, 300);
   const debouncedTopic = useDebounced(filters.topic, 300);
+
+  const [searchText, setSearchText] = useState('');
+  const debouncedSearch = useDebounced(searchText, 300);
 
   const contractIdValid = debouncedContractId === '' || CONTRACT_ID_PATTERN.test(debouncedContractId);
 
@@ -303,6 +331,12 @@ function AppInner(): React.JSX.Element {
 
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
 
+  const filteredEvents = useMemo(() => {
+    if (!debouncedSearch) return events;
+    const q = debouncedSearch.toLowerCase();
+    return events.filter((e) => JSON.stringify(e).toLowerCase().includes(q));
+  }, [events, debouncedSearch]);
+
   // The selection lives in the URL so a comparison can be shared as a link.
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -347,6 +381,30 @@ function AppInner(): React.JSX.Element {
     };
   }, [selectedIds, events, selected.baseUrl]);
 
+  const loadHealth = useCallback((): void => {
+    const controller = new AbortController();
+    api
+      .health(selected.baseUrl, controller.signal)
+      .then((h) => {
+        setHealth(h);
+        setHealthError(null);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setHealth(null);
+        setHealthError(err instanceof ApiRequestError ? err.message : String(err));
+      });
+    // Refreshed with health, so "catching up" turns into results (or into
+    // "never ran") without a reload.
+    api
+      .status(selected.baseUrl, controller.signal)
+      .then(setIndexerStatus)
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setIndexerStatus(null);
+      });
+  }, [selected.baseUrl]);
+
   const loadFirstPage = useCallback(async (): Promise<void> => {
     if (!contractIdValid || !ledgerRangeValid) return;
     const isCurrent = requestGate.current.begin();
@@ -379,10 +437,13 @@ function AppInner(): React.JSX.Element {
         return;
       }
       setError(err instanceof ApiRequestError ? err.message : String(err));
+      setErrorRequestId(err instanceof ApiRequestError ? err.requestId : undefined);
+      // A poll failure may mean the backend went away; refresh health right away.
+      loadHealth();
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid]);
+  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid, loadHealth]);
 
   const loadMore = useCallback(async (): Promise<void> => {
     if (!nextCursor || loadingMore) return;
@@ -424,6 +485,7 @@ function AppInner(): React.JSX.Element {
       setLoading(false);
       return;
     }
+    setPendingCount(0);
     setLoading(true);
     setNextCursor(null);
     void loadFirstPage();
@@ -445,6 +507,7 @@ function AppInner(): React.JSX.Element {
           current.some((e) => e.id === event.id) ? current : [event, ...current],
         );
         setTotal((current) => current + 1);
+        setPendingCount((n) => n + 1);
         setLastUpdated(Date.now());
       } catch {
         // A malformed message is skipped; the next poll or reconnect resyncs.
@@ -464,30 +527,10 @@ function AppInner(): React.JSX.Element {
     filters.live && !streaming && !activityRange,
   );
 
-  useEffect(() => {
-    const controller = new AbortController();
-    api
-      .health(selected.baseUrl, controller.signal)
-      .then((h) => {
-        setHealth(h);
-        setHealthError(null);
-      })
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setHealth(null);
-        setHealthError(err instanceof ApiRequestError ? err.message : String(err));
-      });
-    // Refreshed with health, so "catching up" turns into results (or into
-    // "never ran") without a reload.
-    api
-      .status(selected.baseUrl, controller.signal)
-      .then(setIndexerStatus)
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setIndexerStatus(null);
-      });
-    return () => controller.abort();
-  }, [selected.baseUrl, lastUpdated]);
+
+  // Poll health on a slow interval; it rarely changes and doesn't need to
+  // track every events poll. usePolling also runs once immediately on mount.
+  usePolling(loadHealth, HEALTH_INTERVAL_MS, true);
 
   // Topic suggestions only exist per contract.
   useEffect(() => {
@@ -497,11 +540,11 @@ function AppInner(): React.JSX.Element {
     }
     const controller = new AbortController();
     api
-      .topics(selected.baseUrl, debouncedContractId, controller.signal)
+      .topics(selected.baseUrl, debouncedContractId, controller.signal, filters.topicPosition || undefined)
       .then((r) => setTopics(r.topics))
       .catch(() => setTopics([]));
     return () => controller.abort();
-  }, [selected.baseUrl, debouncedContractId, contractIdValid]);
+  }, [selected.baseUrl, debouncedContractId, contractIdValid, filters.topicPosition]);
 
   const showContract = !filters.contractId;
   const changeFilters = (next: FilterState): void => {
@@ -694,10 +737,32 @@ function AppInner(): React.JSX.Element {
       {error && contractIdValid && (
         <p className="warning banner" role="alert">
           {error}
+          {errorRequestId && (
+            <span style={{ display: 'block', marginTop: '4px', fontSize: '11px' }}>
+              Request ID:{' '}
+              <code style={{ fontFamily: 'monospace' }}>{errorRequestId}</code>{' '}
+              <button
+                type="button"
+                className="link-button"
+                style={{ fontSize: '11px' }}
+                onClick={() => void navigator.clipboard.writeText(errorRequestId)}
+              >
+                copy
+              </button>
+            </span>
+          )}
         </p>
       )}
 
       <div className="result-meta">
+        <input
+          type="search"
+          className="event-search"
+          placeholder="Search events…"
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          aria-label="Search loaded events"
+        />
         <div className="result-meta-left">
           <span
             aria-live="polite"
@@ -713,6 +778,15 @@ function AppInner(): React.JSX.Element {
             >
               {t('live')}
             </span>
+          )}
+          {pendingCount > 0 && (
+            <button
+              type="button"
+              className="new-events-pill"
+              onClick={() => { setPendingCount(0); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+            >
+              {pendingCount} new event{pendingCount === 1 ? '' : 's'} ↑
+            </button>
           )}
         </div>
         {events.length > 0 && (
@@ -835,7 +909,7 @@ function AppInner(): React.JSX.Element {
 
       <ErrorBoundary title="Event Table Error">
         <EventTable
-          events={events}
+          events={filteredEvents}
           network={selected.label}
           expandedEventIds={expandedEventIds}
           onToggleExpanded={toggleEventExpanded}
@@ -847,6 +921,7 @@ function AppInner(): React.JSX.Element {
           absolute={absoluteTime}
           emptyMessage={emptyMessage}
           onTxHashClick={openTxPanel}
+          contractLabels={Object.fromEntries(contracts.filter((c) => c.label).map((c) => [c.contractId, c.label!]))}
         />
       </ErrorBoundary>
 
