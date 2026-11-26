@@ -12,7 +12,7 @@ import { parseArgs } from 'node:util';
 import { access, readFile } from 'node:fs/promises';
 import { SqliteEventStore } from '@soroban-lens/store';
 import type { ContractSpecRecord, EventQuery, RawEventInput } from '@soroban-lens/store';
-import { resolveConfig } from './config.js';
+import { resolveConfig, describeConfig } from './config.js';
 import { formatReport, runDoctor } from './doctor.js';
 import { applyFixes, formatFixes } from './fix.js';
 import { buildTailQuery, followEvents, formatEvent, formatEventJson, TailUsageError, wantsColor } from './tail.js';
@@ -39,7 +39,7 @@ Usage:
   lens tail   [filters] [--json]     Follow events as they are indexed, colourised or as NDJSON.
   lens prune --before-ledger <n>     Delete events below a ledger and reclaim disk space.
   lens redecode [--all]              Re-run the decoder over previously-failed rows.
-  lens verify [--repair]             Check stored-row invariants; optionally fix them.
+  lens verify [--repair]             Check event rows and contract summaries.
   lens migrate --down --to <n>       Roll back migrations above version <n>.
   lens export <path> [filters]       Write events as NDJSON, backend-portable. Filters:
                                     -c <id>, --from-ledger/--to-ledger <n>,
@@ -49,7 +49,10 @@ Usage:
   lens import <path>                 Load an NDJSON snapshot written by 'lens export'.
   lens spec [list]                   Show which contracts have a spec for typed decoding.
   lens spec fetch -c <id>            Look a contract's spec up on-chain now (refreshes it).
+  lens spec refresh [--only-missing] Re-fetch every stored contract's spec (or only the missing ones).
   lens spec import -c <id> <wasm>    Use a local Wasm build's spec for a contract.
+  lens config [options]              Print each resolved setting, its value and where it came from
+                                     (flag, env or default).
   lens completion [bash|zsh|fish]    Generate shell auto-completion script.
 
 
@@ -69,6 +72,10 @@ Options:
   -d, --db <path>         SQLite file. (env LENS_DB_PATH, default ./data/lens.db)
       --data-dir <path>   Working directory for state. (env LENS_DATA_DIR)
       --start-ledger <n>  First ledger when no cursor is stored. (env LENS_START_LEDGER)
+      --end-ledger <n>    Stop after this ledger; index exits once reached. (env LENS_END_LEDGER)
+      --topic <t>         Topic filter, positional and repeatable; '*' matches any one
+                          position. (env LENS_TOPICS)
+      --type <t>          Event type filter: contract | system | diagnostic. (env LENS_EVENT_TYPE)
       --page-size <n>     Events per RPC page, 1-10000. (env LENS_PAGE_SIZE)
       --page-size-min <n> Let the page size adapt, no lower than this. (env LENS_PAGE_SIZE_MIN)
       --page-size-max <n> Let the page size adapt, no higher than this. (env LENS_PAGE_SIZE_MAX)
@@ -80,7 +87,9 @@ Options:
       --fixture <path>    seed: file to load (default fixtures/testnet-events.json).
       --before-ledger <n> prune: delete events with ledger below this.
       --all               redecode: re-run over every row, not only failures.
-      --repair            verify: recompute derived columns for any bad row found.
+      --repair            verify: recompute derived rows and contract summaries.
+      --only-missing      spec refresh: skip contracts that already have a spec.
+      --concurrency <n>   spec refresh: how many lookups to run at once (default 4).
       --down              migrate: roll back rather than apply forward.
       --to <n>            migrate --down: target schema version.
       --fix               doctor: create .env and data/, run pending migrations. Never
@@ -89,7 +98,7 @@ Options:
 tail filters (the API's, by the same rules):
   -c, --contract <id>     Follow one contract. Omit to follow every indexed contract.
       --topic <t>         Topic prefix, positional and repeatable; '*' matches any one position.
-      --address <G…|C…>   Events mentioning this address anywhere.
+      --address <G…|M…|C…> Events mentioning this address anywhere.
       --tx-hash <hex>     Events from one transaction.
       --search <text>     Substring match on decoded topics and value (3+ characters).
       --successful-only   Skip events from failed contract calls.
@@ -128,6 +137,9 @@ async function main(argv: string[]): Promise<number> {
       db: { type: 'string', short: 'd' },
       'data-dir': { type: 'string' },
       'start-ledger': { type: 'string' },
+      'end-ledger': { type: 'string' },
+      topic: { type: 'string', multiple: true },
+      type: { type: 'string' },
       'page-size': { type: 'string' },
       'page-size-min': { type: 'string' },
       'page-size-max': { type: 'string' },
@@ -148,7 +160,8 @@ async function main(argv: string[]): Promise<number> {
       fixture: { type: 'string' },
       'before-ledger': { type: 'string' },
       fix: { type: 'boolean' },
-      topic: { type: 'string', multiple: true },
+      'only-missing': { type: 'boolean' },
+      concurrency: { type: 'string' },
       address: { type: 'string' },
       'tx-hash': { type: 'string' },
       search: { type: 'string' },
@@ -205,6 +218,9 @@ async function main(argv: string[]): Promise<number> {
     ...(values.db !== undefined ? { db: values.db } : {}),
     ...(values['data-dir'] !== undefined ? { dataDir: values['data-dir'] } : {}),
     ...(values['start-ledger'] !== undefined ? { startLedger: Number(values['start-ledger']) } : {}),
+    ...(values['end-ledger'] !== undefined ? { endLedger: Number(values['end-ledger']) } : {}),
+    ...(values.topic !== undefined ? { topics: values.topic } : {}),
+    ...(values.type !== undefined ? { eventType: values.type } : {}),
     ...(values['page-size'] !== undefined ? { pageSize: Number(values['page-size']) } : {}),
     ...(values['page-size-min'] !== undefined ? { pageSizeMin: Number(values['page-size-min']) } : {}),
     ...(values['page-size-max'] !== undefined ? { pageSizeMax: Number(values['page-size-max']) } : {}),
@@ -419,15 +435,24 @@ async function main(argv: string[]): Promise<number> {
           process.stderr.write('[lens] verify: all rows are internally consistent\n');
           return 0;
         }
-        for (const { id, problems: rowProblems } of problems) {
-          process.stderr.write(`[lens] ${id}: ${rowProblems.join('; ')}\n`);
+        for (const { kind, id, problems: rowProblems } of problems) {
+          const label = kind === 'contract_summary' ? `contract summary ${id}` : id;
+          process.stderr.write(`[lens] ${label}: ${rowProblems.join('; ')}\n`);
         }
         if (values.repair) {
-          for (const { id } of problems) await store.repairRow(id);
-          process.stderr.write(`[lens] repaired ${problems.length} row(s)\n`);
-          return 0;
+          for (const { kind, id } of problems) {
+            if (kind === 'contract_summary') await store.repairContractSummary(id);
+            else await store.repairRow(id);
+          }
+          const remaining = await store.checkIntegrity();
+          if (remaining.length === 0) {
+            process.stderr.write(`[lens] repaired ${problems.length} problem(s); verification passed\n`);
+            return 0;
+          }
+          process.stderr.write(`[lens] repair left ${remaining.length} problem(s)\n`);
+          return 1;
         }
-        process.stderr.write(`[lens] verify: ${problems.length} row(s) with problems. Re-run with --repair to fix.\n`);
+        process.stderr.write(`[lens] verify: ${problems.length} problem(s). Re-run with --repair to fix.\n`);
         return 1;
       } finally {
         await store.close();
@@ -590,10 +615,61 @@ async function main(argv: string[]): Promise<number> {
           for (const record of records) process.stdout.write(`${describeSpecRecord(record)}\n`);
           return 0;
         }
-        if (sub !== 'fetch' && sub !== 'import') {
-          process.stderr.write(`error: unknown spec subcommand "${sub}" (list | fetch | import)\n`);
+        if (sub !== 'fetch' && sub !== 'import' && sub !== 'refresh') {
+          process.stderr.write(`error: unknown spec subcommand "${sub}" (list | fetch | refresh | import)\n`);
           return 2;
         }
+
+        if (sub === 'refresh') {
+          const records = await store.listContractSpecs();
+          const targets = values['only-missing']
+            ? records.filter((r) => r.source === 'none' || r.error !== undefined)
+            : records;
+          if (targets.length === 0) {
+            process.stderr.write(
+              records.length === 0
+                ? '[lens] no specs stored yet — nothing to refresh\n'
+                : `[lens] all ${records.length} stored spec(s) are present; nothing to refresh\n`,
+            );
+            return 0;
+          }
+          let concurrency = 4;
+          if (values.concurrency !== undefined) {
+            concurrency = Number(values.concurrency);
+            if (!Number.isInteger(concurrency) || concurrency < 1) {
+              process.stderr.write(`error: --concurrency must be a positive integer, got "${values.concurrency}"\n`);
+              return 2;
+            }
+          }
+          const source = rpcSpecSource(config.network.rpcUrl, config.rpcHeaders);
+          let refreshed = 0;
+          let failed = 0;
+          let next = 0;
+          const worker = async (): Promise<void> => {
+            while (next < targets.length) {
+              const target = targets[next++]!;
+              try {
+                const record = await lookupContractSpec(source, target.contractId);
+                await store.saveContractSpec(record);
+                refreshed++;
+                process.stdout.write(`${describeSpecRecord(record)}\n`);
+              } catch (error) {
+                failed++;
+                process.stderr.write(
+                  `[lens] ${target.contractId}: lookup failed: ${error instanceof Error ? error.message : String(error)}\n`,
+                );
+              }
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, () => worker()));
+          const skipped = records.length - targets.length;
+          process.stderr.write(
+            `[lens] spec refresh: ${refreshed} refreshed, ${skipped} skipped, ${failed} failed ` +
+              `of ${records.length} stored spec(s)\n`,
+          );
+          return 0;
+        }
+
         if (config.contractIds.length === 0) {
           process.stderr.write(`error: lens spec ${sub} needs at least one -c <contract id>\n`);
           return 2;
@@ -630,6 +706,11 @@ async function main(argv: string[]): Promise<number> {
       }
     }
 
+    case 'config': {
+      process.stdout.write(`${describeConfig(config).text}\n`);
+      return 0;
+    }
+
     case 'completion': {
       const shell = positionals[0] || 'bash';
       process.stdout.write(`${generateCompletion(shell)}\n`);
@@ -649,8 +730,8 @@ function generateCompletion(shell: string): string {
   local cur prev commands options
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="doctor index seed stats tail prune redecode verify migrate export import backup restore spec completion"
-  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --page-size-min --page-size-max --reorg-depth --poll-interval --once --max-events --fixture --before-ledger --force --fix --topic --address --tx-hash --search --successful-only --from-ledger --to-ledger --from-time --to-time --json -h --help"
+  commands="doctor index seed stats tail prune redecode verify migrate export import backup restore spec completion config"
+  options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --page-size-min --page-size-max --reorg-depth --poll-interval --once --max-events --fixture --before-ledger --force --fix --topic --address --tx-hash --search --successful-only --from-ledger --to-ledger --from-time --to-time --json --only-missing --concurrency --end-ledger --type -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -686,11 +767,12 @@ _lens() {
     'tail:Follow events as they are indexed'
     'prune:Delete events below a ledger'
     'redecode:Re-run the decoder over failed rows'
-    'verify:Check stored-row invariants'
+    'verify:Check event rows and contract summaries'
     'migrate:Roll migrations forward or back'
     'export:Write an NDJSON snapshot'
     'import:Load an NDJSON snapshot'
-    'spec:Contract specs for typed decoding'
+    'spec:Contract specs for typed decoding (list|fetch|refresh|import)'
+    'config:Print the resolved configuration'
     'completion:Generate shell autocompletions'
   )
   _arguments '1: :->command' '*: :->args'
@@ -709,12 +791,15 @@ complete -c lens -n "__fish_use_subcommand" -a stats -d "Print database statisti
 complete -c lens -n "__fish_use_subcommand" -a tail -d "Follow events as they are indexed"
 complete -c lens -n "__fish_use_subcommand" -a prune -d "Delete events below a ledger"
 complete -c lens -n "__fish_use_subcommand" -a redecode -d "Re-run the decoder over failed rows"
-complete -c lens -n "__fish_use_subcommand" -a verify -d "Check stored-row invariants"
+complete -c lens -n "__fish_use_subcommand" -a verify -d "Check event rows and contract summaries"
 complete -c lens -n "__fish_use_subcommand" -a migrate -d "Roll migrations forward or back"
 complete -c lens -n "__fish_use_subcommand" -a export -d "Write an NDJSON snapshot"
 complete -c lens -n "__fish_use_subcommand" -a import -d "Load an NDJSON snapshot"
 complete -c lens -n "__fish_use_subcommand" -a spec -d "Contract specs for typed decoding"
+complete -c lens -n "__fish_use_subcommand" -a config -d "Print the resolved configuration"
 complete -c lens -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
+complete -c lens -l only-missing -d "spec refresh: skip contracts that already have a spec"
+complete -c lens -l concurrency -x -d "spec refresh: concurrent lookups"
 complete -c lens -l network -s n -x -a "testnet mainnet futurenet"
 complete -c lens -l help -s h -d "Show help"`;
 

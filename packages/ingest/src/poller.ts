@@ -59,6 +59,12 @@ export interface PollerDeps {
    * is nothing to compare against, so no check runs.
    */
   reorgStore?: ReorgStore;
+  /**
+   * Called after every completed poll, including polls that yield no events
+   * (#207). Lets a caller refresh a heartbeat on a quiet contract, where the
+   * stream yields nothing for minutes at a time.
+   */
+  onPoll?: (progress: PollerPollProgress) => void;
 }
 
 export const APPROX_LEDGER_SECONDS = 5;
@@ -81,6 +87,20 @@ export interface PollerProgress {
    * `lagSeconds` then.
    */
   measuredLagSeconds: number | null;
+}
+
+/**
+ * Reported after every completed poll, whether or not it produced events
+ * (#207). Carries the stream identity so a caller can key per-stream state
+ * such as a heartbeat file.
+ */
+export interface PollerPollProgress extends PollerProgress {
+  /** The stream's saved-position key; unique per contract stream. */
+  cursorKey: string;
+  /** The contract this poll covered, or `*` for an unfiltered stream. */
+  contractId: string;
+  /** Events yielded by this poll; zero on a quiet contract. */
+  eventCount: number;
 }
 
 /**
@@ -143,6 +163,7 @@ export class EventPoller {
   readonly #options: PollerOptions;
   readonly #metrics: IngestMetrics | undefined;
   readonly #reorgStore: ReorgStore | undefined;
+  readonly #onPoll: ((progress: PollerPollProgress) => void) | undefined;
   readonly #explicitCursorKey: boolean;
 
   constructor(options: PollerOptions, deps: PollerDeps) {
@@ -161,6 +182,7 @@ export class EventPoller {
     this.#log = deps.log ?? (() => {});
     this.#metrics = deps.metrics;
     this.#reorgStore = deps.reorgStore;
+    this.#onPoll = deps.onPoll;
   }
 
   get cursorKey(): string {
@@ -432,6 +454,28 @@ export class EventPoller {
         for (const [id, n] of perContract) this.#metrics.eventsIngested(n, id);
       }
       this.#metrics?.progress(lastLedger || latestLedger, latestLedger);
+
+      // Every completed poll reports, even when it yielded nothing: a quiet
+      // contract must still look alive to whoever watches the heartbeat (#207).
+      if (this.#onPoll) {
+        const progressLedger = lastLedger || latestLedger;
+        const report: PollerPollProgress = {
+          cursor: results[0]?.batch.cursor ?? '',
+          ledger: progressLedger,
+          latestLedger,
+          caughtUp,
+          reachedEndLedger,
+          ...ingestionLag(progressLedger, latestLedger, allEvents.at(-1)?.ledgerClosedAt, this.#now()),
+          cursorKey: this.#key,
+          contractId: streams.length === 1 ? streams[0]!.contractId : '*',
+          eventCount: fresh.length,
+        };
+        try {
+          this.#onPoll(report);
+        } catch (error) {
+          this.#log(`onPoll callback failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
 
       if (allEvents.length > 0) idleMs = baseIdleMs;
       if (reachedEndLedger) return;

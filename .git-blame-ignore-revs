@@ -1,0 +1,10 @@
+# Bulk reformat commit (Prettier/ESLint --fix across the repo).
+# `git blame` will skip this commit. See:
+# https://git-scm.com/docs/git-config#Documentation/git-config.txt-blameignoreRevsFile
+#
+# To use this file locally:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Add the full 40-character SHA of the dedicated bulk-reformat commit below.
+# Replace the placeholder with the actual hash once the reformat commit lands.
+0000000000000000000000000000000000000000

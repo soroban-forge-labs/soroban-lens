@@ -94,24 +94,6 @@ test('ApiRequestError falls back when the body is not the documented shape', () 
   assert.equal(error.status, 502);
 });
 
-test('a failed request keeps the X-Request-Id response header (#204)', async () => {
-  const previous = globalThis.fetch;
-  globalThis.fetch = async () =>
-    new Response(JSON.stringify({ error: { code: 'boom', message: 'nope' } }), {
-      status: 500,
-      headers: { 'x-request-id': 'req-42' },
-    });
-  try {
-    const { api } = await import('../.test-build/api.js');
-    await assert.rejects(api.events('http://example.test', {}), (err) => {
-      assert.equal(err.requestId, 'req-42');
-      return true;
-    });
-  } finally {
-    globalThis.fetch = previous;
-  }
-});
-
 test('the stream path carries the contract as a query parameter and drops paging', () => {
   const { pathname, params } = parse(
     buildStreamPath({ contractId: SAC, limit: 50, cursor: 'x', topics: ['transfer', null], successfulOnly: true }),
@@ -141,38 +123,6 @@ test('ledger range combines with contract id on the event path', () => {
 
 test('no filters streams every contract, with no query string', () => {
   assert.equal(buildStreamPath({}), '/events/stream');
-});
-
-// ── #188/#189/#190: address, search, and time bounds ────────────────────────
-
-const ALICE = 'GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI';
-
-test('an address filter is sent on the event path (#188)', () => {
-  const { params } = parse(buildEventPath({ address: ALICE }));
-  assert.equal(params.get('address'), ALICE);
-});
-
-test('search text is sent on the event path (#189)', () => {
-  const { params } = parse(buildEventPath({ search: 'transfer' }));
-  assert.equal(params.get('search'), 'transfer');
-  // An empty term adds nothing rather than a bare `search=`.
-  assert.equal(parse(buildEventPath({ search: '' })).params.has('search'), false);
-});
-
-test('time bounds are sent as epoch seconds on both paths (#190)', () => {
-  const { params } = parse(buildEventPath({ fromTime: '1735732800', toTime: '1735736400' }));
-  assert.equal(params.get('fromTime'), '1735732800');
-  assert.equal(params.get('toTime'), '1735736400');
-
-  const stream = parse(buildStreamPath({ fromTime: '1735732800', toTime: '1735736400' }));
-  assert.equal(stream.params.get('fromTime'), '1735732800');
-  assert.equal(stream.params.get('toTime'), '1735736400');
-});
-
-test('the stream path carries address and search too, so live rows match the page', () => {
-  const { params } = parse(buildStreamPath({ address: ALICE, search: 'transfer' }));
-  assert.equal(params.get('address'), ALICE);
-  assert.equal(params.get('search'), 'transfer');
 });
 
 // ── #82 runtime network list ─────────────────────────────────────────────────

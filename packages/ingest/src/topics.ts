@@ -103,3 +103,58 @@ export function parseTopicFilters(
   }
   return filters.map((filter) => filter.map(encodeTopicSegment));
 }
+
+const EVENT_TYPES = ['contract', 'system'] as const;
+
+/**
+ * `--type` for the indexer: `contract` (the default) or `system`. The
+ * rejected value is deliberately not echoed (#144 removed `diagnostic`, and
+ * the error must not name it back).
+ */
+export function parseEventType(raw: string | undefined): 'contract' | 'system' {
+  if (raw === undefined || raw.trim() === '') return 'contract';
+  const value = raw.trim();
+  if ((EVENT_TYPES as readonly string[]).includes(value)) return value as 'contract' | 'system';
+  throw new Error('--type must be contract or system');
+}
+
+/** `LENS_EVENT_TYPE` / `--type` for config resolution: undefined means "both". */
+export function resolveEventType(raw: string | undefined): 'contract' | 'system' | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined;
+  return parseEventType(raw);
+}
+
+/** `--end-ledger <n>`: a positive integer, or undefined when not given. */
+export function parseEndLedger(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error('--end-ledger must be a positive integer');
+  }
+  return value;
+}
+
+/**
+ * An end ledger below the start ledger can never be reached. Only checked when
+ * the run starts from `startLedger` (a fresh run or `--no-resume`); a resumed
+ * cursor may legitimately sit anywhere.
+ */
+export function validateEndLedgerRange(
+  endLedger: number | undefined,
+  startLedger: number | undefined,
+  fromStart: boolean,
+): void {
+  if (endLedger === undefined) return;
+  // A stored cursor and a bounded range are contradictory instructions: the
+  // cursor says "carry on from where you were", the range says "read exactly
+  // this window". Rather than silently picking one, say so.
+  if (!fromStart) {
+    throw new Error(
+      'error: --end-ledger indexes a fixed range and cannot resume from a stored cursor.\n' +
+        '       Add --no-resume to read the range, or drop --end-ledger to follow the tip.',
+    );
+  }
+  if (startLedger !== undefined && endLedger < startLedger) {
+    throw new Error(`error: --end-ledger (${endLedger}) is before --start-ledger (${startLedger})`);
+  }
+}

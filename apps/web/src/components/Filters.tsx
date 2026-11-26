@@ -17,15 +17,15 @@ function isValidLedger(v: string): boolean {
   return v === '' || (/^\d+$/.test(v) && Number.isInteger(Number(v)) && Number(v) >= 0);
 }
 
-/** Account or contract StrKey — the only shape the API's `address=` accepts. */
-const ADDRESS_PATTERN = /^[GC][A-Z2-7]{55}$/;
+/** Returns true if the string is empty OR a valid G.../C... Stellar StrKey. */
+function isValidAddress(v: string): boolean {
+  return v === '' || /^[GC][A-Z2-7]{55}$/.test(v);
+}
 
-/** Preset windows offered by the time-range filter (#190). */
-const TIME_PRESETS: { value: string; label: string }[] = [
-  { value: '15m', label: 'Last 15 minutes' },
-  { value: '1h', label: 'Last hour' },
-  { value: '24h', label: 'Last day' },
-  { value: 'custom', label: 'Custom…' },
+const TIME_PRESETS = [
+  { label: 'Last 15 min', seconds: 15 * 60 },
+  { label: 'Last hour', seconds: 60 * 60 },
+  { label: 'Last day', seconds: 24 * 60 * 60 },
 ];
 
 export function Filters({
@@ -44,9 +44,6 @@ export function Filters({
     ? value.contractId
     : '';
 
-  const addressInvalid = value.address !== '' && !ADDRESS_PATTERN.test(value.address);
-  const searchShort = value.search !== '' && value.search.length < 3;
-
   const fromInvalid = !isValidLedger(value.fromLedger);
   const toInvalid = !isValidLedger(value.toLedger);
   const rangeInvalid =
@@ -55,6 +52,14 @@ export function Filters({
     value.fromLedger !== '' &&
     value.toLedger !== '' &&
     Number(value.fromLedger) > Number(value.toLedger);
+  const addressInvalid = !isValidAddress(value.address);
+  const hasTimeRange = value.fromTime !== '' || value.toTime !== '';
+
+  const applyTimePreset = (seconds: number): void => {
+    const now = Math.floor(Date.now() / 1000);
+    onChange({ ...value, fromTime: String(now - seconds), toTime: String(now) });
+  };
+  const clearTimeRange = (): void => onChange({ ...value, fromTime: '', toTime: '' });
 
   return (
     <form className="filters" onSubmit={(e) => e.preventDefault()}>
@@ -80,8 +85,8 @@ export function Filters({
         >
           <option value="">Choose an indexed contract…</option>
           {knownContracts.map((contract) => (
-            <option key={contract.contractId} value={contract.contractId}>
-              {contract.contractId} · {contract.eventCount.toLocaleString()} events · Last activity{' '}
+            <option key={contract.contractId} value={contract.contractId} title={contract.label ? contract.contractId : undefined}>
+              {contract.label ? `${contract.label} (${contract.contractId.slice(0, 8)}…)` : contract.contractId} · {contract.eventCount.toLocaleString()} events · Last activity{' '}
               {new Date(contract.lastSeenAt).toLocaleString()}
             </option>
           ))}
@@ -94,6 +99,37 @@ export function Filters({
         <button type="button" className="link-button" onClick={onUseExample}>
           {t('useTestnetExample')}
         </button>
+      </div>
+
+      <div className="field">
+        <label htmlFor="address">Address</label>
+        <input
+          id="address"
+          name="address"
+          className="mono"
+          placeholder="G… or C…"
+          spellCheck={false}
+          autoComplete="off"
+          value={value.address}
+          aria-invalid={addressInvalid}
+          onChange={(e) => set('address', e.target.value.trim())}
+        />
+        {addressInvalid && (
+          <span className="warning" role="alert" style={{ padding: '2px 6px', fontSize: '11px' }}>
+            Must start with G… or C… (56 characters)
+          </span>
+        )}
+        <label htmlFor="topicPosition">Topic position</label>
+        <select
+          id="topicPosition"
+          value={value.topicPosition}
+          onChange={(e) => set('topicPosition', Number(e.target.value))}
+        >
+          <option value={0}>topic[0] (event name)</option>
+          <option value={1}>topic[1]</option>
+          <option value={2}>topic[2]</option>
+          <option value={3}>topic[3]</option>
+        </select>
       </div>
 
       <div className="field">
@@ -114,70 +150,6 @@ export function Filters({
             <option key={tc.topic} value={tc.topic}>{`${tc.topic} (${tc.count})`}</option>
           ))}
         </datalist>
-      </div>
-
-      <div className="field">
-        <label htmlFor="address">{t('addressLabel')}</label>
-        <input
-          id="address"
-          name="address"
-          className="mono"
-          placeholder={t('addressPlaceholder')}
-          spellCheck={false}
-          autoComplete="off"
-          value={value.address}
-          aria-invalid={addressInvalid}
-          onChange={(e) => set('address', e.target.value.trim())}
-        />
-      </div>
-
-      <div className="field">
-        <label htmlFor="search">{t('searchLabel')}</label>
-        <input
-          id="search"
-          name="search"
-          placeholder={t('searchPlaceholder')}
-          spellCheck={false}
-          autoComplete="off"
-          value={value.search}
-          onChange={(e) => set('search', e.target.value)}
-        />
-        {searchShort && (
-          <span className="muted small" role="status">
-            {t('searchMinChars')}
-          </span>
-        )}
-      </div>
-
-      <div className="field">
-        <label htmlFor="timeRange">{t('timeRangeLabel')}</label>
-        <select
-          id="timeRange"
-          name="timeRange"
-          value={value.timeRange}
-          onChange={(e) => set('timeRange', e.target.value)}
-        >
-          <option value="">{t('timeRangeAll')}</option>
-          {TIME_PRESETS.map((preset) => (
-            <option key={preset.value} value={preset.value}>{preset.label}</option>
-          ))}
-        </select>
-        {value.timeRange === 'custom' && (
-          <>
-            <input
-              type="datetime-local"
-              aria-label={t('timeRangeFrom')}
-              value={value.customFromTime}
-              onChange={(e) => set('customFromTime', e.target.value)}
-            />
-            <input
-              type="datetime-local"
-              aria-label={t('timeRangeTo')}
-              value={value.customToTime}
-              onChange={(e) => set('customToTime', e.target.value)}
-            />
-          </>
-        )}
       </div>
 
       <div className="field">
@@ -217,6 +189,29 @@ export function Filters({
         {rangeInvalid && !toInvalid && (
           <span className="warning" role="alert" style={{ padding: '2px 6px', fontSize: '11px' }}>
             Must be ≥ from ledger
+          </span>
+        )}
+      </div>
+
+      <div className="field">
+        <label>Time range</label>
+        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+          {TIME_PRESETS.map((p) => (
+            <button key={p.label} type="button" className="link-button" onClick={() => applyTimePreset(p.seconds)}>
+              {p.label}
+            </button>
+          ))}
+          {hasTimeRange && (
+            <button type="button" className="link-button" onClick={clearTimeRange}>
+              Clear
+            </button>
+          )}
+        </div>
+        {hasTimeRange && (
+          <span className="muted small" role="status">
+            {value.fromTime && value.toTime
+              ? `${new Date(Number(value.fromTime) * 1000).toLocaleTimeString()} – ${new Date(Number(value.toTime) * 1000).toLocaleTimeString()}`
+              : 'Custom range active'}
           </span>
         )}
       </div>

@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/soroban-forge-labs/soroban-lens/blob/main/docs/lens.config.schema.json",
+  "title": "lens.config.json",
+  "description": "Optional configuration file for soroban-lens. Keys mirror the LENS_* environment variables. Precedence: command-line flag > environment variable > config file > built-in default.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "rpcUrl": {
+      "type": "string",
+      "format": "uri",
+      "description": "Soroban RPC endpoint URL. Mirrors LENS_RPC_URL.",
+      "default": "https://soroban-testnet.stellar.org"
+    },
+    "networkPassphrase": {
+      "type": "string",
+      "description": "Stellar network passphrase used to build and sign transactions. Mirrors LENS_NETWORK_PASSPHRASE.",
+      "default": "Test SDF Network ; September 2015"
+    },
+    "network": {
+      "type": "string",
+      "enum": ["testnet", "mainnet", "futurenet", "local"],
+      "description": "Named network preset. Mirrors LENS_NETWORK.",
+      "default": "testnet"
+    },
+    "contractId": {
+      "type": "string",
+      "description": "Default contract ID to operate on when a command does not receive one explicitly. Mirrors LENS_CONTRACT_ID."
+    },
+    "contracts": {
+      "type": "array",
+      "description": "List of contracts to index or inspect in a single deployment. Mirrors LENS_CONTRACTS (comma-separated).",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "headers": {
+      "type": "object",
+      "description": "Extra HTTP headers sent with every RPC request. Mirrors LENS_HEADERS (JSON object).",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {}
+    },
+    "retries": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of times to retry a failed RPC request. Mirrors LENS_RETRIES.",
+      "default": 3
+    },
+    "retryDelayMs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Base delay in milliseconds between retries (exponential backoff). Mirrors LENS_RETRY_DELAY_MS.",
+      "default": 500
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Per-request timeout in milliseconds. Mirrors LENS_TIMEOUT_MS.",
+      "default": 30000
+    },
+    "output": {
+      "type": "string",
+      "enum": ["text", "json"],
+      "description": "Output format for command results. Mirrors LENS_OUTPUT.",
+      "default": "text"
+    },
+    "verbose": {
+      "type": "boolean",
+      "description": "Enable verbose logging. Mirrors LENS_VERBOSE.",
+      "default": false
+    },
+    "quiet": {
+      "type": "boolean",
+      "description": "Suppress non-essential output. Mirrors LENS_QUIET.",
+      "default": false
+    },
+    "configPath": {
+      "type": "string",
+      "description": "Path to an alternate config file. Mirrors LENS_CONFIG. When unset, ./lens.config.json is used if present."
+    }
+  }
+}

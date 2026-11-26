@@ -46,8 +46,6 @@ export const en = {
   // ── Validation ────────────────────────────────────────────────────────────────
   invalidContractId:
     "That does not look like a contract id. Expected a StrKey: C followed by 55 upper-case letters and digits 2\u20137.",
-  invalidAddress:
-    'That does not look like an address. Expected a StrKey: G or C followed by 55 upper-case letters and digits 2\u20137.',
 
   // ── Empty / loading states ────────────────────────────────────────────────────
   loading: 'Loading\u2026',
@@ -66,8 +64,6 @@ export const en = {
   // ── Load more ─────────────────────────────────────────────────────────────────
   loadMore: 'Load {count} more',
   loadingMore: 'Loading\u2026',
-  retry: 'Retry',
-  requestId: 'request',
 
   // ── Footer ────────────────────────────────────────────────────────────────────
   footerTagline: 'Soroban Lens \u2014 a reading lens for Soroban contract events.',
@@ -91,16 +87,6 @@ export const en = {
   useTestnetExample: 'use the testnet XLM contract',
   topicLabel: 'Topic',
   topicPlaceholder: 'transfer',
-  addressLabel: 'Address',
-  addressPlaceholder: 'G… or C… (leave empty for any address)',
-  searchLabel: 'Search',
-  searchPlaceholder: 'text inside decoded output',
-  searchMinChars: 'Search needs at least 3 characters.',
-  timeRangeLabel: 'Time range',
-  timeRangeAll: 'All time',
-  timeRangeFrom: 'From time',
-  timeRangeTo: 'To time',
-  timeRangeActiveTitle: 'Only events inside this time range are shown',
   successfulOnly: 'Successful calls only',
   liveUpdates: 'Live updates',
 
@@ -116,8 +102,6 @@ export const en = {
 
   // ── EventRow ──────────────────────────────────────────────────────────────────
   filterByTopic: 'Filter by "{topic}"',
-  filterByAddress: 'Filter events by address {id}',
-  filterByContract: 'Filter events by contract {id}',
   additionalTopics: '+{count}',
   failedCallWarning:
     'Emitted during a contract call that did not succeed. It is indexed for completeness, but it did not take effect on chain.',
@@ -142,6 +126,10 @@ export const en = {
   componentError: 'Component Error',
   defaultErrorMessage: 'An unexpected rendering error occurred.',
   reloadComponent: 'Reload Component',
+  rpcProvider: 'RPC: {provider}',
+  rpcProviderPrimary: 'Indexer is using its primary RPC endpoint',
+  rpcProviderBackup: 'Indexer has failed over to a backup RPC endpoint',
+  pausedContracts: '{count} paused',
 } as const;
 
 /** The shape every locale must satisfy. */
