@@ -142,7 +142,7 @@ export function chunkCursorKey(baseKey: string, chunkIndex: number, totalChunks:
  * segment after `.cursor.json.`; the rest of the name is opaque. Anchored on
  * the basename only, so it behaves the same on POSIX and Windows paths.
  */
-const TEMP_FILE_PATTERN = /^.+\.cursor\.json\.(\d+)\..+\.tmp$/;
+const TEMP_FILE_PATTERN = /^.+\.cursor\.json\.(\d+)(?:\..+)?\.tmp$/;
 
 /**
  * `rename` replaces an existing destination atomically on POSIX but fails with

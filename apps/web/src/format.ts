@@ -76,3 +76,21 @@ export function absoluteTime(iso: string): string {
 export function prettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
+
+/**
+ * Format a SAC i128 amount (stroops, 7 decimals) as a human-readable string.
+ * Uses BigInt arithmetic to handle values above Number.MAX_SAFE_INTEGER exactly.
+ * Returns the raw string unchanged if it is not a valid integer.
+ */
+export function formatSacAmount(raw: string): string {
+  const str = String(raw).trim();
+  if (!/^-?\d+$/.test(str)) return str;
+  const neg = str.startsWith('-');
+  const abs = BigInt(neg ? str.slice(1) : str);
+  const divisor = BigInt(10_000_000);
+  const whole = abs / divisor;
+  const frac = abs % divisor;
+  const fracStr = frac.toString().padStart(7, '0').replace(/0+$/, '');
+  const formatted = fracStr.length > 0 ? `${whole}.${fracStr}` : `${whole}`;
+  return neg ? `-${formatted}` : formatted;
+}

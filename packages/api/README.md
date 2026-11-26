@@ -308,6 +308,10 @@ goal, and the key check, token bucket and event stream are each small enough
 | | `LENS_NDJSON_MAX_ROWS` | `1000000`. Most events one `application/x-ndjson` response carries. |
 | | `LENS_TRUST_PROXY` | off. `1` to key the limiter on `X-Forwarded-For`; only behind a proxy that sets it. |
 | `--shutdown-timeout` | `LENS_SHUTDOWN_TIMEOUT_MS` | `10000` |
+| | `LENS_HEADERS_TIMEOUT_MS` | `15000`. Time a client has to send the request headers. |
+| | `LENS_REQUEST_TIMEOUT_MS` | `60000`. Time a client has to send the whole request. Must be at least the headers timeout. |
+| | `LENS_KEEP_ALIVE_TIMEOUT_MS` | `65000`. Idle keep-alive lifetime. |
+| | `LENS_CONTRACT_LABELS` | off. Path to a JSON file of labels, see below. |
 | `--metrics-port` | `LENS_API_METRICS_PORT` | off. Serve Prometheus request metrics at `/metrics` on this separate port. |
 | `--metrics-host` | `LENS_API_METRICS_HOST` | `127.0.0.1` |
 
@@ -319,6 +323,44 @@ histogram, in the same plain-text Prometheus format as the indexer's. Labels
 are the matched route's pattern (`/contracts/{id}/events`, never the raw path),
 the method and the status class (`2xx`…`5xx`). A path no route matches counts
 under `route="unmatched"`, so unknown URLs cannot grow the series set.
+
+On `SIGINT`/`SIGTERM` the API stops accepting connections, lets in-flight
+requests finish (telling keep-alive clients to reconnect via `Connection: close`),
+and only then closes the database. Requests still running after the shutdown
+timeout are dropped.
+
+### Server timeouts
+
+Node's defaults leave slow-header clients unbounded and close idle keep-alive
+connections after 5 seconds, which behind a load balancer shows up as
+intermittent 502s (the proxy reuses a connection the API just closed). Behind a
+proxy, set `LENS_KEEP_ALIVE_TIMEOUT_MS` **higher than the proxy's idle timeout**
+(AWS ALB defaults to 60s, so the default of 65s suits it; nginx `keepalive_timeout`
+defaults to 75s, so use `80000`). Keep `LENS_HEADERS_TIMEOUT_MS` no larger than
+`LENS_REQUEST_TIMEOUT_MS`.
+
+### Contract labels
+
+`LENS_CONTRACT_LABELS` points at a JSON object mapping contract id to a label:
+
+```json
+{ "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC": "USDC SAC" }
+```
+
+The label appears as `label` on `/contracts` and `/contracts/{id}/stats`. A
+missing file means no labels; a file with invalid JSON or an invalid contract id
+stops the API at startup.
+
+### Response headers
+
+Every response carries `X-Content-Type-Options: nosniff` and
+`Referrer-Policy: no-referrer`. `/docs` also sends a `Content-Security-Policy`
+limited to what the Redoc page loads.
+
+### Filtering events
+
+`GET /events` accepts `type=contract|system` and `contractIds=` (comma-separated,
+at most 100). `contractId` and `contractIds` cannot be combined.
 
 On `SIGINT`/`SIGTERM` the API stops accepting connections, lets in-flight
 requests finish (telling keep-alive clients to reconnect via `Connection: close`),
