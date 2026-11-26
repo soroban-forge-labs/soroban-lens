@@ -22,6 +22,8 @@ export interface FilterState {
   topic: string;
   /** Stellar account (G…) or contract (C…) address; '' when unset. */
   address: string;
+  /** Which topic position (0–3) the topic filter applies to and whose suggestions are shown. */
+  topicPosition: number;
   successfulOnly: boolean;
   live: boolean;
   /** Inclusive ledger bounds as typed in the filter bar; '' when unset. */
@@ -63,6 +65,7 @@ export function parseUrl(pathname: string, search: string): UrlState | null {
       contractId: params.get('contract') ?? '',
       topic: params.get('topic') ?? '',
       address: params.get('address') ?? '',
+      topicPosition: Number(params.get('topicPos') ?? '0'),
       successfulOnly: params.get('successfulOnly') === 'true',
       // live defaults to true; only `live=false` turns it off.
       live: params.get('live') !== 'false',
@@ -89,6 +92,7 @@ export function stringifyUrl(state: UrlState): string {
   if (f.contractId) params.set('contract', f.contractId);
   if (f.topic) params.set('topic', f.topic);
   if (f.address) params.set('address', f.address);
+  if (f.topicPosition) params.set('topicPos', String(f.topicPosition));
   if (f.successfulOnly) params.set('successfulOnly', 'true');
   // live defaults to true, so only write it when it is off.
   if (!f.live) params.set('live', 'false');
@@ -117,6 +121,7 @@ export function sameFilterView(a: UrlState, b: UrlState): boolean {
     a.filters.contractId === b.filters.contractId &&
     a.filters.topic === b.filters.topic &&
     a.filters.address === b.filters.address &&
+    a.filters.topicPosition === b.filters.topicPosition &&
     a.filters.successfulOnly === b.filters.successfulOnly &&
     a.filters.live === b.filters.live &&
     a.filters.fromLedger === b.filters.fromLedger &&

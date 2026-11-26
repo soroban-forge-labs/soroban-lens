@@ -1036,7 +1036,7 @@ export function createApiServer(options: ApiServerOptions): Server {
       'Content-Type, Authorization, X-API-Key, If-None-Match, Last-Event-ID',
     );
     // Without this a browser hides ETag and Retry-After from cross-origin scripts.
-    res.setHeader('Access-Control-Expose-Headers', 'ETag, Retry-After, X-Request-Id');
+    res.setHeader('Access-Control-Expose-Headers', 'ETag, Retry-After, X-Request-Id, Deprecation');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204).end();
@@ -1052,7 +1052,9 @@ export function createApiServer(options: ApiServerOptions): Server {
     const method = isHead ? 'GET' : req.method;
 
     try {
-      const path = url.pathname.replace(/\/+$/, '') || '/';
+      const rawPath = url.pathname.replace(/\/+$/, '') || '/';
+      const versioned = rawPath.startsWith('/v1/') || rawPath === '/v1';
+      const path = versioned ? rawPath.slice(3) || '/' : rawPath;
       const candidates = routes.filter((r) => r.pattern.test(path));
       // Labelled from the pattern, a fixed string, before auth and the rate
       // limit, so a 401 or 429 on a real route lands on that route's series;
