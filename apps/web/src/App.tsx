@@ -90,6 +90,7 @@ function AppInner(): React.JSX.Element {
   const [healthError, setHealthError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   // A 404 for a contract means this indexer has never seen it; an empty page
   // with emptyReason means it is indexed but nothing matches the filters.
@@ -384,6 +385,7 @@ function AppInner(): React.JSX.Element {
       setLoading(false);
       return;
     }
+    setPendingCount(0);
     setLoading(true);
     setNextCursor(null);
     void loadFirstPage();
@@ -405,6 +407,7 @@ function AppInner(): React.JSX.Element {
           current.some((e) => e.id === event.id) ? current : [event, ...current],
         );
         setTotal((current) => current + 1);
+        setPendingCount((n) => n + 1);
         setLastUpdated(Date.now());
       } catch {
         // A malformed message is skipped; the next poll or reconnect resyncs.
@@ -653,6 +656,15 @@ function AppInner(): React.JSX.Element {
             >
               {t('live')}
             </span>
+          )}
+          {pendingCount > 0 && (
+            <button
+              type="button"
+              className="new-events-pill"
+              onClick={() => { setPendingCount(0); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+            >
+              {pendingCount} new event{pendingCount === 1 ? '' : 's'} ↑
+            </button>
           )}
         </div>
         {events.length > 0 && (
