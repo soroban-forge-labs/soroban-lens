@@ -526,17 +526,37 @@ function AppInner(): React.JSX.Element {
 
   const exportCsv = useCallback(() => {
     if (events.length === 0) return;
-    const headers = ['id', 'ledger', 'ledger_closed_at', 'contract_id', 'tx_hash', 'in_successful_call', 'topics', 'value'];
-    const rows = events.map((e) => [
-      e.id,
-      e.ledger,
-      e.ledgerClosedAt,
-      e.contractId,
-      e.txHash,
-      e.inSuccessfulContractCall,
-      `"${e.topics.map((tc) => JSON.stringify(tc.value)).join(' | ').replace(/"/g, '""')}"`,
-      `"${JSON.stringify(e.value.value).replace(/"/g, '""')}"`,
-    ]);
+
+    // When every row shares one typed event name, write one column per typed
+    // field instead of JSON blobs — the result opens straight into a spreadsheet.
+    const typedNames = new Set(events.map((e) => e.typed?.name).filter(Boolean));
+    const singleTyped = typedNames.size === 1 ? events[0]?.typed : undefined;
+    const typedFieldNames = singleTyped ? singleTyped.fields.map((f) => f.name) : [];
+
+    const baseHeaders = ['id', 'ledger', 'ledger_closed_at', 'contract_id', 'tx_hash', 'in_successful_call'];
+    const headers = singleTyped
+      ? [...baseHeaders, ...typedFieldNames]
+      : [...baseHeaders, 'topics', 'value'];
+
+    const csvEsc = (v: unknown): string => {
+      const s = typeof v === 'string' ? v : JSON.stringify(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n')
+        ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    const rows = events.map((e) => {
+      const base = [e.id, e.ledger, e.ledgerClosedAt, e.contractId, e.txHash, e.inSuccessfulContractCall];
+      if (singleTyped) {
+        const fieldMap = Object.fromEntries((e.typed?.fields ?? []).map((f) => [f.name, f.value]));
+        return [...base, ...typedFieldNames.map((n) => csvEsc(fieldMap[n] ?? ''))];
+      }
+      return [
+        ...base,
+        csvEsc(e.topics.map((tc) => JSON.stringify(tc.value)).join(' | ')),
+        csvEsc(JSON.stringify(e.value.value)),
+      ];
+    });
+
     const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
