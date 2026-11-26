@@ -12,6 +12,9 @@ const ADDRESS = /^(?:[GC][A-Z2-7]{55}|M[A-Z2-7]{68})$/;
 const ADDRESS_POSITION = /^(topic(0|[1-9][0-9]{0,2})|value)$/;
 /** A lower-cased ScVal arm name, as `DecodedValue.type` reports it. */
 const SCVAL_TYPE = /^[a-z][A-Za-z0-9]{0,31}$/;
+const TYPED_INTEGER = /^-?(?:0|[1-9]\d*)$/;
+const MIN_TYPED_INTEGER = -(1n << 63n);
+const MAX_TYPED_INTEGER = (1n << 63n) - 1n;
 
 export function assertAddress(value: string): string {
   if (!ADDRESS.test(value) || (value.startsWith('M') && !isValidMuxedAddress(value))) {
@@ -193,6 +196,21 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     );
   }
 
+  const typedField = params.get('typedField') ?? undefined;
+  const typedValue = params.get('typedValue') ?? undefined;
+  const typedGt = typedIntegerParam(params, 'typedGt');
+  const typedGte = typedIntegerParam(params, 'typedGte');
+  const typedLt = typedIntegerParam(params, 'typedLt');
+  const typedLte = typedIntegerParam(params, 'typedLte');
+  const hasTypedConstraint = [typedValue, typedGt, typedGte, typedLt, typedLte].some(
+    (value) => value !== undefined,
+  );
+  if ((typedField === undefined) !== !hasTypedConstraint || typedField === '') {
+    throw ApiError.badRequest(
+      '"typedField" is required with at least one of "typedValue", "typedGt", "typedGte", "typedLt" or "typedLte".',
+      'typedField',
+    );
+  }
   const contractIdRaw = params.get('contractId');
   const contractIdsRaw = params.get('contractIds');
   if (contractIdRaw && contractIdsRaw) {
@@ -228,12 +246,31 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     ...(search !== undefined && search !== '' ? { search } : {}),
     ...(transactionIndex !== undefined ? { transactionIndex } : {}),
     ...(operationIndex !== undefined ? { operationIndex } : {}),
+    ...(typedField !== undefined ? { typedField } : {}),
+    ...(typedValue !== undefined ? { typedValue } : {}),
+    ...(typedGt !== undefined ? { typedGt } : {}),
+    ...(typedGte !== undefined ? { typedGte } : {}),
+    ...(typedLt !== undefined ? { typedLt } : {}),
+    ...(typedLte !== undefined ? { typedLte } : {}),
     ...(cursor ? { cursor } : {}),
     ...(successfulOnly !== undefined ? { successfulOnly } : {}),
     ...(topics ? { topics } : {}),
     ...(topicTypes ? { topicTypes } : {}),
     ...(indexedAfter !== undefined ? { indexedAfter } : {}),
   };
+}
+
+function typedIntegerParam(params: URLSearchParams, name: string): string | undefined {
+  const raw = params.get(name);
+  if (raw === null) return undefined;
+  if (!TYPED_INTEGER.test(raw)) {
+    throw ApiError.badRequest(`"${name}" must be an integer, got "${raw}".`, name);
+  }
+  const value = BigInt(raw);
+  if (value < MIN_TYPED_INTEGER || value > MAX_TYPED_INTEGER) {
+    throw ApiError.badRequest(`"${name}" must fit a signed 64-bit integer.`, name);
+  }
+  return value.toString();
 }
 
 /** A comma-separated `contractIds` list: validated, de-duplicated and capped at MAX_CONTRACT_IDS. */

@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { decodeEvent, topicKey, topicType, extractAddresses, parseMuxedAddress, transferToMuxedId } from './decode.js';
+import { decodeTypedFields, decoderFromRecord, validateTypedFieldQuery } from './typed-fields.js';
 import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
@@ -88,6 +89,11 @@ export interface SqliteStoreOptions {
    * size-based pruning — the store only prunes when a caller asks it to.
    */
   sizeTargetBytes?: number;
+  /**
+   * Persist decoded named fields for equality/range filters. Opt-in because it
+   * adds per-event decoding and side-table writes.
+   */
+  typedFieldIndex?: boolean;
 }
 
 const noopLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -109,6 +115,7 @@ export class SqliteEventStore implements EventStore {
   readonly #countCacheTtlMs: number;
   readonly #now: () => number;
   readonly #sizeTargetBytes: number | undefined;
+  readonly #typedFieldIndex: boolean;
   readonly #countCache = new Map<string, { total: number; expiresAt: number }>();
   #statements: Statements | null = null;
   #checkpointTimer: ReturnType<typeof setInterval> | undefined;
@@ -122,6 +129,7 @@ export class SqliteEventStore implements EventStore {
     this.#countCacheTtlMs = options.countCacheTtlMs ?? 2000;
     this.#now = options.now ?? Date.now;
     this.#sizeTargetBytes = options.sizeTargetBytes;
+    this.#typedFieldIndex = options.typedFieldIndex ?? false;
     const readOnly = options.readOnly === true && options.path !== ':memory:';
     this.#readOnly = readOnly;
     if (options.path !== ':memory:' && !readOnly) mkdirSync(dirname(options.path), { recursive: true });
@@ -309,6 +317,7 @@ export class SqliteEventStore implements EventStore {
     this.#ensureWritable('insert events');
     if (events.length === 0) return 0;
     const stmt = this.#prepared().insert;
+    const decoders = new Map<string, ReturnType<typeof decoderFromRecord>>();
 
     // One transaction per batch: an interrupted batch leaves no partial page,
     // and Module 1 replays it on restart.
@@ -352,6 +361,23 @@ export class SqliteEventStore implements EventStore {
             });
           }
           this.#insertAddresses(e.id, e);
+          if (this.#typedFieldIndex) {
+            let decoder = decoders.get(e.contractId);
+            if (!decoders.has(e.contractId)) {
+              decoder = this.#typedDecoder(await this.getContractSpec(e.contractId));
+              decoders.set(e.contractId, decoder);
+            }
+            const fields = decodeTypedFields(decoder ?? null, e);
+            for (const field of fields) {
+              this.#prepared().insertTypedField.run(
+                e.id,
+                field.name,
+                field.type,
+                field.textValue,
+                field.numericValue,
+              );
+            }
+          }
         }
       }
       const deltas = [...summaryDeltas.values()];
@@ -410,6 +436,18 @@ export class SqliteEventStore implements EventStore {
       const key = i >= INDEXED_TOPIC_DEPTH ? topicKey(topic) : null;
       if (key !== null) deep.run(eventId, i, key, topicType(topic));
     });
+  }
+
+  #typedDecoder(record: ContractSpecRecord | null): ReturnType<typeof decoderFromRecord> {
+    try {
+      return decoderFromRecord(record);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.#log.warn('typed_field_spec_invalid', `could not index typed fields: ${reason}`, {
+        contractId: record?.contractId ?? 'unknown',
+      });
+      return null;
+    }
   }
 
   async getEvent(id: string): Promise<LensEvent | null> {
@@ -745,9 +783,11 @@ export class SqliteEventStore implements EventStore {
 
   async saveContractSpec(record: ContractSpecRecord): Promise<void> {
     this.#ensureWritable('saveContractSpec');
-    this.#db
-      .prepare(
-        `INSERT INTO contract_specs (contract_id, source, wasm_hash, entries_xdr, event_count, error, fetched_at)
+    this.#db.exec('BEGIN');
+    try {
+      this.#db
+        .prepare(
+          `INSERT INTO contract_specs (contract_id, source, wasm_hash, entries_xdr, event_count, error, fetched_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(contract_id) DO UPDATE SET source = excluded.source,
                                                 wasm_hash = excluded.wasm_hash,
@@ -755,16 +795,46 @@ export class SqliteEventStore implements EventStore {
                                                 event_count = excluded.event_count,
                                                 error = excluded.error,
                                                 fetched_at = excluded.fetched_at`,
-      )
-      .run(
-        record.contractId,
-        record.source,
-        record.wasmHash ?? null,
-        JSON.stringify(record.entriesXdr),
-        record.eventCount,
-        record.error ?? null,
-        record.fetchedAt,
-      );
+        )
+        .run(
+          record.contractId,
+          record.source,
+          record.wasmHash ?? null,
+          JSON.stringify(record.entriesXdr),
+          record.eventCount,
+          record.error ?? null,
+          record.fetchedAt,
+        );
+      if (this.#typedFieldIndex) {
+        const decoder = this.#typedDecoder(record);
+        this.#db
+          .prepare(
+            'DELETE FROM typed_event_fields WHERE event_id IN (SELECT id FROM events WHERE contract_id = ?)',
+          )
+          .run(record.contractId);
+        if (decoder) {
+          const rows = this.#db
+            .prepare('SELECT * FROM events WHERE contract_id = ?')
+            .all(record.contractId) as unknown as EventRow[];
+          for (const row of rows) {
+            const event = rowToEvent(row);
+            for (const field of decodeTypedFields(decoder, event)) {
+              this.#prepared().insertTypedField.run(
+                event.id,
+                field.name,
+                field.type,
+                field.textValue,
+                field.numericValue,
+              );
+            }
+          }
+        }
+      }
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   async getContractSpec(contractId: string): Promise<ContractSpecRecord | null> {
@@ -1466,6 +1536,7 @@ interface Statements {
   byId: StatementSync;
   insertAddress: StatementSync;
   insertDeepTopic: StatementSync;
+  insertTypedField: StatementSync;
 }
 
 function buildStatements(db: DatabaseSync): Statements {
@@ -1490,6 +1561,9 @@ function buildStatements(db: DatabaseSync): Statements {
     `),
     insertDeepTopic: db.prepare(
       'INSERT OR IGNORE INTO event_topics (event_id, position, topic, type) VALUES (?, ?, ?, ?)',
+    ),
+    insertTypedField: db.prepare(
+      'INSERT OR IGNORE INTO typed_event_fields (event_id, field_name, field_type, text_value, numeric_value) VALUES (?, ?, ?, ?, ?)',
     ),
   };
 }
@@ -1554,6 +1628,7 @@ const BUCKET_SECONDS: Record<TimeBucket, number> = { minute: 60, hour: 3600, day
 function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
   const conditions: string[] = [];
   const values: SqlParam[] = [];
+  validateTypedFieldQuery(query);
 
   // contractId and contractIds are the same restriction written two ways —
   // honouring both would AND them, which silently means "the overlap only".
@@ -1659,6 +1734,26 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
   }
   if (query.successfulOnly === true) {
     conditions.push('in_successful_call = 1');
+  }
+  if (query.typedField !== undefined) {
+    const parts = ['field_name = ?'];
+    values.push(query.typedField);
+    if (query.typedValue !== undefined) {
+      parts.push('text_value = ?');
+      values.push(query.typedValue);
+    }
+    for (const [operator, value] of [
+      ['>', query.typedGt],
+      ['>=', query.typedGte],
+      ['<', query.typedLt],
+      ['<=', query.typedLte],
+    ] as const) {
+      if (value !== undefined) {
+        parts.push(`numeric_value ${operator} CAST(? AS INTEGER)`);
+        values.push(value);
+      }
+    }
+    conditions.push(`id IN (SELECT event_id FROM typed_event_fields WHERE ${parts.join(' AND ')})`);
   }
 
   // Topic prefix match. `null` is a wildcard for that position; only the first

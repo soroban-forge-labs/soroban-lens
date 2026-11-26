@@ -195,7 +195,7 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
   const metricsPort = parseMetricsPort(process.env.LENS_METRICS_PORT);
   const metrics = new IngestMetrics();
 
-  const store = new SqliteEventStore({ path: config.dbPath });
+  const store = new SqliteEventStore({ path: config.dbPath, typedFieldIndex: config.typedFieldIndex });
   const client = new FailoverRpcClient({
     metrics,
     rpcUrls: config.rpcUrls,
