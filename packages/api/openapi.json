@@ -603,6 +603,15 @@
             "$ref": "#/components/parameters/ToTime"
           },
           {
+            "$ref": "#/components/parameters/EventType"
+          },
+          {
+            "$ref": "#/components/parameters/ContractIdFilter"
+          },
+          {
+            "$ref": "#/components/parameters/ContractIds"
+          },
+          {
             "$ref": "#/components/parameters/TxHash"
           },
           {
@@ -1286,10 +1295,10 @@
             "name": "address",
             "in": "path",
             "required": true,
-            "description": "Account (G...) or contract (C...) StrKey.",
+            "description": "Account (G...), muxed account (M...), or contract (C...) StrKey.",
             "schema": {
               "type": "string",
-              "pattern": "^[GC][A-Z2-7]{55}$"
+              "pattern": "^(?:[GC][A-Z2-7]{55}|M[A-Z2-7]{68})$"
             }
           }
         ],
@@ -1556,10 +1565,11 @@
       "Address": {
         "name": "address",
         "in": "query",
-        "description": "Match any event mentioning this address anywhere \u2014 a topic segment (indexed or beyond the 4-segment ceiling) or nested inside the decoded value. A StrKey: 'G' (account) or 'C' (contract) followed by 55 characters.",
+        "description": "Match any event mentioning this address anywhere \u2014 a topic segment (indexed or beyond the 4-segment ceiling) or nested inside the decoded value. Accepts G/C StrKeys with 55 characters or an M muxed-account StrKey with 68 characters.",
         "required": false,
         "schema": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^(?:[GC][A-Z2-7]{55}|M[A-Z2-7]{68})$"
         },
         "example": "GBIBH5UV4Q5L7VVJIHWYBTCSUDHJQXQC2V6Y5LOW4D26XNU5NREMIKE4"
       },
@@ -1686,6 +1696,35 @@
         "schema": {
           "type": "string",
           "pattern": "^C[A-Z2-7]{55}$"
+        }
+      },
+      "ContractIds": {
+        "name": "contractIds",
+        "in": "query",
+        "description": "Comma-separated contract ids to match, at most 100 (the store's `MAX_CONTRACT_IDS`). Mutually exclusive with `contractId`.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+      },
+      "EventType": {
+        "name": "type",
+        "in": "query",
+        "description": "Only events of this type.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "contract",
+            "system"
+          ]
+        }
+      },
+      "ContractIdFilter": {
+        "name": "contractId",
+        "in": "query",
+        "description": "Only events from this contract. Mutually exclusive with `contractIds`.",
+        "schema": {
+          "$ref": "#/components/schemas/ContractIdString"
         }
       }
     },
@@ -2181,6 +2220,10 @@
           "lastSeenAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "label": {
+            "type": "string",
+            "description": "Operator-assigned name from the `LENS_CONTRACT_LABELS` file. Absent when the contract has no label."
           }
         }
       },
@@ -2425,7 +2468,7 @@
           },
           "address": {
             "type": "string",
-            "pattern": "^[GC][A-Z2-7]{55}$"
+            "pattern": "^(?:[GC][A-Z2-7]{55}|M[A-Z2-7]{68})$"
           }
         }
       },

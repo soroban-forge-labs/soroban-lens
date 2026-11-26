@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
+    "dev": "bash scripts/dev.sh",
     "test": "npm run test --workspaces --if-present",
     "test:integration": "npm run test:integration --workspace @soroban-lens/cli",
     "bench": "npm run build -w @soroban-lens/store -w @soroban-lens/api && node bench/run.js",
@@ -31,17 +32,11 @@
     "index": "node packages/cli/dist/bin.js index",
     "api": "node packages/api/dist/bin.js",
     "web": "npm run dev --workspace @soroban-lens/web",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix",
-    "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "changeset publish"
   },
   "devDependencies": {
-    "@eslint/js": "^9.17.0",
-    "eslint": "^9.17.0",
-    "globals": "^15.14.0",
-    "prettier": "^3.4.2",
-    "typescript": "^5.7.2",
-    "typescript-eslint": "^8.18.1"
+    "@changesets/cli": "^2.27.9"
   }
 }

@@ -225,7 +225,7 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       ...(config.startLedger !== undefined ? { startLedger: config.startLedger } : {}),
       ...(config.endLedger !== undefined ? { endLedger: config.endLedger } : {}),
       ...(config.topics && config.topics.length > 0 ? { topics: config.topics } : {}),
-      ...(config.eventTypes && config.eventTypes.length > 0 ? { eventTypes: config.eventTypes } : {}),
+      ...(config.eventType !== undefined ? { eventType: config.eventType } : {}),
     },
     {
       client,
@@ -236,7 +236,7 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       log,
       // Written on every completed poll, even when the page yielded no events,
       // so a quiet contract at the tip does not look unhealthy (#207).
-      onProgress: (progress) => writeHeartbeat(poller.cursorKey, progress.ledger, progress.latestLedger),
+      onPoll: (progress) => writeHeartbeat(progress.cursorKey, progress.ledger, progress.latestLedger),
     },
   );
 

@@ -1,4 +1,4 @@
-import { MAX_QUERY_LIMIT } from '@soroban-lens/store';
+import { MAX_QUERY_LIMIT, MAX_CONTRACT_IDS, parseMuxedAddress } from '@soroban-lens/store';
 import type { EventQuery, TimeBucket } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
 
@@ -6,22 +6,29 @@ import { ApiError } from './errors.js';
 const CONTRACT_ID = /^C[A-Z2-7]{55}$/;
 /** Transaction hashes are 32 bytes, hex encoded. */
 const TX_HASH = /^[0-9a-fA-F]{64}$/;
-// StrKey: 'G' (account) or 'C' (contract) followed by 55 base32 characters.
-// Both are valid ScVal addresses, and #23's index does not distinguish them.
-const ADDRESS = /^[GC][A-Z2-7]{55}$/;
+// StrKey: 'G'/'C' plus 55 characters, or muxed account 'M' plus 68.
+const ADDRESS = /^(?:[GC][A-Z2-7]{55}|M[A-Z2-7]{68})$/;
 /** Where event_addresses records an address: a topic position, or the value. */
 const ADDRESS_POSITION = /^(topic(0|[1-9][0-9]{0,2})|value)$/;
 /** A lower-cased ScVal arm name, as `DecodedValue.type` reports it. */
 const SCVAL_TYPE = /^[a-z][A-Za-z0-9]{0,31}$/;
 
 export function assertAddress(value: string): string {
-  if (!ADDRESS.test(value)) {
+  if (!ADDRESS.test(value) || (value.startsWith('M') && !isValidMuxedAddress(value))) {
     throw ApiError.badRequest(
-      `"${value}" is not an address. Expected a StrKey starting with G or C, 56 characters long.`,
+      `"${value}" is not an address. Expected a G/C StrKey with 56 characters or an M muxed-account StrKey with 69 characters.`,
       'address',
     );
   }
   return value;
+}
+
+function isValidMuxedAddress(value: string): boolean {
+  try {
+    return parseMuxedAddress(value) !== null;
+  } catch {
+    return false;
+  }
 }
 
 export function assertTxHash(value: string): string {
@@ -147,12 +154,7 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
   }
 
   const address = params.get('address') ?? undefined;
-  if (address !== undefined && !ADDRESS.test(address)) {
-    throw ApiError.badRequest(
-      "\"address\" must be a StrKey: 'G' or 'C' followed by 55 characters (A-Z, 2-7).",
-      'address',
-    );
-  }
+  if (address !== undefined) assertAddress(address);
 
   const addressPosition = params.get('addressPosition') ?? undefined;
   if (addressPosition !== undefined) {
@@ -191,6 +193,19 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     );
   }
 
+  const contractIdRaw = params.get('contractId');
+  const contractIdsRaw = params.get('contractIds');
+  if (contractIdRaw && contractIdsRaw) {
+    throw ApiError.badRequest('Use either "contractId" or "contractIds", not both.', 'contractIds');
+  }
+  const contractId = contractIdRaw ? assertContractId(contractIdRaw) : undefined;
+  const contractIds = parseContractIds(contractIdsRaw);
+
+  const type = params.get('type') ?? undefined;
+  if (type !== undefined && type !== 'contract' && type !== 'system') {
+    throw ApiError.badRequest(`"type" must be "contract" or "system", got "${type}".`, 'type');
+  }
+
   const successfulOnly = boolParam(params, 'successfulOnly');
   const topics = parseTopics(params);
   const topicTypes = parseTopicTypes(params);
@@ -205,6 +220,9 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     ...(fromTime !== undefined ? { fromTime } : {}),
     ...(toTime !== undefined ? { toTime } : {}),
     ...(txHash !== undefined ? { txHash } : {}),
+    ...(contractId !== undefined ? { contractId } : {}),
+    ...(contractIds !== undefined ? { contractIds } : {}),
+    ...(type !== undefined ? { type: type as 'contract' | 'system' } : {}),
     ...(address !== undefined ? { address } : {}),
     ...(addressPosition !== undefined ? { addressPosition } : {}),
     ...(search !== undefined && search !== '' ? { search } : {}),
@@ -216,6 +234,28 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     ...(topicTypes ? { topicTypes } : {}),
     ...(indexedAfter !== undefined ? { indexedAfter } : {}),
   };
+}
+
+/** A comma-separated `contractIds` list: validated, de-duplicated and capped at MAX_CONTRACT_IDS. */
+function parseContractIds(raw: string | null): string[] | undefined {
+  if (raw === null || raw === '') return undefined;
+  const ids = [...new Set(raw.split(',').map((id) => id.trim()).filter((id) => id !== ''))];
+  if (ids.length === 0) return undefined;
+  if (ids.length > MAX_CONTRACT_IDS) {
+    throw ApiError.badRequest(
+      `At most ${MAX_CONTRACT_IDS} "contractIds" per request, got ${ids.length}.`,
+      'contractIds',
+    );
+  }
+  for (const id of ids) {
+    if (!CONTRACT_ID.test(id)) {
+      throw ApiError.badRequest(
+        `"${id}" is not a contract id. Expected a StrKey starting with C, 56 characters long.`,
+        'contractIds',
+      );
+    }
+  }
+  return ids;
 }
 
 /** Ceiling on a batch lookup, so one request cannot ask for unbounded work. */

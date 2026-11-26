@@ -7,13 +7,16 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "watch": "tsc -b --watch",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --force",
     "check:bundle-size": "node scripts/check-bundle-size.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "test": "npm run build && tsc -p tsconfig.test.json && node --test test/api.test.js test/format.test.js test/i18n.test.js test/route.test.js test/emptyState.test.js && vitest run",
     "test:components": "vitest run",
-    "test:a11y": "node test/accessibility.test.js"
+    "test:a11y": "node test/accessibility.test.js",
+    "test:coverage": "npm run build && tsc -p tsconfig.test.json && node --test --experimental-test-coverage test/api.test.js test/format.test.js test/i18n.test.js test/route.test.js test/emptyState.test.js && vitest run --coverage",
+    "test:e2e": "npx playwright test test/e2e/ --reporter=dot"
   },
   "dependencies": {
     "react": "^19.3.1",
@@ -26,6 +29,7 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^6.3.0",
+    "@vitest/coverage-v8": "^5.1.1",
     "jsdom": "^31.0.1",
     "playwright": "^1.65.1",
     "typescript": "^7.0.2",

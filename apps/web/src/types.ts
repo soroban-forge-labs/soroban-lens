@@ -72,6 +72,8 @@ export interface ContractSummary {
   firstLedger: number;
   lastLedger: number;
   lastSeenAt: string;
+  /** Human-readable label assigned to the contract, when the API returns one (Module 3). */
+  label?: string;
 }
 
 export interface ActivityBucket {
@@ -116,4 +118,22 @@ export interface TopicCount {
 
 export interface ApiErrorBody {
   error: { code: string; message: string; parameter?: string };
+}
+
+export interface SpecEventField {
+  name: string;
+  type: string;
+  location: 'topic' | 'data';
+}
+
+export interface SpecEvent {
+  name: string;
+  fields: SpecEventField[];
+}
+
+/** `GET /contracts/{id}/spec` — declared events and their field types. */
+export interface ContractSpec {
+  contractId: string;
+  source: 'wasm' | 'stellar-asset';
+  events: SpecEvent[];
 }

@@ -1,4 +1,10 @@
-import { xdr, scValToNative, Address } from '@stellar/stellar-sdk';
+import {
+  xdr,
+  scValToNative,
+  Address,
+  decodeAddressToMuxedAccount,
+  extractBaseAddress,
+} from '@stellar/stellar-sdk';
 import type { DecodedValue, JsonValue, LensEvent, RawEventInput } from './types.js';
 
 /**
@@ -232,6 +238,34 @@ export function extractAddresses(base64: string): string[] {
     // properly; here it is simply nothing to extract.
   }
   return [...found];
+}
+
+export function parseMuxedAddress(address: string): { baseAddress: string; muxedId: string } | null {
+  if (!address.startsWith('M')) return null;
+  const muxed = decodeAddressToMuxedAccount(address);
+  if (muxed.type !== 'keyTypeMuxedEd25519') throw new Error(`invalid muxed account address "${address}"`);
+  return { baseAddress: extractBaseAddress(address), muxedId: muxed.med25519.id.toString() };
+}
+
+export function transferToMuxedId(event: LensEvent): string | null {
+  if (
+    event.topics[0]?.type !== 'symbol' ||
+    event.topics[0].value !== 'transfer' ||
+    event.topics[2]?.type !== 'address' ||
+    event.value.type !== 'map'
+  ) {
+    return null;
+  }
+  const value = xdr.ScVal.fromXDR(event.valueXdr, 'base64');
+  if (scValTypeName(value) !== 'map') return null;
+  const entries = (value as xdr.ScValMap).value ?? [];
+  for (const entry of entries) {
+    if (scValTypeName(entry.key) !== 'symbol' || scValToNative(entry.key) !== 'to_muxed_id') continue;
+    if (scValTypeName(entry.val) !== 'u64') return null;
+    const id = scValToNative(entry.val);
+    return typeof id === 'bigint' ? id.toString() : null;
+  }
+  return null;
 }
 
 function walkForAddresses(scv: unknown, out: Set<string>): void {

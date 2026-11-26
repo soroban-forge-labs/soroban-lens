@@ -1,6 +1,7 @@
 /** Module 3 — Query API. */
 export { createApiServer, shutdownApiServer } from './server.js';
-export type { ApiServerOptions, ShutdownOptions } from './server.js';
+export type { ApiServerOptions, ShutdownOptions, ServerTimeouts } from './server.js';
+export { loadContractLabels } from './labels.js';
 export { ApiError } from './errors.js';
 export { ApiMetrics, startApiMetricsServer, parseMetricsPort, routeLabel } from './metrics.js';
 export { TokenBucketLimiter } from './rate-limit.js';
@@ -23,3 +24,4 @@ export { executeGraphQL, parseDocument, GraphQLRequestError } from './graphql.js
 export type { GraphQLOptions, GraphQLRequest, GraphQLResponse, GraphQLResult, GraphQLErrorCode } from './graphql.js';
 export { WebhookManager, verifyWebhookSignature, isPrivateAddress, parseWebhookUrl } from './webhooks.js';
 export type { WebhookOptions, WebhookFilter, WebhookSubscription, RegisteredWebhook, DeadLetter } from './webhooks.js';
+console.log('test change');

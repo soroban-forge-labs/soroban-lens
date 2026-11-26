@@ -35,7 +35,7 @@ interface EventStore {
   getEvent(id: string): Promise<LensEvent | null>;
   queryEvents(query: EventQuery): Promise<EventPage>;
   listContracts(limit?: number): Promise<ContractSummary[]>;
-  listTopics(contractId: string, limit?: number): Promise<{ topic: string; count: number }[]>;
+  listTopics(contractId: string, options?: number | { position?: number; limit?: number }): Promise<{ topic: string; count: number }[]>;
   getStats(): Promise<StoreStats>;
   saveStreamState(state: StreamState): Promise<void>;
   loadStreamState(key: string): Promise<StreamState | null>;
