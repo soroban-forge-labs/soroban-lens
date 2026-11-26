@@ -83,6 +83,20 @@ export function Filters({
       </div>
 
       <div className="field">
+        <label htmlFor="topicPosition">Topic position</label>
+        <select
+          id="topicPosition"
+          value={value.topicPosition}
+          onChange={(e) => set('topicPosition', Number(e.target.value))}
+        >
+          <option value={0}>topic[0] (event name)</option>
+          <option value={1}>topic[1]</option>
+          <option value={2}>topic[2]</option>
+          <option value={3}>topic[3]</option>
+        </select>
+      </div>
+
+      <div className="field">
         <label htmlFor="topic">{t('topicLabel')}</label>
         <input
           id="topic"

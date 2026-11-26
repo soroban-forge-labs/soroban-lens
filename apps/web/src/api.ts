@@ -212,6 +212,8 @@ export const api = {
     );
   },
 
-  topics: (baseUrl: string, contractId: string, signal?: AbortSignal): Promise<{ topics: TopicCount[] }> =>
-    request<{ topics: TopicCount[] }>(baseUrl, `/contracts/${encodeURIComponent(contractId)}/topics`, signal),
+  topics: (baseUrl: string, contractId: string, signal?: AbortSignal, position?: number): Promise<{ topics: TopicCount[] }> => {
+    const qs = position ? `?position=${position}` : '';
+    return request<{ topics: TopicCount[] }>(baseUrl, `/contracts/${encodeURIComponent(contractId)}/topics${qs}`, signal);
+  },
 };

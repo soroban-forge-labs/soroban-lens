@@ -49,7 +49,7 @@ function AppInner(): React.JSX.Element {
   // the exact view. localStorage is the fallback for a bare visit only.
   const [urlState, setUrlState] = useUrlState(
     {
-      filters: { contractId: '', topic: '', successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
+      filters: { contractId: '', topic: '', topicPosition: 0, successfulOnly: false, live: true, fromLedger: '', toLedger: '' },
       network: networks[0]!.label,
       expandedEventId: null,
     },
@@ -460,11 +460,11 @@ function AppInner(): React.JSX.Element {
     }
     const controller = new AbortController();
     api
-      .topics(selected.baseUrl, debouncedContractId, controller.signal)
+      .topics(selected.baseUrl, debouncedContractId, controller.signal, filters.topicPosition || undefined)
       .then((r) => setTopics(r.topics))
       .catch(() => setTopics([]));
     return () => controller.abort();
-  }, [selected.baseUrl, debouncedContractId, contractIdValid]);
+  }, [selected.baseUrl, debouncedContractId, contractIdValid, filters.topicPosition]);
 
   const showContract = !filters.contractId;
   const changeFilters = (next: FilterState): void => {
