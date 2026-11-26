@@ -513,3 +513,26 @@ export function redactHeaders(headers: Record<string, string>): string {
   const names = Object.keys(headers);
   return names.length === 0 ? 'none' : names.map((n) => `${n}: <redacted>`).join(', ');
 }
+/**
+ * Render a resolved config as `name = value (source)` lines for `lens config`
+ * (#213). RPC header values are always redacted.
+ */
+export function describeConfig(config: LensConfig): { text: string } {
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(config)) {
+    if (key === 'sources') continue;
+    const source = config.sources[key] ?? 'default';
+    let rendered: string;
+    if (key === 'rpcHeaders') {
+      rendered = redactHeaders(value as Record<string, string>);
+    } else if (Array.isArray(value)) {
+      rendered = value.length === 0 ? '[]' : value.join(', ');
+    } else if (value !== null && typeof value === 'object') {
+      rendered = JSON.stringify(value);
+    } else {
+      rendered = String(value);
+    }
+    lines.push(`${key} = ${rendered} (${source})`);
+  }
+  return { text: lines.join('\n') };
+}

@@ -12,7 +12,7 @@ import { parseArgs } from 'node:util';
 import { access, readFile } from 'node:fs/promises';
 import { SqliteEventStore } from '@soroban-lens/store';
 import type { ContractSpecRecord, EventQuery, RawEventInput } from '@soroban-lens/store';
-import { resolveConfig } from './config.js';
+import { resolveConfig, describeConfig } from './config.js';
 import { formatReport, runDoctor } from './doctor.js';
 import { applyFixes, formatFixes } from './fix.js';
 import { buildTailQuery, followEvents, formatEvent, formatEventJson, TailUsageError, wantsColor } from './tail.js';
@@ -51,6 +51,8 @@ Usage:
   lens spec fetch -c <id>            Look a contract's spec up on-chain now (refreshes it).
   lens spec refresh [--only-missing] Re-fetch every stored contract's spec (or only the missing ones).
   lens spec import -c <id> <wasm>    Use a local Wasm build's spec for a contract.
+  lens config [options]              Print each resolved setting, its value and where it came from
+                                     (flag, env or default).
   lens completion [bash|zsh|fish]    Generate shell auto-completion script.
 
 
@@ -695,6 +697,11 @@ async function main(argv: string[]): Promise<number> {
       }
     }
 
+    case 'config': {
+      process.stdout.write(`${describeConfig(config).text}\n`);
+      return 0;
+    }
+
     case 'completion': {
       const shell = positionals[0] || 'bash';
       process.stdout.write(`${generateCompletion(shell)}\n`);
@@ -714,7 +721,7 @@ function generateCompletion(shell: string): string {
   local cur prev commands options
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="doctor index seed stats tail prune redecode verify migrate export import backup restore spec completion"
+  commands="doctor index seed stats tail prune redecode verify migrate export import backup restore spec completion config"
   options="-c --contract -n --network -r --rpc-url -d --db --data-dir --start-ledger --page-size --page-size-min --page-size-max --reorg-depth --poll-interval --once --max-events --fixture --before-ledger --force --fix --topic --address --tx-hash --search --successful-only --from-ledger --to-ledger --from-time --to-time --json --only-missing --concurrency -h --help"
 
   if [ $COMP_CWORD -eq 1 ]; then
@@ -756,6 +763,7 @@ _lens() {
     'export:Write an NDJSON snapshot'
     'import:Load an NDJSON snapshot'
     'spec:Contract specs for typed decoding (list|fetch|refresh|import)'
+    'config:Print the resolved configuration'
     'completion:Generate shell autocompletions'
   )
   _arguments '1: :->command' '*: :->args'
@@ -779,6 +787,7 @@ complete -c lens -n "__fish_use_subcommand" -a migrate -d "Roll migrations forwa
 complete -c lens -n "__fish_use_subcommand" -a export -d "Write an NDJSON snapshot"
 complete -c lens -n "__fish_use_subcommand" -a import -d "Load an NDJSON snapshot"
 complete -c lens -n "__fish_use_subcommand" -a spec -d "Contract specs for typed decoding"
+complete -c lens -n "__fish_use_subcommand" -a config -d "Print the resolved configuration"
 complete -c lens -n "__fish_use_subcommand" -a completion -d "Generate shell completions"
 complete -c lens -l only-missing -d "spec refresh: skip contracts that already have a spec"
 complete -c lens -l concurrency -x -d "spec refresh: concurrent lookups"

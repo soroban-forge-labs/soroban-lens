@@ -26,7 +26,20 @@ two are independent and share no code.
 
 ## Quickstart (5 minutes)
 
+### Dev container / Codespaces
+
+The fastest path with no local setup: open the repo in a
+[GitHub Codespace](https://codespaces.new/soroban-forge-labs/soroban-lens) or,
+in VS Code, run **Dev Containers: Reopen in Container**. The
+[`.devcontainer/devcontainer.json`](./.devcontainer/devcontainer.json) config
+installs the same Node version CI uses, then runs
+`npm ci && npm run build && npm run seed` after creation, so every workspace is
+built and the committed testnet fixture is loaded automatically. The API
+(`8080`) and web (`5173`) ports are forwarded, so the explorer UI is reachable
+with no manual steps.
+
 ### With Docker
+=======
 
 ```bash
 git clone https://github.com/soroban-forge-labs/soroban-lens

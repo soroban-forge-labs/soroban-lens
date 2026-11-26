@@ -12,6 +12,7 @@ import {
   formatReport,
   redactHeaders,
   StoreBackedCursors,
+  describeConfig,
 } from '../dist/index.js';
 
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
@@ -256,6 +257,43 @@ test('doctor reports header names without their values', async () => {
   assert.ok(!text.includes(secret), 'doctor leaked a header value into its report');
   assert.match(text, /RPC headers/);
   assert.match(text, /Authorization: <redacted>/);
+});
+
+// ── #213 lens config ──────────────────────────────────────────────────────────
+
+test('describeConfig reports where each setting came from', () => {
+  const config = resolveConfig(
+    { network: 'testnet', db: '/flag.db' },
+    { LENS_API_PORT: '9000', LENS_PAGE_SIZE: '500' },
+  );
+  const { text } = describeConfig(config, { network: 'testnet', db: '/flag.db' }, {
+    LENS_API_PORT: '9000',
+    LENS_PAGE_SIZE: '500',
+  });
+
+  const sourceOf = (name) => {
+    const line = text.split('\n').find((l) => l.trim().startsWith(`${name} `) || l.trim().startsWith(`${name}:`));
+    assert.ok(line, `describeConfig output is missing ${name}`);
+    return line;
+  };
+
+  assert.match(sourceOf('network'), /flag/);
+  assert.match(sourceOf('dbPath'), /flag/);
+  assert.match(sourceOf('apiPort'), /env/);
+  assert.match(sourceOf('pageSize'), /env/);
+  assert.match(sourceOf('pollIntervalMs'), /default/);
+  assert.match(sourceOf('maxPollIntervalMs'), /default/);
+});
+
+test('describeConfig never prints an RPC header value', () => {
+  const secret = 'Bearer sk-live-do-not-log-me';
+  const config = resolveConfig({ rpcHeaders: [`Authorization: ${secret}`] }, {});
+  const { text } = describeConfig(config, { rpcHeaders: [`Authorization: ${secret}`] }, {});
+
+  assert.ok(!text.includes(secret), 'describeConfig leaked a header value');
+  assert.ok(!text.includes('sk-live'), 'describeConfig leaked part of a header value');
+  assert.match(text, /Authorization/);
+  assert.match(text, /<redacted>/);
 });
 
 // ── #21 lens prune ────────────────────────────────────────────────────────────

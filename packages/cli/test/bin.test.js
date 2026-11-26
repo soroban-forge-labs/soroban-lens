@@ -163,3 +163,28 @@ test('the destination path can come before or after --db — positionals are not
 
   await rm(dir, { recursive: true, force: true });
 });
+
+// ── #87 lens config ──────────────────────────────────────────────────────────
+
+test('lens config reports each setting with the source it came from', async () => {
+  const secret = 'super-secret-header-value-1234';
+  const { code, stdout, stderr } = await cli(['config', '--db', '/tmp/x.db'], {
+    env: {
+      ...process.env,
+      LENS_NETWORK: 'futurenet',
+      LENS_RPC_HEADERS: `Authorization=Bearer ${secret}`,
+    },
+  });
+  assert.equal(code, 0, stderr);
+
+  // --db came from a flag, LENS_NETWORK from the environment.
+  assert.match(stdout, /\/tmp\/x\.db/);
+  assert.match(stdout, /futurenet/);
+  assert.match(stdout, /flag/i);
+  assert.match(stdout, /env/i);
+  assert.match(stdout, /default/i);
+
+  // Header values are redacted, like everywhere else.
+  assert.ok(!stdout.includes(secret), 'secret header value leaked to stdout');
+  assert.ok(!stderr.includes(secret), 'secret header value leaked to stderr');
+});
