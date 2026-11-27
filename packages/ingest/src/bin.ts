@@ -14,13 +14,12 @@ import type { EventType } from './types.js';
 import { IngestMetrics } from './metrics.js';
 import { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';
 import { loadContractIdsFromFile, ContractFileParseError } from './contract-id.js';
-import { parseTopicFilters } from './topics.js';
-
-const EVENT_TYPES: EventType[] = ['contract', 'system'];
-
-function isEventType(value: string): value is EventType {
-  return (EVENT_TYPES as string[]).includes(value);
-}
+import {
+  parseTopicFilters,
+  parseEventType,
+  parseEndLedger,
+  validateEndLedgerRange,
+} from './topics.js';
 
 /** Parse repeated `--rpc-header 'Name: value'` flags and LENS_RPC_HEADERS. */
 function parseHeaders(flags: string[] | undefined, env: string | undefined): Record<string, string> {
@@ -168,7 +167,7 @@ async function main(argv: string[]): Promise<number> {
   let maxEvents: number | undefined;
   try {
     startLedger = parseNumericFlag('--start-ledger', values['start-ledger'], 1);
-    endLedger = parseNumericFlag('--end-ledger', values['end-ledger'], 1);
+    endLedger = parseEndLedger(values['end-ledger']);
     pageSize = parseNumericFlag('--page-size', values['page-size'], 1, 10_000);
     pollInterval = parseNumericFlag('--poll-interval', values['poll-interval'], 0);
     maxPollInterval = parseNumericFlag(
@@ -225,21 +224,10 @@ async function main(argv: string[]): Promise<number> {
     values['rpc-url'] ?? process.env.LENS_RPC_URL,
   );
 
-  let eventType: EventType = 'contract';
-  if (values.type !== undefined) {
-    if (!isEventType(values.type)) {
-      // Not echoed: the rejected value may itself be the thing under test
-      // (#144 removed `diagnostic`, and the flag must not name it back).
-      process.stderr.write(
-        'error: --type must be contract or system\n',
-      );
-      return 2;
-    }
-    eventType = values.type;
-  }
-
+  let eventType: EventType;
   let topics: string[][] | undefined;
   try {
+    eventType = parseEventType(values.type);
     topics = parseTopicFilters(values.topic, values.topics);
   } catch (error) {
     process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -254,20 +242,10 @@ async function main(argv: string[]): Promise<number> {
     return 2;
   }
 
-  if (endLedger !== undefined && startLedger !== undefined && endLedger < startLedger) {
-    process.stderr.write(
-      `error: --end-ledger (${endLedger}) is before --start-ledger (${startLedger})\n`,
-    );
-    return 2;
-  }
-  // A stored cursor and a bounded range are contradictory instructions: the
-  // cursor says "carry on from where you were", the range says "read exactly
-  // this window". Rather than silently picking one, say so.
-  if (endLedger !== undefined && !values['no-resume']) {
-    process.stderr.write(
-      'error: --end-ledger indexes a fixed range and cannot resume from a stored cursor.\n' +
-        '       Add --no-resume to read the range, or drop --end-ledger to follow the tip.\n',
-    );
+  try {
+    validateEndLedgerRange(endLedger, startLedger, values['no-resume'] === true);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
 

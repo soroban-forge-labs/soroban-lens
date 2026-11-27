@@ -46,8 +46,21 @@ import { TokenBucketLimiter, clientKey, type RateLimitOptions } from './rate-lim
 import { EventStreamHub, type EventStreamOptions } from './stream.js';
 import { routeLabel, UNMATCHED_ROUTE, type ApiMetrics } from './metrics.js';
 
+export interface ServerTimeouts {
+  /** Max time to receive the complete request headers. */
+  headersTimeoutMs?: number;
+  /** Max time to receive the entire request. */
+  requestTimeoutMs?: number;
+  /** Idle time before a keep-alive connection is closed. Keep it above a proxy's idle timeout. */
+  keepAliveTimeoutMs?: number;
+}
+
 export interface ApiServerOptions {
   store: EventStore;
+  /** Contract id to label, shown on /contracts and /contracts/{id}/stats. */
+  contractLabels?: Record<string, string>;
+  /** Explicit HTTP timeouts; unset values keep Node's defaults. */
+  timeouts?: ServerTimeouts;
   /** Allowed CORS origin(s), comma-separated. Defaults to "*" — the API is read-only and unauthenticated. */
   corsOrigin?: string;
   /** Build/version string reported by /health. */
@@ -397,7 +410,7 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/contracts$/,
-    handler: async ({ store, query }) => {
+    handler: async ({ store, query, options }) => {
       const limit = parseLimit(query);
       const cursor = query.get('cursor') || undefined;
       if (cursor) {
@@ -408,7 +421,7 @@ const routes: Route[] = [
         }
       }
       const page = await store.listContractsPage(limit, cursor);
-      return { body: { contracts: page.contracts, nextCursor: page.nextCursor } };
+      return { body: { contracts: page.contracts.map((c) => withLabel(c, options.contractLabels)), nextCursor: page.nextCursor } };
     },
   },
   {
@@ -537,7 +550,7 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/contracts\/([^/]+)\/stats$/,
-    handler: async ({ params, store }) => {
+    handler: async ({ params, store, options }) => {
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
       // listContracts already computes exactly this summary per contract; the
       // route exists so a caller does not have to fetch them all and filter.
@@ -551,7 +564,7 @@ const routes: Route[] = [
             'check LENS_CONTRACT_IDS.',
         );
       }
-      return { body: summary };
+      return { body: withLabel(summary, options.contractLabels) };
     },
   },
   {
@@ -788,6 +801,11 @@ const routes: Route[] = [
   },
 ];
 
+function withLabel<T extends { contractId: string }>(summary: T, labels: Record<string, string> | undefined): T & { label?: string } {
+  const label = labels && Object.hasOwn(labels, summary.contractId) ? labels[summary.contractId] : undefined;
+  return label !== undefined ? { ...summary, label } : summary;
+}
+
 /** 404 rather than 403 while disabled: the endpoint simply does not exist. */
 function requireGraphQL(options: ApiServerOptions): void {
   if (!options.graphql?.enabled) {
@@ -806,6 +824,24 @@ function requireWebhooks(
   webhooks.authorize(Array.isArray(auth) ? auth[0] : auth);
   return webhooks;
 }
+
+/**
+ * Exactly what the /docs page loads: Redoc from jsDelivr, its injected styles
+ * and Google-hosted fonts, a blob: web worker, data: images, and the spec from
+ * the same origin.
+ */
+const DOCS_CSP = [
+  "default-src 'none'",
+  "script-src https://cdn.jsdelivr.net 'unsafe-eval'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  'font-src https://fonts.gstatic.com',
+  'img-src data: https:',
+  "connect-src 'self'",
+  'worker-src blob:',
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join('; ');
 
 /**
  * Redoc, pinned to an exact version from a CDN — not `@latest`, so an
@@ -973,6 +1009,10 @@ export function createApiServer(options: ApiServerOptions): Server {
   const server = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
     void handle(req, res);
   });
+  const { headersTimeoutMs, requestTimeoutMs, keepAliveTimeoutMs } = options.timeouts ?? {};
+  if (headersTimeoutMs !== undefined) server.headersTimeout = headersTimeoutMs;
+  if (requestTimeoutMs !== undefined) server.requestTimeout = requestTimeoutMs;
+  if (keepAliveTimeoutMs !== undefined) server.keepAliveTimeout = keepAliveTimeoutMs;
   if (webhooks) {
     webhooks.start();
     // The dispatcher's timer is unref'd, but stopping it explicitly also ends
@@ -1022,6 +1062,9 @@ export function createApiServer(options: ApiServerOptions): Server {
     const requestId =
       (Array.isArray(inbound) ? inbound[0] : inbound)?.trim().slice(0, 200) || randomUUID();
     res.setHeader('X-Request-Id', requestId);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    if (url.pathname === '/docs') res.setHeader('Content-Security-Policy', DOCS_CSP);
 
     if (corsAny) {
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1036,7 +1079,7 @@ export function createApiServer(options: ApiServerOptions): Server {
       'Content-Type, Authorization, X-API-Key, If-None-Match, Last-Event-ID',
     );
     // Without this a browser hides ETag and Retry-After from cross-origin scripts.
-    res.setHeader('Access-Control-Expose-Headers', 'ETag, Retry-After, X-Request-Id');
+    res.setHeader('Access-Control-Expose-Headers', 'ETag, Retry-After, X-Request-Id, Deprecation');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204).end();
@@ -1052,7 +1095,9 @@ export function createApiServer(options: ApiServerOptions): Server {
     const method = isHead ? 'GET' : req.method;
 
     try {
-      const path = url.pathname.replace(/\/+$/, '') || '/';
+      const rawPath = url.pathname.replace(/\/+$/, '') || '/';
+      const versioned = rawPath.startsWith('/v1/') || rawPath === '/v1';
+      const path = versioned ? rawPath.slice(3) || '/' : rawPath;
       const candidates = routes.filter((r) => r.pattern.test(path));
       // Labelled from the pattern, a fixed string, before auth and the rate
       // limit, so a 401 or 429 on a real route lands on that route's series;

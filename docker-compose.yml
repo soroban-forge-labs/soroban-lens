@@ -51,6 +51,9 @@ services:
       - lens-data:/app/data
     command: ["node", "packages/cli/dist/bin.js", "index"]
     healthcheck:
+      # /readyz is only healthy once the indexer has completed a poll. A missing
+      # heartbeat (stuck before the first batch: bad RPC, wrong contract, empty
+      # range) is therefore unhealthy once start_period has passed.
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9090/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
@@ -157,6 +160,8 @@ services:
       - lens-data-mainnet:/app/data
     command: ["node", "packages/cli/dist/bin.js", "index"]
     healthcheck:
+      # Same as indexer: /readyz fails until a poll has completed, so an
+      # indexer stuck before its first batch turns unhealthy after start_period.
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9090/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s

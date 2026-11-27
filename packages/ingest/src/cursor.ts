@@ -69,7 +69,7 @@ export class FileCursorStore implements CursorStore {
     }
 
     await Promise.all(files.map(async (file) => {
-      const match = /^.+\.cursor\.json\.(\d+)\.tmp$/.exec(file);
+      const match = TEMP_FILE_PATTERN.exec(file);
       if (!match) return;
       const pid = Number(match[1]);
       if (Number.isSafeInteger(pid) && pid > 0 && isProcessAlive(pid)) return;
@@ -111,7 +111,7 @@ export class FileCursorStore implements CursorStore {
     await mkdir(dirname(path), { recursive: true });
     const tmp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-    await rename(tmp, path);
+    await renameOverwrite(tmp, path);
   }
 
   async clear(key: string): Promise<void> {
@@ -135,6 +135,36 @@ export class FileCursorStore implements CursorStore {
 export function chunkCursorKey(baseKey: string, chunkIndex: number, totalChunks: number): string {
   if (totalChunks <= 1) return baseKey;
   return `${baseKey}#chunk-${chunkIndex}-of-${totalChunks}`;
+}
+
+/**
+ * Matches the temp files written by `save()`. The pid is the first numeric
+ * segment after `.cursor.json.`; the rest of the name is opaque. Anchored on
+ * the basename only, so it behaves the same on POSIX and Windows paths.
+ */
+const TEMP_FILE_PATTERN = /^.+\.cursor\.json\.(\d+)(?:\..+)?\.tmp$/;
+
+/**
+ * `rename` replaces an existing destination atomically on POSIX but fails with
+ * `EPERM`/`EEXIST`/`EACCES` on Windows when the target exists. Fall back to
+ * removing the destination first; the temp file still holds the complete new
+ * contents, so a crash between the unlink and the rename leaves either the old
+ * file or no file — never a truncated one — and the next save rewrites it.
+ */
+async function renameOverwrite(from: string, to: string): Promise<void> {
+  try {
+    await rename(from, to);
+    return;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EPERM' && code !== 'EEXIST' && code !== 'EACCES') throw error;
+  }
+  try {
+    await unlink(to);
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
+  await rename(from, to);
 }
 
 function isProcessAlive(pid: number): boolean {

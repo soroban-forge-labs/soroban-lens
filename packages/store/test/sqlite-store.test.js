@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, statSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
+import { xdr, nativeToScVal, Address, encodeMuxedAccount, encodeMuxedAccountToAddress } from '@stellar/stellar-sdk';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -55,6 +56,20 @@ test('migrate() is idempotent', async () => {
   await store.migrate();
   await store.migrate();
   assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
+  await store.close();
+});
+
+test('contract summaries backfill when their migration is applied to an existing event store', async () => {
+  const store = await seeded();
+  const expected = await store.listContracts(MAX_QUERY_LIMIT);
+  const migration = MIGRATIONS.find((item) => item.name === 'contract-summaries');
+  if (!migration) throw new Error('contract-summaries migration is missing');
+  const rolledBack = await store.migrateDown(migration.version - 1);
+  assert.ok(rolledBack.includes(migration.version));
+
+  await store.migrate();
+  assert.deepEqual(await store.listContracts(MAX_QUERY_LIMIT), expected);
+  assert.deepEqual(await store.checkIntegrity(), []);
   await store.close();
 });
 
@@ -235,6 +250,45 @@ test('listContracts summarises each contract, most recent first', async () => {
   await store.close();
 });
 
+test('contract summaries stay consistent through snapshot import, delete, and prune', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-contract-summaries-'));
+  const snapshotPath = join(dir, 'snapshot.ndjson');
+  const source = await seeded();
+  await source.exportSnapshot(snapshotPath);
+  const expected = await source.listContracts(MAX_QUERY_LIMIT);
+
+  const target = new SqliteEventStore({ path: ':memory:' });
+  await target.importSnapshot(snapshotPath);
+  assert.deepEqual(await target.listContracts(MAX_QUERY_LIMIT), expected);
+  assert.deepEqual(await target.checkIntegrity(), []);
+
+  const firstEvent = fixture.events[0];
+  const before = expected.find((summary) => summary.contractId === firstEvent.contractId);
+  await target.deleteEvents([firstEvent.id]);
+  const after = (await target.listContracts(MAX_QUERY_LIMIT)).find(
+    (summary) => summary.contractId === firstEvent.contractId,
+  );
+  assert.equal(after.eventCount, before.eventCount - 1);
+  assert.deepEqual(await target.checkIntegrity(), []);
+
+  const lastLedger = Math.max(...fixture.events.map((event) => event.ledger));
+  await target.pruneBefore(lastLedger + 1);
+  assert.deepEqual(await target.listContracts(MAX_QUERY_LIMIT), []);
+  assert.deepEqual(await target.checkIntegrity(), []);
+
+  const sizeStore = new SqliteEventStore({ path: join(dir, 'size.db') });
+  await sizeStore.insertEvents(fixture.events);
+  const sizePrune = await sizeStore.pruneToSize(0, 1);
+  assert.equal(sizePrune.rowsRemoved, fixture.events.length);
+  assert.deepEqual(await sizeStore.listContracts(MAX_QUERY_LIMIT), []);
+  assert.deepEqual(await sizeStore.checkIntegrity(), []);
+
+  await source.close();
+  await target.close();
+  await sizeStore.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
 test('listTopics ranks a contract distinct topics by frequency', async () => {
   const store = await seeded();
   const topics = await store.listTopics(SAC);
@@ -292,6 +346,107 @@ test('healthCheck does not take the write lock, so the API can serve it on every
   await reader.close();
   await writer.close();
   await rm(dir, { recursive: true, force: true });
+});
+
+test('a readOnly store serves queries from a file a writer is using, and every write throws (#158)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  try {
+    const path = join(dir, 'lens.db');
+    const writer = new SqliteEventStore({ path });
+    await writer.insertEvents(fixture.events);
+    await writer.saveStreamState({
+      key: 'default', cursor: 'c1', ledger: 1,
+      updatedAt: new Date().toISOString(),
+    });
+
+    // The done-when: queries against the file while another connection can
+    // still write it. The writer stays open and commits after the reader
+    // opened — WAL gives the reader the new row.
+    const reader = new SqliteEventStore({ path, readOnly: true });
+    await writer.insertEvents([{ ...fixture.events[0], id: 'after-reader-opened' }]);
+
+    assert.equal((await reader.getStats()).eventCount, fixture.events.length + 1);
+    const decoded = await reader.getEvent('after-reader-opened');
+    assert.equal(decoded.contractId, fixture.events[0].contractId);
+    assert.ok((await reader.queryEvents({ limit: 5 })).events.length > 0);
+    assert.ok((await reader.listContracts()).length > 0);
+    assert.ok((await reader.listTopics(SAC)).length > 0);
+    assert.equal((await reader.loadStreamState('default')).cursor, 'c1');
+    assert.equal((await reader.healthCheck()).ok, true);
+    // The probe must report, not throw: on a read-only handle the answer is no.
+    assert.equal((await reader.writeProbe()).ok, false);
+
+    // Every write method refuses with the policy in the message rather than
+    // surfacing SQLite's error text (#158).
+    const writes = {
+      migrate: () => reader.migrate(),
+      migrateDown: () => reader.migrateDown(0),
+      insertEvents: () => reader.insertEvents(fixture.events),
+      insertDecoded: () => reader.insertDecoded([decoded]),
+      saveContractSpec: () => reader.saveContractSpec({
+        contractId: SAC, source: 'none', entriesXdr: [], eventCount: 0,
+        fetchedAt: new Date().toISOString(),
+      }),
+      saveStreamState: () => reader.saveStreamState({
+        key: 'k', cursor: 'c', ledger: 1, updatedAt: new Date().toISOString(),
+      }),
+      deleteEvents: () => reader.deleteEvents([decoded.id]),
+      pruneBefore: () => reader.pruneBefore(1),
+      pruneToSize: () => reader.pruneToSize(1024),
+      redecode: () => reader.redecode(true),
+      repairRow: () => reader.repairRow(decoded.id),
+      rebuildSearchIndex: () => reader.rebuildSearchIndex(),
+      importSnapshot: () => reader.importSnapshot(join(dir, 'x.ndjson')),
+      checkpoint: () => reader.checkpoint(),
+    };
+    for (const [name, fn] of Object.entries(writes)) {
+      await assert.rejects(fn, /read-only/, `${name} did not refuse on a readOnly store`);
+    }
+    assert.equal(
+      (await reader.getStats()).eventCount,
+      fixture.events.length + 1,
+      'a refused write still landed',
+    );
+
+    await reader.close();
+    await writer.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('migrate() refuses a database written by a newer soroban-lens (#161)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-db-'));
+  try {
+    const path = join(dir, 'lens.db');
+    const store = new SqliteEventStore({ path });
+    await store.close();
+
+    const raw = new DatabaseSync(path);
+    raw
+      .prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
+      .run(999, 'from-a-newer-build', new Date().toISOString());
+    raw.close();
+
+    // migrate() must name both versions and the remedy (#161).
+    const stale = new SqliteEventStore({ path, migrateOnOpen: false });
+    await assert.rejects(
+      () => stale.migrate(),
+      new RegExp(`v999.*v${LATEST_SCHEMA_VERSION}.*upgrade`),
+      'migrate() did not refuse the newer schema',
+    );
+    await stale.close();
+
+    // The normal open path refuses too — that is the "carries on against a
+    // schema it does not understand" case, now failing instead.
+    assert.throws(
+      () => new SqliteEventStore({ path }),
+      /v999.*upgrade/,
+      'opening a newer-schema database did not throw',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('writeProbe reports writability and leaves no trace', async () => {
@@ -882,9 +1037,10 @@ test('a migration can be applied and rolled back', async () => {
   const store = new SqliteEventStore({ path: ':memory:' });
   assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION);
 
-  const rolledBack = await store.migrateDown(LATEST_SCHEMA_VERSION - 1);
+  const previousVersion = MIGRATIONS.filter((migration) => migration.version < LATEST_SCHEMA_VERSION).at(-1)?.version ?? 0;
+  const rolledBack = await store.migrateDown(previousVersion);
   assert.deepEqual(rolledBack, [LATEST_SCHEMA_VERSION]);
-  assert.equal((await store.getStats()).schemaVersion, LATEST_SCHEMA_VERSION - 1);
+  assert.equal((await store.getStats()).schemaVersion, previousVersion);
 
   // And forward again, via the ordinary migrate() path.
   await store.migrate();
@@ -1228,6 +1384,44 @@ test('filtering by address also finds one mentioned only inside the decoded valu
 
   const page = await store.queryEvents({ address: addressInValue, limit: MAX_QUERY_LIMIT });
   assert.ok(page.events.some((e) => e.id === event.id));
+  await store.close();
+});
+
+test('a muxed-account address finds its transfer while the base account still matches (#148)', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  const baseAddress = 'GDVFO2G543H3RYG4H66OX36ESWAP6H5CHP2QN7E3D3CTYJBSNOJB5GSA';
+  const sender = 'GBYRNL77SLMBVGJLFYVWB762E7ZJJVSGEDOU626FPOCGOMPG776JQHHT';
+  const muxedAddress = encodeMuxedAccountToAddress(encodeMuxedAccount(baseAddress, '7'));
+  const data = xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: nativeToScVal('amount', { type: 'symbol' }),
+      val: nativeToScVal(5n, { type: 'i128' }),
+    }),
+    new xdr.ScMapEntry({
+      key: nativeToScVal('to_muxed_id', { type: 'symbol' }),
+      val: nativeToScVal(7n, { type: 'u64' }),
+    }),
+  ]);
+  const symbol = (value) => nativeToScVal(value, { type: 'symbol' }).toXDR('base64');
+  const address = (value) => new Address(value).toScVal().toXDR('base64');
+  const string = (value) => nativeToScVal(value, { type: 'string' }).toXDR('base64');
+  const event = {
+    ...fixture.events[0],
+    id: 'muxed-account-transfer-test-event',
+    topic: [symbol('transfer'), address(sender), address(baseAddress), string('native')],
+    value: data.toXDR('base64'),
+  };
+  await store.insertEvents([event]);
+
+  const muxed = await store.queryEvents({ address: muxedAddress });
+  assert.deepEqual(muxed.events.map((result) => result.id), [event.id]);
+  assert.ok((await store.queryEvents({ address: baseAddress })).events.some((result) => result.id === event.id));
+  assert.equal((await store.queryEvents({ address: encodeMuxedAccountToAddress(encodeMuxedAccount(baseAddress, '8')) })).total, 0);
+  assert.equal((await store.summarizeAddress(muxedAddress))[0].eventCount, 1);
+
+  await store.migrateDown(LATEST_SCHEMA_VERSION - 1);
+  await store.migrate();
+  assert.deepEqual((await store.queryEvents({ address: muxedAddress })).events.map((result) => result.id), [event.id]);
   await store.close();
 });
 

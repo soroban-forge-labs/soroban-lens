@@ -9,6 +9,7 @@ import type {
   EventPage,
   EventQuery,
   LensEvent,
+  ListTopicsOptions,
   RawEventInput,
   StoreStats,
   StreamState,
@@ -55,9 +56,11 @@ export interface EventStore {
    * `destPath` — a format that outlives this backend, unlike a raw copy of
    * the database file. Consistent even while the indexer is writing:
    * internally takes a point-in-time snapshot before reading from it.
+   * With `filter` (#155), only events matching it are written — the same
+   * `EventQuery` semantics as queryEvents.
    * @returns how many events were written.
    */
-  exportSnapshot(destPath: string): Promise<number>;
+  exportSnapshot(destPath: string, filter?: EventQuery): Promise<number>;
 
   /**
    * Read an NDJSON snapshot written by exportSnapshot() (or `lens seed`'s
@@ -111,15 +114,14 @@ export interface EventStore {
   summarizeAddress(address: string): Promise<AddressContractSummary[]>;
 
   /**
-   * Distinct topic values at one position for a contract, most frequent first,
-   * for building filter UIs.
-   *
-   * Defaults to position 0, which for a SAC is just `transfer`/`mint`/`burn`.
-   * The interesting question is usually a position further in: on a SAC
-   * transfer, `position: 1` is the senders and `position: 2` the receivers
-   * (#153).
+   * Distinct values at one topic position for a contract, for building
+   * filter UIs. A bare number keeps its old meaning (`limit`); an options
+   * object may also name the `position` (0–3, default 0) to count (#153).
    */
-  listTopics(contractId: string, options?: ListTopicsOptions): Promise<{ topic: string; count: number }[]>;
+  listTopics(
+    contractId: string,
+    options?: number | ListTopicsOptions,
+  ): Promise<{ topic: string; count: number }[]>;
 
   /**
    * Distinct first-topic values across every indexed contract, most frequent
@@ -247,17 +249,19 @@ export interface EventStore {
   redecode(all?: boolean): Promise<number>;
 
   /**
-   * Check stored invariants: `topics_json` parses and its length matches
-   * `topic_count`; `topic0..3` match a fresh projection of the parsed
-   * topics; `value_json` and `topics_xdr_json` parse at all. Nothing writes
-   * these bugs today, but nothing has ever checked for them either — a disk
-   * fault, a hand edit, or a future migration bug could leave one behind.
-   * @returns one entry per row with a problem, empty when the database is clean.
+   * Check stored invariants: event JSON and topic projections are consistent,
+   * and contract_summaries match a fresh aggregate over events. Nothing writes
+   * these bugs today, but a disk fault, hand edit, or future migration bug
+   * could leave one behind.
+   * @returns one entry per affected event or contract summary.
    */
-  checkIntegrity(): Promise<{ id: string; problems: string[] }[]>;
+  checkIntegrity(): Promise<{ kind: 'event' | 'contract_summary'; id: string; problems: string[] }[]>;
 
   /** Recompute one row's derived columns from its stored raw XDR. */
   repairRow(id: string): Promise<void>;
+
+  /** Recompute one contract's summary from the events table. */
+  repairContractSummary(contractId: string): Promise<void>;
 
   close(): Promise<void>;
 }
@@ -270,39 +274,7 @@ export interface EventStore {
  */
 export type TopicPosition = 0 | 1 | 2 | 3;
 
-export interface ListTopicsOptions {
-  limit?: number;
-  /** Which topic position to count. Defaults to 0. */
-  position?: TopicPosition;
-}
 
-/**
- * Validate a topic position and return the column holding it.
- *
- * Shared by every implementation for two reasons: so none of them disagrees
- * about the accepted range, and because the result is interpolated into SQL
- * rather than bound — a column name cannot be a parameter. Returning the name
- * from one validated switch is what keeps that safe; building `topic${n}` from
- * an unchecked number at each call site would not be.
- */
-export function topicColumn(position: TopicPosition | undefined): string {
-  switch (position) {
-    case undefined:
-    case 0:
-      return 'topic0';
-    case 1:
-      return 'topic1';
-    case 2:
-      return 'topic2';
-    case 3:
-      return 'topic3';
-    default:
-      throw new Error(
-        `listTopics: position must be 0, 1, 2 or 3, got ${String(position)}. ` +
-          'Topics past the fourth are stored in event_topics, not a column of their own.',
-      );
-  }
-}
 
 /**
  * What to delete. At least one field must be set, and they combine with AND.
@@ -381,6 +353,9 @@ export interface PruneToSizeResult {
 /** Ceiling on `limit`, enforced by every implementation. */
 export const DEFAULT_MAX_QUERY_LIMIT = 1000;
 
+/** Most contract ids one `contractIds` filter may name. */
+export const MAX_CONTRACT_IDS = 100;
+
 /**
  * Ceiling on `limit`, overridable with `LENS_MAX_QUERY_LIMIT`.
  *
@@ -401,6 +376,12 @@ export function resolveMaxQueryLimit(raw: string | undefined): number {
   return Math.trunc(value);
 }
 export const DEFAULT_QUERY_LIMIT = 50;
+
+/**
+ * Most contracts a single `EventQuery.contractIds` may OR together. Bound for
+ * the same reason `limit` is: an unbounded `IN` list is an unbounded plan.
+ */
+export const MAX_QUERY_CONTRACT_IDS = 20;
 
 export function normaliseLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_QUERY_LIMIT;

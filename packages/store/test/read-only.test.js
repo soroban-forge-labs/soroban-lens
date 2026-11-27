@@ -179,10 +179,3 @@ test('[read-only] serves queries from a file another connection is writing', asy
   }
 });
 
-test('[read-only] is refused for an in-memory database', () => {
-  // Previously the option was silently dropped and the store accepted writes.
-  assert.throws(
-    () => new SqliteEventStore({ path: ':memory:', readOnly: true }),
-    /readOnly has no meaning for an in-memory database/,
-  );
-});

@@ -7,7 +7,8 @@ import {
   type ReadMethod,
   type ReadWorkerData,
 } from './pool-protocol.js';
-import type { EventStore, ListTopicsOptions, PruneFilter, PruneToSizeResult } from './store.js';
+import type { EventStore, PruneFilter, PruneToSizeResult } from './store.js';
+import type { ListTopicsOptions } from './types.js';
 import type {
   AddressContractSummary,
   ContractPage,
@@ -279,7 +280,7 @@ export class PooledSqliteEventStore implements EventStore {
 
   async listTopics(
     contractId: string,
-    options?: ListTopicsOptions,
+    options?: number | ListTopicsOptions,
   ): Promise<{ topic: string; count: number }[]> {
     return this.#read('listTopics', [contractId, options]);
   }
@@ -316,7 +317,7 @@ export class PooledSqliteEventStore implements EventStore {
     return this.#read('listStreamStates', []);
   }
 
-  async checkIntegrity(): Promise<{ id: string; problems: string[] }[]> {
+  async checkIntegrity(): Promise<{ kind: 'event' | 'contract_summary'; id: string; problems: string[] }[]> {
     return this.#read('checkIntegrity', []);
   }
 
@@ -347,8 +348,8 @@ export class PooledSqliteEventStore implements EventStore {
   }
 
   /** Writes: `VACUUM INTO` a temp file, then reads it back through a second connection. */
-  async exportSnapshot(destPath: string): Promise<number> {
-    return this.#writer.exportSnapshot(destPath);
+  async exportSnapshot(destPath: string, filter?: EventQuery): Promise<number> {
+    return this.#writer.exportSnapshot(destPath, filter);
   }
 
   async importSnapshot(srcPath: string): Promise<number> {
@@ -403,6 +404,10 @@ export class PooledSqliteEventStore implements EventStore {
 
   async repairRow(id: string): Promise<void> {
     return this.#writer.repairRow(id);
+  }
+
+  async repairContractSummary(contractId: string): Promise<void> {
+    return this.#writer.repairContractSummary(contractId);
   }
 
   async close(): Promise<void> {
