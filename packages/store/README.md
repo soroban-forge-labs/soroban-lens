@@ -153,6 +153,80 @@ user could predict or type.
 Event ids are fixed-width 30 characters and sort lexicographically in ledger
 order, which is why keyset pagination is a plain string comparison.
 
+## Topic counts by position
+
+`listTopics` counts one topic position for a contract, most frequent first. It
+defaults to position 0, which is where the event name lives:
+
+```js
+await store.listTopics(id);                  // transfer=2, fee=34
+await store.listTopics(id, { position: 1 }); // who: 18 distinct addresses
+await store.listTopics(id, { position: 2 }); // the counterparty
+await store.listTopics(id, { position: 1, limit: 10 });
+```
+
+Position 0 answers "what kinds of event does this contract emit"; the question
+people actually have about a SAC is usually "who", and that is position 1 or 2
+(#153). Positions run 0–3, the four held in their own columns — past that they
+live in the `event_topics` side table (#164) and an out-of-range position
+throws rather than quietly returning nothing.
+
+Values at those positions are addresses, and a Stellar address is an account
+(`G…`) **or** a contract (`C…`) — the fixture contains one transfer sent by a
+contract, so code that assumes `G` is wrong one time in eighteen there.
+
+No index was added. `EXPLAIN QUERY PLAN` shows positions 1–3 served by
+`idx_events_contract_id_desc`, narrowing on the contract and then grouping in a
+temp B-tree — an index search, not the full scan #153 made the condition for
+adding one. It is not free: at 40,000 rows for a single contract, position 0
+took about 5ms against 33ms for position 1, because only position 0 has the
+covering `idx_events_contract_topic0`. Three more covering indexes would close
+that gap and cost three more writes on every insert, which is a trade worth
+making against a measurement rather than ahead of one.
+`test/topics.test.js` asserts the plan so a regression to a scan fails loudly.
+
+## Pruning
+
+`prune(filter)` deletes events by contract, by age, or both (#154). It is the
+general form of `pruneBefore`, which is now a call to it.
+
+```js
+await store.prune({ contractId: 'C...' });            // drop a contract entirely
+await store.prune({ olderThanDays: 30 });             // keep the last 30 days
+await store.prune({ contractId: 'C...', olderThanDays: 30 });  // both: AND
+await store.prune({ beforeLedger: 4695320 });         // what pruneBefore does
+```
+
+`olderThanDays` resolves against `closed_at_unix` — ledger close time, not when
+the row was indexed, so a backfill does not get a fresh lease on life. It takes
+fractions, and the cutoff is computed from the store's injectable `now`, which
+is how the tests place it between two fixture events instead of waiting.
+
+An empty filter **throws**. Matching everything is the one intent a caller never
+means to express by leaving a field out, and `pruneBefore(Number.MAX_SAFE_INTEGER)`
+already says it out loud for anyone who does.
+
+Nothing in `prune` touches the side tables. `event_addresses` and `event_topics`
+carry `ON DELETE CASCADE` and `events_fts` has an `AFTER DELETE` trigger, so all
+three follow the events inside the same transaction — which means the only thing
+standing between a correct prune and a search that still matches deleted events
+is `PRAGMA foreign_keys = ON` in the constructor. `test/prune.test.js` asserts
+the orphan counts for exactly that reason; note that `lens verify`
+(`checkIntegrity`) would not catch it, since it only reads the events table's own
+columns.
+
+From the CLI, where at least one bound is required:
+
+```bash
+lens prune -c CDLZ...              # one contract
+lens prune --older-than-days 30    # anything that closed over 30 days ago
+lens prune --before-ledger 4695320
+```
+
+Like `pruneBefore`, a prune never touches `stream_state`: it is about disk, not
+about where the indexer resumes from, and a pruned database is still a valid
+place to keep polling forward from.
+
 ## Retention by database size
 
 Pruning by ledger count is not how disk actually fills up. A ledger of big
@@ -185,6 +259,75 @@ Node's built-in driver, not `better-sqlite3`. No native compilation, so
 `npm install` behaves the same on a laptop, in CI, and in an Alpine container —
 which is what makes the READMG's zero-setup claim true. WAL mode is on, so the
 API reads while the indexer writes.
+
+## Read-only
+
+`readOnly: true` opens the file with SQLite's read-only flag and skips the
+migration, the WAL pragma and the checkpoint timer. The API uses it so a bug in
+a handler cannot write, and it is how you point a reader at a snapshot another
+process owns — a read-only store tracks a file the indexer is still writing,
+which is what WAL is for.
+
+```js
+const store = new SqliteEventStore({ path: './data/lens.db', readOnly: true });
+await store.insertEvents(events); // throws, naming the method and the file
+```
+
+Every write method throws before reaching SQLite (#158). The guard exists for
+the error message rather than the refusal: SQLite already says `attempt to write
+a readonly database`, which does not say *why* this database is read-only, and
+for `PRAGMA wal_checkpoint` it surfaces as `disk I/O error` — which sends an
+operator to check their disk instead of their configuration.
+
+Three deliberate exceptions. `exportSnapshot` and `backupTo` keep working,
+because both only read this store and write elsewhere; exporting from a
+read-only snapshot is a reason the option exists. And `writeProbe` answers
+`{ ok: false }` instead of throwing, since "can this be written to" is the
+question it exists to answer — `lens doctor` prints the answer.
+
+`readOnly` is refused for `:memory:`, which the connection creates empty: there
+would be nothing to read, and the option used to be dropped silently, leaving a
+store that accepted every write.
+
+## Pooled reads
+
+Because `node:sqlite` is synchronous, a store method runs to completion on the
+event loop of whichever thread calls it. In the API that is the thread serving
+HTTP, so one `?search=` matching most of the table holds up every other
+request, `/health` included (#159).
+
+`PooledSqliteEventStore` serves reads from a small pool of worker threads, each
+with its own `readOnly: true` connection:
+
+```js
+import { PooledSqliteEventStore } from '@soroban-lens/store';
+
+const store = await PooledSqliteEventStore.open({ path: './data/lens.db', readOnly: true, poolSize: 2 });
+```
+
+It implements `EventStore` and nothing else — **the trait above is unchanged**,
+which is the point: the API takes it by injection, and the shared conformance
+suite runs against it unmodified. A factory rather than a constructor because
+spawning a thread is async, the same reason `PostgresEventStore.connect` exists.
+The API uses it by default at two workers; `LENS_READ_POOL_SIZE=0` serves every
+read on the request thread, as builds before this did.
+
+Writes are not pooled. SQLite has one writer and the schema belongs to it, so
+every write, every migration, and the three read-shaped methods that actually
+write — `exportSnapshot`, `checkpoint`, `writeProbe` — run on the calling
+thread. `getLatestEventId` is also left there deliberately: it is `SELECT
+MAX(id)` on an indexed column and the round trip to a worker costs more than
+the query.
+
+Three things to know before reaching for it. A pool needs a real file —
+`:memory:` is private to one connection, so `open()` rejects it rather than
+handing back workers that read an empty database. Each worker keeps its own
+count cache, so `EventPage.totalIsEstimate` can differ between two identical
+requests within the cache's TTL. And `log` and `now` are not forwarded to
+workers, because functions do not survive `postMessage`; a test injecting a
+fake clock wants the unpooled store.
+
+See [ADR-009](../../docs/adr/009-pooled-reads.md) for the alternatives that lost.
 
 ## Adding a backend
 
@@ -227,7 +370,7 @@ loses nothing.
 
 ## Performance
 
-Two benchmarks live in `bench/`, not `test/` — they insert hundreds of
+Six benchmarks live in `bench/`, not `test/` — they insert hundreds of
 thousands to a million synthetic rows, which is slow and irrelevant to
 correctness, so they never run in `npm test` or CI:
 
@@ -237,6 +380,7 @@ npm run bench:insert -w @soroban-lens/store            # #27
 npm run bench:xdr-compression -w @soroban-lens/store   # #35
 npm run bench:address-index -w @soroban-lens/store     # #23
 npm run bench:fts-search -w @soroban-lens/store         # #32
+npm run bench:read-pool -w @soroban-lens/store         # #159
 ```
 
 `insert-strategies.bench.js` (#27) measured `insertDecoded`'s one-prepared-statement-per-row approach against multi-row `VALUES` batching and PRRAMA
@@ -270,6 +414,26 @@ parse, plus extractAddresses' walk of the raw ScVal tree) to find what it
 mentions. Both numbers are reported as measured, not smoothed over — the
 address filter is for the selective case, and the benchmark shows both where
 it wins and where it does not.
+
+`read-pool.bench.js` (#159) inserted 100,000 synthetic rows and kept one
+unselective `?search=` running while cheap point lookups arrived every 20ms on a
+fixed schedule, measured from when each *should* have been served rather than
+from dispatch — on a blocked thread a request cannot even be dispatched on time,
+and measuring from dispatch hides the whole stall. Served on the calling thread,
+those cheap reads saw a p99 of 379ms and the event loop ran up to 721ms late.
+On two worker threads: p99 15.9ms and 15.5ms of lag, a 24x improvement on the
+number the API's other clients actually feel.
+
+The pool achieves that by moving the waiting, not by making anything faster, and
+the same benchmark's isolated phase is there to keep that claim honest: with
+nothing competing, the search costs 238ms unpooled and 245ms pooled, while a
+point lookup goes from 0.109ms to 0.428ms — the message round trip, and the
+reason `getLatestEventId` is deliberately left on the calling thread. Opening
+the pool costs about 1.3s for two workers, almost all of it the Stellar SDK
+loading in each thread rather than thread creation. The count of completed
+searches is reported but should be read as noise unless it moves a long way: it
+has landed both above and below the unpooled count across runs of the same
+configuration.
 
 ## Tests
 

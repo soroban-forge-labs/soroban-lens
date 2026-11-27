@@ -12,7 +12,15 @@ import { decodeTypedFields, decoderFromRecord, validateTypedFieldQuery } from '.
 import { encodeXdrColumn, decompressXdrColumn } from './xdr-compression.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './schema.js';
-import { normaliseLimit, MAX_QUERY_CONTRACT_IDS, type EventStore, type PruneToSizeResult } from './store.js';
+import {
+  normaliseLimit,
+  MAX_QUERY_CONTRACT_IDS,
+  resolvePruneFilter,
+  type EventStore,
+  type PruneFilter,
+  type PruneToSizeResult,
+  type ResolvedPruneFilter,
+} from './store.js';
 import type {
   ContractSpecRecord,
   AddressContractSummary,
@@ -38,8 +46,18 @@ export interface SqliteStoreOptions {
   migrateOnOpen?: boolean;
   /**
    * Open the file read-only: no migration, no WAL setup, no checkpoint timer,
-   * and SQLite refuses every write. For consumers that never write (the API).
-   * An unmigrated database is then reported by getStats/health, not fixed.
+   * and every write method throws before it reaches SQLite. For consumers that
+   * never write (the API), and for pointing a reader at a snapshot another
+   * process owns. An unmigrated database is then reported by getStats/health,
+   * not fixed.
+   *
+   * `exportSnapshot` and `backupTo` still work: both only read this store and
+   * write somewhere else, which is exactly what a read-only snapshot is for.
+   * `writeProbe` answers `{ ok: false }` rather than throwing, since "can this
+   * be written to" is the question it exists to answer.
+   *
+   * Rejected for ':memory:', which this connection creates empty — there would
+   * be nothing to read.
    */
   readOnly?: boolean;
   /**
@@ -116,12 +134,12 @@ export class SqliteEventStore implements EventStore {
   readonly #now: () => number;
   readonly #sizeTargetBytes: number | undefined;
   readonly #typedFieldIndex: boolean;
+  readonly #readOnly: boolean;
   readonly #countCache = new Map<string, { total: number; expiresAt: number }>();
   #statements: Statements | null = null;
   #checkpointTimer: ReturnType<typeof setInterval> | undefined;
   #searchAvailable = false;
   #closed = false;
-  readonly #readOnly: boolean;
 
   constructor(options: SqliteStoreOptions) {
     this.#path = options.path;
@@ -193,7 +211,16 @@ export class SqliteEventStore implements EventStore {
    * reporting writability is its job.
    */
   #ensureWritable(operation: string): void {
-    if (this.#readOnly) throw new Error(`store opened read-only: ${operation} cannot write`);
+    if (!this.#readOnly) return;
+    throw new Error(
+      `${operation}() needs to write, but this store was opened read-only (${this.#path}). ` +
+        'Open it without `readOnly` to write, or point the writer at a database it owns.',
+    );
+  }
+
+  /** Whether this connection was opened read-only. */
+  get readOnly(): boolean {
+    return this.#readOnly;
   }
 
   async migrate(): Promise<void> {
@@ -310,11 +337,12 @@ export class SqliteEventStore implements EventStore {
   }
 
   async insertEvents(events: RawEventInput[]): Promise<number> {
+    this.#ensureWritable('insertEvents');
     return this.insertDecoded(events.map((e) => decodeEvent(e)));
   }
 
   async insertDecoded(events: LensEvent[]): Promise<number> {
-    this.#ensureWritable('insert events');
+    this.#ensureWritable('insertDecoded');
     if (events.length === 0) return 0;
     const stmt = this.#prepared().insert;
     const decoders = new Map<string, ReturnType<typeof decoderFromRecord>>();
@@ -915,6 +943,12 @@ export class SqliteEventStore implements EventStore {
    * a concurrent reader could observe half-applied.
    */
   async writeProbe(): Promise<{ ok: boolean; detail: string }> {
+    // Deliberately not #assertWritable: this method's whole job is to answer
+    // "can this store be written to", and a read-only store is a legitimate
+    // answer of no, not an error for the caller to handle.
+    if (this.#readOnly) {
+      return { ok: false, detail: `opened read-only, so writes are refused by configuration (${this.#path})` };
+    }
     try {
       this.#db.exec('BEGIN IMMEDIATE');
       try {
@@ -962,24 +996,39 @@ export class SqliteEventStore implements EventStore {
 
   async pruneBefore(ledger: number): Promise<number> {
     this.#ensureWritable('pruneBefore');
+    return this.prune({ beforeLedger: ledger });
+  }
+
+  async prune(filter: PruneFilter): Promise<number> {
+    this.#ensureWritable('prune');
+    const where = pruneWhere(resolvePruneFilter(filter, this.#now()));
+
     // A separate count-then-delete rather than reading `changes` off the
     // DELETE: `changes` after a DELETE is exact too, but a second statement
     // that only counts what will go lets us log or reject a huge prune before
     // it happens if we ever want to; today it just returns the number.
-    const before = (this.#db.prepare('SELECT COUNT(*) AS n FROM events WHERE ledger < ?').get(ledger) as {
-      n: number;
-    }).n;
+    const before = (
+      this.#db.prepare(`SELECT COUNT(*) AS n FROM events ${where.clause}`).get(...where.values) as {
+        n: number;
+      }
+    ).n;
     if (before === 0) return 0;
 
+    // One transaction, which is what keeps the side tables honest: the
+    // event_addresses and event_topics rows go with their events through
+    // ON DELETE CASCADE, and events_fts through trg_events_fts_delete. Nothing
+    // here deletes from them by hand, so there is no second code path to
+    // forget when a fourth side table arrives -- but there is also nothing in
+    // this method proving it, hence the orphan assertions in the tests.
     this.#db.exec('BEGIN');
     let removed = 0;
     try {
       const affected = (
-        this.#db.prepare('SELECT DISTINCT contract_id FROM events WHERE ledger < ?').all(ledger) as {
+        this.#db.prepare(`SELECT DISTINCT contract_id FROM events ${where.clause}`).all(...where.values) as {
           contract_id: string;
         }[]
       ).map((row) => row.contract_id);
-      removed = Number(this.#db.prepare('DELETE FROM events WHERE ledger < ?').run(ledger).changes);
+      removed = Number(this.#db.prepare(`DELETE FROM events ${where.clause}`).run(...where.values).changes);
       this.#refreshContractSummaries(affected);
       this.#db.exec('COMMIT');
     } catch (error) {
@@ -987,15 +1036,18 @@ export class SqliteEventStore implements EventStore {
       throw error;
     }
 
+    // Those rows are gone, but a cached COUNT(*) would still report them.
+    this.#countCache.clear();
+
     // VACUUM cannot run inside a transaction and reclaims the space the
-    // deleted rows held — without it the file never shrinks, which defeats
+    // deleted rows held -- without it the file never shrinks, which defeats
     // the entire point of pruning for disk usage. It takes an exclusive lock
     // and rewrites the whole file, so it is deliberately synchronous with the
     // delete rather than deferred: a caller running `lens prune` wants the
     // file smaller when the command returns, not eventually.
     //
     // In WAL mode VACUUM writes its result through the WAL rather than
-    // truncating the main file directly — the file on disk does not actually
+    // truncating the main file directly -- the file on disk does not actually
     // shrink until a checkpoint flushes and truncates that WAL, so both run
     // together here.
     if (removed > 0 && this.#path !== ':memory:') {
@@ -1006,22 +1058,6 @@ export class SqliteEventStore implements EventStore {
     return removed;
   }
 
-  /**
-   * Prune the oldest ledgers until the database plus its WAL fits under
-   * `targetBytes`, then checkpoint. Returns what was removed.
-   *
-   * Deletes in chunks (whole ledgers at a time, oldest first) rather than one
-   * giant DELETE: a single statement over millions of rows holds the write
-   * lock for the whole scan, and the indexer cannot insert behind it. A chunk
-   * is a bounded pause, and re-measuring between chunks is what lets the loop
-   * stop as soon as the file is actually small enough — the file size, not a
-   * row count, is the thing being targeted.
-   *
-   * VACUUM runs once at the end, not per chunk: it rewrites the whole file,
-   * so doing it per chunk would be O(chunks × file size) of work for the same
-   * result. The final checkpoint flushes the WAL so the on-disk total the
-   * caller measures next actually reflects the prune.
-   */
   async pruneToSize(targetBytes: number, chunkLedgers = 1000): Promise<PruneToSizeResult> {
     this.#ensureWritable('pruneToSize');
     const CHUNK_LEDGERS = Math.max(1, chunkLedgers);
@@ -1371,6 +1407,7 @@ export class SqliteEventStore implements EventStore {
    * `VACUUM INTO` reads one snapshot — and refuses to overwrite an existing file.
    */
   async backupTo(destPath: string): Promise<void> {
+    // Writes only destPath; see exportSnapshot for why read-only is fine here.
     if (this.#path === ':memory:') throw new Error('an in-memory database has nothing on disk to back up');
     if (existsSync(destPath)) throw new Error(`${destPath} already exists; refusing to overwrite it`);
     this.#db.prepare('VACUUM INTO ?').run(destPath);
@@ -1806,6 +1843,33 @@ function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {
  * quotes, doubling any quote already inside (FTS5's own escaping rule for a
  * quote character within a quoted string).
  */
+/**
+ * The WHERE clause for a prune, built once and used by both the count and the
+ * DELETE so they cannot disagree about what is about to go.
+ *
+ * Both columns it filters on are already indexed --
+ * `idx_events_contract_id_desc` and `idx_events_closed_at_unix` -- so neither
+ * shape is a full scan.
+ */
+function pruneWhere(filter: ResolvedPruneFilter): { clause: string; values: SqlParam[] } {
+  const conditions: string[] = [];
+  const values: SqlParam[] = [];
+  if (filter.contractId !== undefined) {
+    conditions.push('contract_id = ?');
+    values.push(filter.contractId);
+  }
+  if (filter.beforeLedger !== undefined) {
+    conditions.push('ledger < ?');
+    values.push(filter.beforeLedger);
+  }
+  if (filter.beforeClosedAtUnix !== undefined) {
+    conditions.push('closed_at_unix < ?');
+    values.push(filter.beforeClosedAtUnix);
+  }
+  // resolvePruneFilter has already refused an empty filter.
+  return { clause: `WHERE ${conditions.join(' AND ')}`, values };
+}
+
 function ftsPhraseQuery(text: string): string {
   return `"${text.replace(/"/g, '""')}"`;
 }

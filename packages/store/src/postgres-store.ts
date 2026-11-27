@@ -14,7 +14,14 @@ import { decodeTypedFields, decoderFromRecord, validateTypedFieldQuery } from '.
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION } from './schema.js';
 import { POSTGRES_MIGRATIONS } from './postgres-schema.js';
-import { normaliseLimit, MAX_QUERY_CONTRACT_IDS, type EventStore, type PruneToSizeResult } from './store.js';
+import {
+  normaliseLimit,
+  MAX_QUERY_CONTRACT_IDS,
+  resolvePruneFilter,
+  type EventStore,
+  type PruneFilter,
+  type PruneToSizeResult,
+} from './store.js';
 import type {
   ContractSpecRecord,
   AddressContractSummary,
@@ -856,15 +863,39 @@ export class PostgresEventStore implements EventStore {
   }
 
   async pruneBefore(ledger: number): Promise<number> {
+    return this.prune({ beforeLedger: ledger });
+  }
+
+  async prune(filter: PruneFilter): Promise<number> {
+    const resolved = resolvePruneFilter(filter, this.#now());
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+    const placeholder = (value: unknown): string => {
+      values.push(value);
+      return '$' + String(values.length);
+    };
+    if (resolved.contractId !== undefined) {
+      conditions.push(`contract_id = ${placeholder(resolved.contractId)}`);
+    }
+    if (resolved.beforeLedger !== undefined) {
+      conditions.push(`ledger < ${placeholder(resolved.beforeLedger)}`);
+    }
+    if (resolved.beforeClosedAtUnix !== undefined) {
+      conditions.push(`closed_at_unix < ${placeholder(resolved.beforeClosedAtUnix)}`);
+    }
+
+    // No VACUUM: autovacuum reclaims the space. event_addresses and
+    // event_topics rows go with their events via ON DELETE CASCADE.
     return this.#tx(async (db) => {
-      const { rows: affected } = await db.query('SELECT DISTINCT contract_id FROM events WHERE ledger < $1', [
-        ledger,
-      ]);
-      const result = await db.query('DELETE FROM events WHERE ledger < $1', [ledger]);
+      const where = conditions.join(' AND ');
+      const { rows: affected } = await db.query(`SELECT DISTINCT contract_id FROM events WHERE ${where}`, values);
+      const result = await db.query(`DELETE FROM events WHERE ${where}`, values);
       await this.#refreshContractSummaries(
         db,
         affected.map((row) => String(row['contract_id'])),
       );
+      // Those rows are gone, but a cached COUNT(*) would still report them.
+      this.#countCache.clear();
       return result.rowCount ?? 0;
     });
   }

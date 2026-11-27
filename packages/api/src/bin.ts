@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /** `soroban-lens-api` — serve the query API over an indexed database. */
 import { parseArgs } from 'node:util';
-import { SqliteEventStore, createLogger } from '@soroban-lens/store';
+import { PooledSqliteEventStore, SqliteEventStore, createLogger } from '@soroban-lens/store';
+import type { EventStore } from '@soroban-lens/store';
 import { loadContractLabels } from './labels.js';
 import { createApiServer, shutdownApiServer } from './server.js';
 import { ApiMetrics, parseMetricsPort, startApiMetricsServer } from './metrics.js';
@@ -44,6 +45,11 @@ Access control (all off unless set):
   LENS_API_KEYS          Comma-separated API keys; when set, requests must send
                          X-API-Key or Authorization: Bearer <key>.
   LENS_TRUST_PROXY       1 to read the client IP from X-Forwarded-For (behind a proxy).
+
+Performance:
+  LENS_READ_POOL_SIZE   Worker threads serving store reads (default 2, 0 to
+                        disable). node:sqlite is synchronous, so without a pool
+                        one slow search blocks every other request.
 
 Optional features (both off by default):
   LENS_GRAPHQL=1                 Serve GraphQL at /graphql.
@@ -142,7 +148,37 @@ try {
   process.exit(1);
 }
 
-const store = new SqliteEventStore({ path: dbPath, log, readOnly: true });
+
+/**
+ * Worker threads serving reads (#159). `node:sqlite` is synchronous, so
+ * without a pool a full-text search or a `COUNT(*)` holds this thread and
+ * every other in-flight request waits behind it. 0 restores that behaviour.
+ */
+function parseReadPoolSize(): number {
+  const raw = process.env.LENS_READ_POOL_SIZE;
+  if (raw === undefined || raw.trim() === '') return 2;
+  const size = Number(raw);
+  if (!Number.isInteger(size) || size < 0) {
+    log.error('config', `LENS_READ_POOL_SIZE must be a non-negative integer, got "${raw}".`);
+    process.exit(1);
+  }
+  return size;
+}
+
+const readPoolSize = parseReadPoolSize();
+// Read-only either way: the API never writes, and a bug in it should not be
+// able to.
+const storeOptions = { path: dbPath, log, readOnly: true } as const;
+let store: EventStore;
+try {
+  store =
+    readPoolSize > 0
+      ? await PooledSqliteEventStore.open({ ...storeOptions, poolSize: readPoolSize })
+      : new SqliteEventStore(storeOptions);
+} catch (error) {
+  log.error('config', `could not open ${dbPath}: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
 
 /** A positive integer from the environment, or undefined when unset or unusable. */
 function envInt(name: string): number | undefined {
@@ -181,6 +217,13 @@ const server = createApiServer({
 server.listen(port, host, () => {
   log.info('listening', `listening on http://${host}:${port} (db: ${dbPath})`, { host, port, dbPath });
   log.info('listening', `openapi: http://${host}:${port}/openapi.json`);
+  log.info(
+    'read_pool',
+    readPoolSize > 0
+      ? `store reads run on ${readPoolSize} worker thread(s)`
+      : 'store reads run on the request thread (LENS_READ_POOL_SIZE=0)',
+    { readPoolSize },
+  );
 });
 
 const metricsServer =

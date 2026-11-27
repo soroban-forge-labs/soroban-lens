@@ -37,7 +37,7 @@ Usage:
                                      contracts' specs) into the database.
   lens stats  [options]              Print database statistics.
   lens tail   [filters] [--json]     Follow events as they are indexed, colourised or as NDJSON.
-  lens prune --before-ledger <n>     Delete events below a ledger and reclaim disk space.
+  lens prune [bounds]                Delete events by ledger, age or contract, and reclaim disk.
   lens redecode [--all]              Re-run the decoder over previously-failed rows.
   lens verify [--repair]             Check event rows and contract summaries.
   lens migrate --down --to <n>       Roll back migrations above version <n>.
@@ -86,6 +86,9 @@ Options:
       --max-events <n>    index: stop after this many events.
       --fixture <path>    seed: file to load (default fixtures/testnet-events.json).
       --before-ledger <n> prune: delete events with ledger below this.
+      --older-than-days <n>
+                          prune: delete events whose ledger closed over <n> days ago.
+                          Combined with -c and/or --before-ledger they all have to match.
       --all               redecode: re-run over every row, not only failures.
       --repair            verify: recompute derived rows and contract summaries.
       --only-missing      spec refresh: skip contracts that already have a spec.
@@ -159,6 +162,7 @@ async function main(argv: string[]): Promise<number> {
       'max-events': { type: 'string' },
       fixture: { type: 'string' },
       'before-ledger': { type: 'string' },
+      'older-than-days': { type: 'string' },
       fix: { type: 'boolean' },
       'only-missing': { type: 'boolean' },
       concurrency: { type: 'string' },
@@ -389,23 +393,62 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'prune': {
-      const raw = values['before-ledger'];
-      if (raw === undefined) {
-        process.stderr.write('error: prune requires --before-ledger <n>\n');
+      const rawLedger = values['before-ledger'];
+      const rawDays = values['older-than-days'];
+      const contracts = values.contract ?? [];
+      if (contracts.length > 1) {
+        process.stderr.write('error: prune takes at most one --contract\n');
         return 2;
       }
-      const beforeLedger = Number(raw);
-      if (!Number.isFinite(beforeLedger) || beforeLedger < 0) {
-        process.stderr.write(`error: --before-ledger must be a non-negative number, got "${raw}"\n`);
+      const contractId = contracts[0];
+
+      // At least one bound, or this would delete the whole database because the
+      // operator forgot an argument. The store refuses an empty filter too; this
+      // is here so the message names the flags rather than the field names.
+      if (rawLedger === undefined && rawDays === undefined && contractId === undefined) {
+        process.stderr.write(
+          'error: prune requires at least one of --before-ledger <n>, --older-than-days <n> or -c <contract>\n',
+        );
         return 2;
       }
+
+      let beforeLedger: number | undefined;
+      if (rawLedger !== undefined) {
+        beforeLedger = Number(rawLedger);
+        if (!Number.isFinite(beforeLedger) || beforeLedger < 0) {
+          process.stderr.write(`error: --before-ledger must be a non-negative number, got "${rawLedger}"\n`);
+          return 2;
+        }
+      }
+
+      let olderThanDays: number | undefined;
+      if (rawDays !== undefined) {
+        olderThanDays = Number(rawDays);
+        if (!Number.isFinite(olderThanDays) || olderThanDays <= 0) {
+          process.stderr.write(`error: --older-than-days must be a positive number, got "${rawDays}"\n`);
+          return 2;
+        }
+      }
+
+      const describe = [
+        contractId === undefined ? undefined : `contract ${contractId}`,
+        beforeLedger === undefined ? undefined : `below ledger ${beforeLedger}`,
+        olderThanDays === undefined ? undefined : `closed over ${olderThanDays} day(s) ago`,
+      ]
+        .filter((part) => part !== undefined)
+        .join(', ');
+
       const store = new SqliteEventStore({ path: config.dbPath });
       try {
         const before = await store.getStats();
-        const removed = await store.pruneBefore(beforeLedger);
+        const removed = await store.prune({
+          ...(contractId !== undefined ? { contractId } : {}),
+          ...(beforeLedger !== undefined ? { beforeLedger } : {}),
+          ...(olderThanDays !== undefined ? { olderThanDays } : {}),
+        });
         const after = await store.getStats();
         process.stderr.write(
-          `[lens] pruned ${removed} event(s) below ledger ${beforeLedger} ` +
+          `[lens] pruned ${removed} event(s) matching ${describe} ` +
             `(${before.sizeBytes ?? '?'} -> ${after.sizeBytes ?? '?'} bytes)\n`,
         );
       } finally {
@@ -765,7 +808,7 @@ _lens() {
     'seed:Load testnet events fixture'
     'stats:Print database statistics'
     'tail:Follow events as they are indexed'
-    'prune:Delete events below a ledger'
+    'prune:Delete events by ledger, age or contract'
     'redecode:Re-run the decoder over failed rows'
     'verify:Check event rows and contract summaries'
     'migrate:Roll migrations forward or back'
@@ -789,7 +832,7 @@ complete -c lens -n "__fish_use_subcommand" -a index -d "Run the indexer pipelin
 complete -c lens -n "__fish_use_subcommand" -a seed -d "Load testnet events fixture"
 complete -c lens -n "__fish_use_subcommand" -a stats -d "Print database statistics"
 complete -c lens -n "__fish_use_subcommand" -a tail -d "Follow events as they are indexed"
-complete -c lens -n "__fish_use_subcommand" -a prune -d "Delete events below a ledger"
+complete -c lens -n "__fish_use_subcommand" -a prune -d "Delete events by ledger, age or contract"
 complete -c lens -n "__fish_use_subcommand" -a redecode -d "Re-run the decoder over failed rows"
 complete -c lens -n "__fish_use_subcommand" -a verify -d "Check event rows and contract summaries"
 complete -c lens -n "__fish_use_subcommand" -a migrate -d "Roll migrations forward or back"

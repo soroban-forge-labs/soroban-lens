@@ -184,6 +184,29 @@ export interface EventStore {
   pruneBefore(ledger: number): Promise<number>;
 
   /**
+   * Delete events matching `filter`, returning the row count removed.
+   *
+   * The general form of `pruneBefore`, which is now a thin call to this: drop a
+   * contract you no longer care about, drop anything older than N days without
+   * working out which ledger that was, or both at once. Fields combine with
+   * AND, so `{ contractId, olderThanDays: 30 }` keeps that contract's last
+   * month and nothing else of it.
+   *
+   * An empty filter throws rather than matching everything — deleting the whole
+   * table is the one outcome a caller never means to express by omission.
+   *
+   * The address, deep-topic and full-text side tables are cleaned with the
+   * events, inside the same transaction, by `ON DELETE CASCADE` and the FTS
+   * delete trigger. An implementation that cannot rely on those has to do it
+   * itself; leaving an orphan row behind is a conformance failure, not a
+   * detail, because a search would still match an event that no longer exists.
+   *
+   * Like `pruneBefore`, it never touches `stream_state`: pruning is about disk,
+   * not about where the indexer resumes from.
+   */
+  prune(filter: PruneFilter): Promise<number>;
+
+  /**
    * Delete specific events by id, returning how many existed and were removed.
    *
    * For reorg repair (#3): when the network's history for a recent ledger no
@@ -241,6 +264,76 @@ export interface EventStore {
   repairContractSummary(contractId: string): Promise<void>;
 
   close(): Promise<void>;
+}
+
+/**
+ * A topic position held in its own indexed column, `topic0`…`topic3`.
+ *
+ * Positions past this live in the `event_topics` side table instead (#164) and
+ * are not countable this way; see `INDEXED_TOPIC_DEPTH`.
+ */
+export type TopicPosition = 0 | 1 | 2 | 3;
+
+
+
+/**
+ * What to delete. At least one field must be set, and they combine with AND.
+ */
+export interface PruneFilter {
+  /** Only this contract's events. */
+  contractId?: string;
+  /** Events below this ledger, the same bound `pruneBefore` takes. */
+  beforeLedger?: number;
+  /**
+   * Events whose ledger closed more than this many days ago, by
+   * `closed_at_unix` — ledger close time, not when the row was indexed, so a
+   * backfill does not get a fresh lease on life. Fractional days are allowed.
+   */
+  olderThanDays?: number;
+}
+
+/** A `PruneFilter` with `olderThanDays` resolved against a clock. */
+export interface ResolvedPruneFilter {
+  contractId?: string | undefined;
+  beforeLedger?: number | undefined;
+  /** Unix seconds; events closing strictly before this go. */
+  beforeClosedAtUnix?: number | undefined;
+}
+
+/**
+ * Validate a `PruneFilter` and turn `olderThanDays` into an absolute cutoff.
+ *
+ * Shared by every implementation so none of them can disagree about what an
+ * empty filter means, or land a day's rounding somewhere else. The SQL stays
+ * each backend's own business; the meaning does not.
+ *
+ * @param nowMs Milliseconds since the epoch, injectable so a test need not wait.
+ */
+export function resolvePruneFilter(filter: PruneFilter, nowMs: number): ResolvedPruneFilter {
+  const { contractId, beforeLedger, olderThanDays } = filter;
+
+  if (contractId === undefined && beforeLedger === undefined && olderThanDays === undefined) {
+    throw new Error(
+      'prune needs at least one of contractId, beforeLedger or olderThanDays; ' +
+        'an empty filter would delete every event, which pruneBefore(Infinity) says out loud.',
+    );
+  }
+  if (contractId !== undefined && contractId === '') {
+    throw new Error('prune: contractId must not be empty');
+  }
+  if (beforeLedger !== undefined && (!Number.isFinite(beforeLedger) || !Number.isInteger(beforeLedger))) {
+    throw new Error(`prune: beforeLedger must be an integer, got ${String(beforeLedger)}`);
+  }
+  if (olderThanDays !== undefined && (!Number.isFinite(olderThanDays) || olderThanDays <= 0)) {
+    throw new Error(`prune: olderThanDays must be a positive number of days, got ${String(olderThanDays)}`);
+  }
+
+  return {
+    contractId,
+    beforeLedger,
+    beforeClosedAtUnix:
+      olderThanDays === undefined ? undefined : Math.floor(nowMs / 1000 - olderThanDays * 86_400),
+  };
 }
 
 /** Result of a size-based prune pass. */

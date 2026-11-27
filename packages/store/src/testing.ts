@@ -415,6 +415,187 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  /**
+   * The contract with the most events carrying a topic at `position`, and the
+   * counts it should produce.
+   *
+   * Derived from the store's own decoded events rather than hardcoded, because
+   * the fixture is real captured data and a replacement should move these
+   * numbers rather than break the test. `queryEvents` is independently covered
+   * above, so leaning on it here is not circular in any way that matters.
+   */
+  async function expectedTopics(store: EventStore, position: number) {
+    const all = await store.queryEvents({ limit: 1000 });
+    const perContract = new Map<string, Map<string, number>>();
+    for (const event of all.events) {
+      const value = event.topics[position]?.value;
+      if (typeof value !== 'string') continue;
+      const counts = perContract.get(event.contractId) ?? new Map<string, number>();
+      counts.set(value, (counts.get(value) ?? 0) + 1);
+      perContract.set(event.contractId, counts);
+    }
+    const [contractId, counts] = [...perContract.entries()].sort(
+      (a, b) => [...b[1].values()].reduce((x, y) => x + y, 0) - [...a[1].values()].reduce((x, y) => x + y, 0),
+    )[0]!;
+    return { contractId, counts };
+  }
+
+  test(`[${name}] listTopics counts the first topic by default`, async () => {
+    const store = await seeded();
+    const { contractId, counts } = await expectedTopics(store, 0);
+
+    const topics = await store.listTopics(contractId);
+    assert.deepEqual(
+      new Map(topics.map((t) => [t.topic, t.count])),
+      counts,
+      'the default output changed',
+    );
+    // Every spelling of "position 0" agrees, so the default is genuinely the
+    // old behaviour and not merely similar to it.
+    assert.deepEqual(await store.listTopics(contractId, {}), topics);
+    assert.deepEqual(await store.listTopics(contractId, { position: 0 }), topics);
+    // Most frequent first.
+    for (let i = 1; i < topics.length; i++) assert.ok(topics[i - 1]!.count >= topics[i]!.count);
+    await store.close();
+  });
+
+  test(`[${name}] listTopics counts a later position, which is where the addresses are`, async () => {
+    const store = await seeded();
+    // On a SAC transfer, topic0 is just `transfer` and topic1 is the sender —
+    // the question #153 exists to answer.
+    const { contractId, counts } = await expectedTopics(store, 1);
+    assert.ok(counts.size > 0, 'the fixture needs a contract with a second topic');
+
+    const topics = await store.listTopics(contractId, { position: 1 });
+    assert.deepEqual(new Map(topics.map((t) => [t.topic, t.count])), counts);
+    for (let i = 1; i < topics.length; i++) assert.ok(topics[i - 1]!.count >= topics[i]!.count);
+
+    // And it is genuinely different from position 0, or this proves nothing.
+    const first = await store.listTopics(contractId, { position: 0 });
+    assert.notDeepEqual(
+      topics.map((t) => t.topic),
+      first.map((t) => t.topic),
+    );
+    await store.close();
+  });
+
+  test(`[${name}] listTopics respects limit alongside position`, async () => {
+    const store = await seeded();
+    const { contractId, counts } = await expectedTopics(store, 1);
+    if (counts.size < 2) {
+      await store.close();
+      return;
+    }
+    const capped = await store.listTopics(contractId, { position: 1, limit: 1 });
+    assert.equal(capped.length, 1);
+    assert.equal(capped[0]!.count, Math.max(...counts.values()));
+    await store.close();
+  });
+
+  test(`[${name}] listTopics refuses a position without a column`, async () => {
+    const store = await seeded();
+    const { contractId } = await expectedTopics(store, 0);
+    // Positions past the fourth live in event_topics (#164), so counting them
+    // this way would silently return nothing rather than fail.
+    for (const position of [4, -1, 1.5]) {
+      await assert.rejects(
+        () => store.listTopics(contractId, { position: position as 0 | 1 | 2 | 3 }),
+        /position must be/,
+        `position ${position} was accepted`,
+      );
+    }
+    await store.close();
+  });
+
+  test(`[${name}] prune by contract leaves every other contract untouched`, async () => {
+    const store = await seeded();
+    const byContract = new Map<string, number>();
+    for (const event of fixtureEvents) {
+      byContract.set(event.contractId, (byContract.get(event.contractId) ?? 0) + 1);
+    }
+    // The busiest contract, so this removes several rows rather than one and
+    // the "everything else survived" assertion has something to say.
+    const [target, expected] = [...byContract.entries()].sort((a, b) => b[1] - a[1])[0]!;
+
+    const removed = await store.prune({ contractId: target });
+    assert.equal(removed, expected);
+    assert.equal((await store.queryEvents({ contractId: target, limit: 1000 })).total, 0);
+
+    for (const [contractId, count] of byContract) {
+      if (contractId === target) continue;
+      assert.equal(
+        (await store.queryEvents({ contractId, limit: 1000 })).total,
+        count,
+        `${contractId} lost rows to another contract's prune`,
+      );
+    }
+    assert.equal((await store.getStats()).eventCount, fixtureEvents.length - expected);
+    // Nothing internally inconsistent survived it — `lens verify` reads this.
+    assert.deepEqual(await store.checkIntegrity(), []);
+    await store.close();
+  });
+
+  test(`[${name}] prune by age uses ledger close time, not when the row was indexed`, async () => {
+    const store = await seeded();
+    const closes = fixtureEvents
+      .map((e) => Math.floor(new Date(e.ledgerClosedAt).getTime() / 1000))
+      .sort((a, b) => a - b);
+    const oldest = closes[0]!;
+    const newest = closes[closes.length - 1]!;
+
+    // The fixture is real captured data, so it is already years old by now:
+    // an age far past it keeps everything, and one just inside it keeps none.
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const daysSinceNewest = (nowSeconds - newest) / 86_400;
+    const daysSinceOldest = (nowSeconds - oldest) / 86_400;
+
+    assert.equal(await store.prune({ olderThanDays: daysSinceOldest + 1 }), 0);
+    assert.equal((await store.getStats()).eventCount, fixtureEvents.length);
+
+    const removed = await store.prune({ olderThanDays: Math.max(daysSinceNewest - 1, 0.5) });
+    assert.ok(removed > 0, 'expected the fixture to be older than the cutoff');
+    await store.close();
+  });
+
+  test(`[${name}] prune combines its filters with AND`, async () => {
+    const store = await seeded();
+    const contractId = fixtureEvents[0]!.contractId;
+    const ledgers = [...new Set(fixtureEvents.map((e) => e.ledger))].sort((a, b) => a - b);
+    const threshold = ledgers[Math.floor(ledgers.length / 2)]!;
+
+    const expected = fixtureEvents.filter((e) => e.contractId === contractId && e.ledger < threshold).length;
+    const removed = await store.prune({ contractId, beforeLedger: threshold });
+    assert.equal(removed, expected);
+
+    // Other contracts keep their rows below the threshold: the ledger bound
+    // alone would have taken them.
+    const others = fixtureEvents.filter((e) => e.contractId !== contractId && e.ledger < threshold);
+    for (const event of others.slice(0, 5)) {
+      assert.ok(await store.getEvent(event.id), `${event.id} was pruned by another contract's filter`);
+    }
+    await store.close();
+  });
+
+  test(`[${name}] prune refuses an empty filter`, async () => {
+    const store = await seeded();
+    await assert.rejects(() => store.prune({}), /at least one of/);
+    await assert.rejects(() => store.prune({ olderThanDays: 0 }), /positive number of days/);
+    await assert.rejects(() => store.prune({ olderThanDays: -1 }), /positive number of days/);
+    // Nothing was deleted on the way to refusing.
+    assert.equal((await store.getStats()).eventCount, fixtureEvents.length);
+    await store.close();
+  });
+
+  test(`[${name}] prune does not touch stream state`, async () => {
+    const store = await seeded();
+    await store.saveStreamState({ key: 'k', cursor: 'abc', ledger: 1, updatedAt: '2026-01-01T00:00:00Z' });
+    await store.prune({ contractId: fixtureEvents[0]!.contractId });
+    assert.deepEqual(await store.loadStreamState('k'), {
+      key: 'k', cursor: 'abc', ledger: 1, updatedAt: '2026-01-01T00:00:00Z',
+    });
+    await store.close();
+  });
+
   test(`[${name}] pruneBefore does not touch stream state`, async () => {
     const store = await seeded();
     await store.saveStreamState({ key: 'k', cursor: 'abc', ledger: 1, updatedAt: '2026-01-01T00:00:00Z' });

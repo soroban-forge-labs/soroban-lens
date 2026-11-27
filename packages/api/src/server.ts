@@ -598,7 +598,7 @@ const routes: Route[] = [
     handler: async ({ params, query, store }) => {
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
       const limit = parseLimit(query);
-      return { body: { contractId, topics: await store.listTopics(contractId, limit) } };
+      return { body: { contractId, topics: await store.listTopics(contractId, { limit }) } };
     },
   },
   {

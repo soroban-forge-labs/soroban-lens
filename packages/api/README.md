@@ -314,6 +314,28 @@ goal, and the key check, token bucket and event stream are each small enough
 | | `LENS_CONTRACT_LABELS` | off. Path to a JSON file of labels, see below. |
 | `--metrics-port` | `LENS_API_METRICS_PORT` | off. Serve Prometheus request metrics at `/metrics` on this separate port. |
 | `--metrics-host` | `LENS_API_METRICS_HOST` | `127.0.0.1` |
+| | `LENS_READ_POOL_SIZE` | `2`. Worker threads serving store reads; `0` serves them on the request thread. |
+
+### Read pool
+
+`node:sqlite` is synchronous, so a store read runs to completion on the thread
+that called it. Served on the request thread, one `?search=` matching most of
+the table blocks every other in-flight request and `/health` with it — and
+`/health` is itself two `COUNT(*)`-shaped aggregates, so it is not cheap enough
+to ride out a stall.
+
+The API therefore serves reads from two worker threads by default, each with its
+own read-only connection (#159, [ADR-009](../../docs/adr/009-pooled-reads.md)).
+It is the same `EventStore` either way; nothing about the HTTP surface changes.
+`LENS_READ_POOL_SIZE=0` restores the old single-threaded path exactly, at the
+cost of the stall. Raising it past 2 buys more concurrent slow queries, not
+faster ones — each worker still serves one query at a time.
+
+Two costs worth knowing. Startup gains roughly a second per worker, almost all
+of it the Stellar SDK loading in the new thread. And each pooled call pays a
+message round trip of about 0.1ms, so an idle API answers marginally slower
+pooled than not; `getLatestEventId`, which the `ETag` on every conditional
+request depends on, is left on the request thread for that reason.
 
 ### Request metrics
 
