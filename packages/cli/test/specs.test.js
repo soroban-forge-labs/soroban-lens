@@ -117,6 +117,13 @@ test('LENS_FETCH_SPECS=false turns spec fetching off; it is on by default', () =
   assert.equal(resolveConfig({}, { LENS_FETCH_SPECS: '0' }).fetchSpecs, false);
 });
 
+test('typed field indexing is opt-in with LENS_TYPED_FIELD_INDEX=true', () => {
+  assert.equal(resolveConfig({}, {}).typedFieldIndex, false);
+  assert.equal(resolveConfig({}, { LENS_TYPED_FIELD_INDEX: 'true' }).typedFieldIndex, true);
+  assert.equal(resolveConfig({}, { LENS_TYPED_FIELD_INDEX: 'false' }).typedFieldIndex, false);
+  assert.equal(resolveConfig({}, { LENS_TYPED_FIELD_INDEX: '0' }).typedFieldIndex, false);
+});
+
 /** Fixture contracts from fixtures/testnet-specs.json. */
 const FIXTURES = JSON.parse(
   readFileSync(new URL('../../../fixtures/testnet-specs.json', import.meta.url), 'utf8'),

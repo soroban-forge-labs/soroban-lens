@@ -10,6 +10,7 @@ import {
   parseMuxedAddress,
   transferToMuxedId,
 } from './decode.js';
+import { decodeTypedFields, decoderFromRecord, validateTypedFieldQuery } from './typed-fields.js';
 import type { Logger } from './logger.js';
 import { LATEST_SCHEMA_VERSION } from './schema.js';
 import { POSTGRES_MIGRATIONS } from './postgres-schema.js';
@@ -83,6 +84,8 @@ export interface PostgresStoreOptions {
   now?: () => number;
   /** Prune oldest ledgers when `sizeBytes + walSizeBytes` exceeds this. Optional. */
   maxSizeBytes?: number;
+  /** Persist typed fields for equality/range filters. Disabled by default. */
+  typedFieldIndex?: boolean;
 }
 
 const noopLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -126,6 +129,7 @@ export class PostgresEventStore implements EventStore {
   readonly #countCacheTtlMs: number;
   readonly #now: () => number;
   readonly #maxSizeBytes: number | undefined;
+  readonly #typedFieldIndex: boolean;
   readonly #countCache = new Map<string, { total: number; expiresAt: number }>();
 
   constructor(pool: PgPool, options: PostgresStoreOptions = {}, ownsPool = false) {
@@ -135,6 +139,7 @@ export class PostgresEventStore implements EventStore {
     this.#countCacheTtlMs = options.countCacheTtlMs ?? 2000;
     this.#now = options.now ?? Date.now;
     this.#maxSizeBytes = options.maxSizeBytes;
+    this.#typedFieldIndex = options.typedFieldIndex ?? false;
   }
 
   /** Open a pool, apply pending migrations (unless disabled) and return the store. */
@@ -315,6 +320,7 @@ export class PostgresEventStore implements EventStore {
     // and Module 1 replays it on restart.
     return this.#tx(async (db) => {
       let inserted = 0;
+      const decoders = new Map<string, ReturnType<typeof decoderFromRecord>>();
       const summaryDeltas = new Map<
         string,
         { contractId: string; eventCount: number; firstLedger: number; lastLedger: number; lastSeenAt: string }
@@ -342,6 +348,21 @@ export class PostgresEventStore implements EventStore {
             });
           }
           await this.#insertAddresses(db, e.id, e);
+          if (this.#typedFieldIndex) {
+            let decoder = decoders.get(e.contractId);
+            if (!decoders.has(e.contractId)) {
+              const { rows } = await db.query('SELECT * FROM contract_specs WHERE contract_id = $1', [e.contractId]);
+              decoder = this.#typedDecoder(rows[0] ? contractSpecFromRow(rows[0]) : null);
+              decoders.set(e.contractId, decoder);
+            }
+            for (const field of decodeTypedFields(decoder ?? null, e)) {
+              await db.query(
+                `INSERT INTO typed_event_fields (event_id, field_name, field_type, text_value, numeric_value)
+                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+                [e.id, field.name, field.type, field.textValue, field.numericValue],
+              );
+            }
+          }
         }
       }
       const deltas = [...summaryDeltas.values()];
@@ -393,6 +414,18 @@ export class PostgresEventStore implements EventStore {
         'INSERT INTO event_topics (event_id, position, topic, type) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
         [eventId, i, key, topicType(topic)],
       );
+    }
+  }
+
+  #typedDecoder(record: ContractSpecRecord | null): ReturnType<typeof decoderFromRecord> {
+    try {
+      return decoderFromRecord(record);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.#log.warn('typed_field_spec_invalid', `could not index typed fields: ${reason}`, {
+        contractId: record?.contractId ?? 'unknown',
+      });
+      return null;
     }
   }
 
@@ -680,25 +713,47 @@ export class PostgresEventStore implements EventStore {
   // ---------------------------------------------------------------------------
 
   async saveContractSpec(record: ContractSpecRecord): Promise<void> {
-    await this.#pool.query(
-      `INSERT INTO contract_specs (contract_id, source, wasm_hash, entries_xdr, event_count, error, fetched_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (contract_id) DO UPDATE SET source = EXCLUDED.source,
-                                               wasm_hash = EXCLUDED.wasm_hash,
-                                               entries_xdr = EXCLUDED.entries_xdr,
-                                               event_count = EXCLUDED.event_count,
-                                               error = EXCLUDED.error,
-                                               fetched_at = EXCLUDED.fetched_at`,
-      [
-        record.contractId,
-        record.source,
-        record.wasmHash ?? null,
-        JSON.stringify(record.entriesXdr),
-        record.eventCount,
-        record.error ?? null,
-        record.fetchedAt,
-      ],
-    );
+    await this.#tx(async (db) => {
+      await db.query(
+        `INSERT INTO contract_specs (contract_id, source, wasm_hash, entries_xdr, event_count, error, fetched_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (contract_id) DO UPDATE SET source = EXCLUDED.source,
+                                                 wasm_hash = EXCLUDED.wasm_hash,
+                                                 entries_xdr = EXCLUDED.entries_xdr,
+                                                 event_count = EXCLUDED.event_count,
+                                                 error = EXCLUDED.error,
+                                                 fetched_at = EXCLUDED.fetched_at`,
+        [
+          record.contractId,
+          record.source,
+          record.wasmHash ?? null,
+          JSON.stringify(record.entriesXdr),
+          record.eventCount,
+          record.error ?? null,
+          record.fetchedAt,
+        ],
+      );
+      if (!this.#typedFieldIndex) return;
+
+      const decoder = this.#typedDecoder(record);
+      await db.query(
+        `DELETE FROM typed_event_fields
+         WHERE event_id IN (SELECT id FROM events WHERE contract_id = $1)`,
+        [record.contractId],
+      );
+      if (!decoder) return;
+      const { rows } = await db.query('SELECT * FROM events WHERE contract_id = $1', [record.contractId]);
+      for (const row of rows) {
+        const event = rowToEvent(row);
+        for (const field of decodeTypedFields(decoder, event)) {
+          await db.query(
+            `INSERT INTO typed_event_fields (event_id, field_name, field_type, text_value, numeric_value)
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+            [event.id, field.name, field.type, field.textValue, field.numericValue],
+          );
+        }
+      }
+    });
   }
 
   async getContractSpec(contractId: string): Promise<ContractSpecRecord | null> {
@@ -1289,6 +1344,13 @@ function specSummary(row: Record<string, unknown>): Omit<ContractSpecRecord, 'en
   };
 }
 
+function contractSpecFromRow(row: Record<string, unknown>): ContractSpecRecord {
+  return {
+    ...specSummary(row),
+    entriesXdr: JSON.parse(String(row['entries_xdr'])) as string[],
+  };
+}
+
 function streamState(row: Record<string, unknown>): StreamState {
   return {
     key: String(row['key']),
@@ -1304,6 +1366,7 @@ function streamState(row: Record<string, unknown>): StreamState {
 function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
   const conditions: string[] = [];
   const values: unknown[] = [];
+  validateTypedFieldQuery(query);
   const param = (value: unknown): string => {
     values.push(value);
     return `$${values.length}`;
@@ -1367,6 +1430,19 @@ function buildWhere(query: EventQuery): { clause: string; values: unknown[] } {
   if (query.toTime !== undefined) conditions.push(`closed_at_unix <= ${param(query.toTime)}`);
   if (query.indexedAfter !== undefined) conditions.push(`indexed_at > ${param(query.indexedAfter)}`);
   if (query.successfulOnly === true) conditions.push('in_successful_call = TRUE');
+  if (query.typedField !== undefined) {
+    const parts = [`field_name = ${param(query.typedField)}`];
+    if (query.typedValue !== undefined) parts.push(`text_value = ${param(query.typedValue)}`);
+    for (const [operator, value] of [
+      ['>', query.typedGt],
+      ['>=', query.typedGte],
+      ['<', query.typedLt],
+      ['<=', query.typedLte],
+    ] as const) {
+      if (value !== undefined) parts.push(`numeric_value ${operator} ${param(value)}::BIGINT`);
+    }
+    conditions.push(`id IN (SELECT event_id FROM typed_event_fields WHERE ${parts.join(' AND ')})`);
+  }
 
   // `topicTypes` runs parallel to `topics` (#146); see the SQLite store.
   const depth = Math.max(query.topics?.length ?? 0, query.topicTypes?.length ?? 0);

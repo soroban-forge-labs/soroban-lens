@@ -352,6 +352,28 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE event_addresses DROP COLUMN muxed_id;
     `,
   },
+  {
+    version: 12,
+    name: 'typed-event-fields',
+    up: `
+      CREATE TABLE typed_event_fields (
+        event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        field_name TEXT NOT NULL,
+        field_type TEXT NOT NULL,
+        text_value TEXT NOT NULL,
+        numeric_value INTEGER,
+        PRIMARY KEY (event_id, field_name)
+      ) WITHOUT ROWID;
+      CREATE INDEX idx_typed_event_fields_text
+        ON typed_event_fields (field_name, text_value, event_id);
+      CREATE INDEX idx_typed_event_fields_numeric
+        ON typed_event_fields (field_name, numeric_value, event_id)
+        WHERE numeric_value IS NOT NULL;
+    `,
+    down: `
+      DROP TABLE IF EXISTS typed_event_fields;
+    `,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.reduce(

@@ -253,6 +253,24 @@
             "$ref": "#/components/parameters/OperationIndex"
           },
           {
+            "$ref": "#/components/parameters/TypedField"
+          },
+          {
+            "$ref": "#/components/parameters/TypedValue"
+          },
+          {
+            "$ref": "#/components/parameters/TypedGt"
+          },
+          {
+            "$ref": "#/components/parameters/TypedGte"
+          },
+          {
+            "$ref": "#/components/parameters/TypedLt"
+          },
+          {
+            "$ref": "#/components/parameters/TypedLte"
+          },
+          {
             "$ref": "#/components/parameters/SuccessfulOnly"
           },
           {
@@ -628,6 +646,24 @@
           },
           {
             "$ref": "#/components/parameters/OperationIndex"
+          },
+          {
+            "$ref": "#/components/parameters/TypedField"
+          },
+          {
+            "$ref": "#/components/parameters/TypedValue"
+          },
+          {
+            "$ref": "#/components/parameters/TypedGt"
+          },
+          {
+            "$ref": "#/components/parameters/TypedGte"
+          },
+          {
+            "$ref": "#/components/parameters/TypedLt"
+          },
+          {
+            "$ref": "#/components/parameters/TypedLte"
           },
           {
             "$ref": "#/components/parameters/SuccessfulOnly"
@@ -1531,6 +1567,61 @@
           "minimum": 0
         },
         "example": 0
+      },
+      "TypedField": {
+        "name": "typedField",
+        "in": "query",
+        "description": "Name of the typed contract event field to filter; required with a typed value or numeric bound.",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "example": "amount"
+      },
+      "TypedValue": {
+        "name": "typedValue",
+        "in": "query",
+        "description": "Exact rendered value to match for typedField. Equality works for scalar and structured values.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "1000000"
+      },
+      "TypedGt": {
+        "name": "typedGt",
+        "in": "query",
+        "description": "Exclusive lower bound for an integer typed field, within signed 64-bit range.",
+        "schema": {
+          "type": "string",
+          "pattern": "^-?(0|[1-9][0-9]*)$"
+        }
+      },
+      "TypedGte": {
+        "name": "typedGte",
+        "in": "query",
+        "description": "Inclusive lower bound for an integer typed field, within signed 64-bit range.",
+        "schema": {
+          "type": "string",
+          "pattern": "^-?(0|[1-9][0-9]*)$"
+        }
+      },
+      "TypedLt": {
+        "name": "typedLt",
+        "in": "query",
+        "description": "Exclusive upper bound for an integer typed field, within signed 64-bit range.",
+        "schema": {
+          "type": "string",
+          "pattern": "^-?(0|[1-9][0-9]*)$"
+        }
+      },
+      "TypedLte": {
+        "name": "typedLte",
+        "in": "query",
+        "description": "Inclusive upper bound for an integer typed field, within signed 64-bit range.",
+        "schema": {
+          "type": "string",
+          "pattern": "^-?(0|[1-9][0-9]*)$"
+        }
       },
       "FromTime": {
         "name": "fromTime",

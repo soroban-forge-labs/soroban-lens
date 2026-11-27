@@ -101,6 +101,18 @@ section. Give it a stable name, because `compare.js` matches metrics by name. A
 metric present on only one side is reported as new or removed, never as a
 regression.
 
+## Typed-field insert cost (#156)
+
+```bash
+npm run bench:typed-fields -w @soroban-lens/store
+```
+
+The store benchmark cycles through 1,000 SAC fixture-backed events per trial
+with unique ids, runs three trials for each mode, and saves the contract spec
+before timing. On this Windows checkout (2026-11-25), the median was 1,940 ms
+with indexing disabled and 3,116 ms with it enabled (+60.6%). The extra cost is
+why typed-field indexing is opt-in.
+
 ## Adaptive page size (#14)
 
 ```bash
